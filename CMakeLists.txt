@@ -102,35 +102,37 @@ function(target_add_uc_log_rtt_jlink targetname)
   file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rtt_log)
   file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rtt_log/${targetname})
 
-  if(NOT PARSED_ARGS_JLINK_IP OR PARSED_ARGS_JLINK_IP STREQUAL "")
-    add_custom_target(
-      ${PARSED_ARGS_PREFIX}${targetname}
-      COMMENT "start logging ${targetname}"
-      USES_TERMINAL
-      COMMAND
-        ${uc_log_printer_bin} --trace_port ${PARSED_ARGS_TRACE_PORT} --device
-        ${PARSED_ARGS_TARGET_MPU} --speed ${PARSED_ARGS_SWD_SPEED} --channels
-        ${PARSED_ARGS_CHANNELS} --map_file ${PARSED_ARGS_MAP_FILE} --hex_file
-        ${PARSED_ARGS_HEX_FILE} --string_constants_file
-        ${PARSED_ARGS_STRING_CONSTANTS_MAP_FILE} --build_command
-        "cmake --build . --target=${targetname}" --log_dir
-        ${CMAKE_CURRENT_BINARY_DIR}/rtt_log/${targetname}
-      DEPENDS ${targetname} uc_log_printer ${uc_log_printer_bin})
-  else()
-    add_custom_target(
-      ${PARSED_ARGS_PREFIX}${targetname}
-      COMMENT "start logging ${targetname}"
-      USES_TERMINAL
-      COMMAND
-        ${uc_log_printer_bin} --trace_port ${PARSED_ARGS_TRACE_PORT} --device
-        ${PARSED_ARGS_TARGET_MPU} --speed ${PARSED_ARGS_SWD_SPEED} --channels
-        ${PARSED_ARGS_CHANNELS} --map_file ${PARSED_ARGS_MAP_FILE} --host
-        ${PARSED_ARGS_JLINK_IP} --hex_file ${PARSED_ARGS_HEX_FILE}
-        --string_constants_file ${PARSED_ARGS_STRING_CONSTANTS_MAP_FILE}
-        --build_command "cmake --build . --target=${targetname}" --log_dir
-        ${CMAKE_CURRENT_BINARY_DIR}/rtt_log/${targetname}
-      DEPENDS ${targetname} uc_log_printer ${uc_log_printer_bin})
+  set(command
+      ${uc_log_printer_bin}
+      --trace_port
+      ${PARSED_ARGS_TRACE_PORT}
+      --device
+      ${PARSED_ARGS_TARGET_MPU}
+      --speed
+      ${PARSED_ARGS_SWD_SPEED}
+      --channels
+      ${PARSED_ARGS_CHANNELS}
+      --map_file
+      ${PARSED_ARGS_MAP_FILE}
+      --hex_file
+      ${PARSED_ARGS_HEX_FILE}
+      --string_constants_file
+      "${targetname}_string_constants.json"
+      --build_command
+      "cmake --build . --target=${targetname}"
+      --log_dir
+      ${CMAKE_CURRENT_BINARY_DIR}/rtt_log/${targetname})
+
+  if(PARSED_ARGS_JLINK_IP AND NOT PARSED_ARGS_JLINK_IP STREQUAL "")
+    list(APPEND command --host ${PARSED_ARGS_JLINK_IP})
   endif()
+
+  add_custom_target(
+    ${PARSED_ARGS_PREFIX}${targetname}
+    COMMENT "start logging ${targetname}"
+    USES_TERMINAL
+    COMMAND ${command}
+    DEPENDS ${targetname} uc_log_printer ${uc_log_printer_bin})
 
   target_generate_string_constants(${targetname})
 

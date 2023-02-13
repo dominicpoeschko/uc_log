@@ -206,7 +206,7 @@ int main(int argc, char** argv) {
       [&mapFile]() { return parseMapFileForControllBlockAddress(mapFile); },
       [&hexFile]() { return hexFile; },
       [&stringConstantsFile]() {
-          return remote_fmt::parseStringConstantsMapFromJsonFile(stringConstantsFile);
+          return remote_fmt::parseStringConstantsFromJsonFile(stringConstantsFile);
       },
       [&q](std::size_t channel, std::string_view msg) {
           q.append(uc_log::detail::LogEntry{channel, msg});

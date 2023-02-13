@@ -29,7 +29,7 @@ private:
           JLink&                                              jlink,
           std::function<void(std::size_t, std::string_view)>& printF,
           std::uint32_t                                       channel,
-          std::map<std::uint32_t, std::string>                stringConstantsMap) {
+          std::map<std::uint16_t, std::string>                stringConstantsMap) {
             read(jlink, channel);
             bool gotMessage{};
             if(!buffer.empty()) {
@@ -81,7 +81,7 @@ private:
       std::atomic<bool>&                                        flash_flag,
       std::function<std::uint32_t(void)>                        blockAddressf,
       std::function<std::string(void)>                          hexFileNamef,
-      std::function<std::map<std::uint32_t, std::string>(void)> catalogMapf,
+      std::function<std::map<std::uint16_t, std::string>(void)> catalogMapf,
       std::function<void(std::size_t, std::string_view)>        printf) {
         while(!stoken.stop_requested()) {
             try {
