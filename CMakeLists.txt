@@ -32,8 +32,6 @@ if(NOT CMAKE_CROSSCOMPILING)
                         GIT_TAG master)
   find_or_fetch_package(CLI11 2 GIT_REPOSITORY
                         https://github.com/CLIUtils/CLI11 GIT_TAG main)
-  find_or_fetch_package(nlohmann_json 3.9 GIT_REPOSITORY
-                        https://github.com/nlohmann/json GIT_TAG master)
 
   add_subdirectory(toxic_spokes)
   add_subdirectory(jlink)
@@ -47,7 +45,6 @@ if(NOT CMAKE_CROSSCOMPILING)
     toxic_spokes::toxic_spokes
     uc_log::uc_log
     jlink::jlink
-    nlohmann_json::nlohmann_json
     CLI11::CLI11
     atomic)
   target_add_default_build_options(uc_log_printer PUBLIC)
@@ -59,11 +56,8 @@ endif()
 function(target_add_uc_log_rtt_jlink targetname)
 
   cmake_parse_arguments(
-    PARSE_ARGV
-    1
-    PARSED_ARGS
-    ""
-    "TARGET_MPU;SWD_SPEED;JLINK_IP;CHANNELS;MAP_FILE;PREFIX;TRACE_PORT;HEX_FILE;STRING_CONSTANTS_MAP_FILE"
+    PARSE_ARGV 1 PARSED_ARGS ""
+    "TARGET_MPU;SWD_SPEED;JLINK_IP;CHANNELS;MAP_FILE;PREFIX;TRACE_PORT;HEX_FILE"
     "")
 
   if(PARSED_ARGS_UNPARSED_ARGUMENTS)
@@ -88,11 +82,6 @@ function(target_add_uc_log_rtt_jlink targetname)
 
   if(NOT PARSED_ARGS_HEX_FILE)
     set(PARSED_ARGS_HEX_FILE "${targetname}_flash.hex")
-  endif()
-
-  if(NOT PARSED_ARGS_STRING_CONSTANTS_MAP_FILE)
-    set(PARSED_ARGS_STRING_CONSTANTS_MAP_FILE
-        "${targetname}_string_constants.json")
   endif()
 
   if(NOT PARSED_ARGS_PREFIX)
@@ -143,46 +132,6 @@ function(target_add_uc_log_rtt_jlink targetname)
       DEPENDS ${targetname} uc_log_printer ${uc_log_printer_bin})
   endif()
 
-  get_target_property(bin_dir ${targetname} BINARY_DIR)
+  target_generate_string_constants(${targetname})
 
-  target_link_options(${targetname} PUBLIC
-                      ${bin_dir}/${targetname}_string_constants.obj)
-
-  get_target_property(options_flags ${targetname} COMPILE_OPTIONS)
-  get_target_property(options_flags2 ${targetname} COMPILE_FLAGS)
-
-  string(JOIN " " flags ${CMAKE_CXX_FLAGS} ${options_flags})
-
-  add_custom_command(
-    TARGET ${targetname}
-    PRE_LINK COMMAND_EXPAND_LISTS
-    COMMAND
-      python3 ${uc_log_dir}/tools/generate_string_constants.py --target_name
-      ${targetname} --out_dir ${bin_dir} --source_dir
-      ${CMAKE_CURRENT_SOURCE_DIR} --compiler ${CMAKE_CXX_COMPILER} --objects
-      $<TARGET_OBJECTS:${targetname}> --flags ${flags} DEPENDS
-      ${uc_log_dir}/tools/generate_string_constants.py BYPRODUCS
-      ${bin_dir}/${targetname}_string_constants.cpp
-      ${bin_dir}/${targetname}_string_constants.obj
-      ${bin_dir}/${targetname}_string_constants.json)
-
-  set_property(
-    TARGET ${targetname}
-    APPEND
-    PROPERTY LINK_DEPENDS ${uc_log_dir}/tools/generate_string_constants.py)
-  set_property(
-    TARGET ${targetname}
-    APPEND
-    PROPERTY ADDITIONAL_CLEAN_FILES
-             ${bin_dir}/${targetname}_string_constants.cpp)
-  set_property(
-    TARGET ${targetname}
-    APPEND
-    PROPERTY ADDITIONAL_CLEAN_FILES
-             ${bin_dir}/${targetname}_string_constants.obj)
-  set_property(
-    TARGET ${targetname}
-    APPEND
-    PROPERTY ADDITIONAL_CLEAN_FILES
-             ${bin_dir}/${targetname}_string_constants.json)
 endfunction()

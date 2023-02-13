@@ -1,5 +1,6 @@
 #include "jlink/JLink.hpp"
 
+#include "remote_fmt/catalog_helpers.hpp"
 #include "remote_fmt/parser.hpp"
 #include "uc_log/JLinkRttReader.hpp"
 #include "uc_log/LogLevel.hpp"
@@ -21,7 +22,6 @@
 #include <functional>
 #include <limits>
 #include <mutex>
-#include <nlohmann/json.hpp>
 #include <ranges>
 #include <sys/ioctl.h>
 #include <termios.h>
@@ -42,18 +42,6 @@ static std::uint32_t parseMapFileForControllBlockAddress(std::string const& mapF
         fmt::print(stderr, "read mapfile failed: {}", e.what());
     }
     return 0;
-}
-
-static std::map<std::uint32_t, std::string> parseStringConstantsMapFile(std::string const& file) {
-    try {
-        std::ifstream        f(file);
-        nlohmann::json const data = nlohmann::json::parse(f);
-
-        return data["StringConstants"].get<std::map<std::uint32_t, std::string>>();
-    } catch(std::exception const& e) {
-        fmt::print(stderr, "read format strings failed: {}", e.what());
-        return {};
-    }
 }
 
 static std::string to_iso8601_UTC_string(std::chrono::system_clock::time_point const& value) {
@@ -217,7 +205,9 @@ int main(int argc, char** argv) {
       channels,
       [&mapFile]() { return parseMapFileForControllBlockAddress(mapFile); },
       [&hexFile]() { return hexFile; },
-      [&stringConstantsFile]() { return parseStringConstantsMapFile(stringConstantsFile); },
+      [&stringConstantsFile]() {
+          return remote_fmt::parseStringConstantsMapFromJsonFile(stringConstantsFile);
+      },
       [&q](std::size_t channel, std::string_view msg) {
           q.append(uc_log::detail::LogEntry{channel, msg});
       }};
