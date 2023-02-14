@@ -21,6 +21,7 @@
 #include <fmt/format.h>
 #include <functional>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <ranges>
 #include <sys/ioctl.h>
@@ -111,9 +112,18 @@ int main(int argc, char** argv) {
 
     TCPSender  tcpSender{port};
     std::mutex ioMutex;
-    bool       printTrace{true};
-    bool       printSysTime{true};
-    bool       printFunctionName{false};
+
+    std::map<uc_log::LogLevel, bool> enabledLogs{
+      {uc_log::LogLevel::trace, true},
+      {uc_log::LogLevel::debug, true},
+      { uc_log::LogLevel::info, true},
+      { uc_log::LogLevel::warn, true},
+      {uc_log::LogLevel::error, true},
+      { uc_log::LogLevel::crit, true}
+    };
+
+    bool printSysTime{true};
+    bool printFunctionName{false};
 
     auto tcpPrinter
       = [&](std::chrono::system_clock::time_point, uc_log::detail::LogEntry const& e) {
@@ -150,8 +160,6 @@ int main(int argc, char** argv) {
 
     auto consolePrinter
       = [&](std::chrono::system_clock::time_point recv_time, uc_log::detail::LogEntry const& e) {
-            bool const isTrace = e.logLevel == uc_log::LogLevel::trace;
-
             std::size_t const terminal_width = []() -> std::size_t {
                 struct winsize w {};
                 if(-1 == ::ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) || w.ws_col > 1024) {
@@ -161,14 +169,20 @@ int main(int argc, char** argv) {
             }();
 
             std::lock_guard<std::mutex> lock(ioMutex);
-            if(!isTrace || printTrace) {
+            if(enabledLogs[e.logLevel]) {
+                bool const any_disabled
+                  = std::any_of(enabledLogs.begin(), enabledLogs.end(), [](auto const& v) {
+                        return !v.second;
+                    });
+
                 auto color
-                  = fmt::bg(printTrace ? fmt::terminal_color::green : fmt::terminal_color::red);
-                if(printTrace) {
+                  = fmt::bg(any_disabled ? fmt::terminal_color::red : fmt::terminal_color::green);
+                if(!any_disabled) {
                     color = color | fmt::fg(fmt::terminal_color::black);
                 }
-                fmt::print("{}", fmt::styled("T", color));
+                fmt::print("{}", fmt::styled(" ", color));
                 std::size_t charsPrinted = 1;
+
                 if(printSysTime) {
                     fmt::print(
                       "{}",
@@ -241,23 +255,6 @@ int main(int argc, char** argv) {
             }
         } else {
             switch(c) {
-            case 't':
-                {
-                    if(printTrace) {
-                        std::lock_guard<std::mutex> lock(ioMutex);
-                        printTrace = false;
-                        fmt::print(fmt::bg(fmt::terminal_color::red), "trace printing stopped!");
-                        fmt::print("\n");
-                    } else {
-                        std::lock_guard<std::mutex> lock(ioMutex);
-                        printTrace = true;
-                        fmt::print(
-                          fmt::bg(fmt::terminal_color::green) | fmt::fg(fmt::terminal_color::black),
-                          "trace printing started!");
-                        fmt::print("\n");
-                    }
-                }
-                break;
             case 'v':
                 {
                     if(printSysTime) {
@@ -303,13 +300,14 @@ int main(int argc, char** argv) {
                     std::lock_guard<std::mutex> lock(ioMutex);
                     fmt::print(
                       fmt::bg(fmt::terminal_color::bright_blue),
-                      "Connected: {}, BytesRead: {}, Overflows: {}, UpBuffers: {}, DownBuffers: {}",
+                      "Connected: {}, BytesRead: {}, Overflows: {}, UpBuffers: {}, DownBuffers: "
+                      "{}, EnabledLogs: ",
                       s.isRunning != 0,
                       s.numBytesRead,
                       s.hostOverflowCount,
                       s.numUpBuffers,
                       s.numDownBuffers);
-                    fmt::print("\n");
+                    fmt::print("{}\n", enabledLogs);
                 }
                 break;
             case 'r':
@@ -349,7 +347,8 @@ int main(int argc, char** argv) {
                       fmt::bg(fmt::terminal_color::bright_blue),
                       "f: reflash target, b: build, t: toggle trace, s: status, r: reset target, "
                       "x: reset "
-                      "jlink, v: show sysTime, h: help, q: quit, n: print function name");
+                      "jlink, v: show sysTime, h: help, q: quit, n: print function name, 0-5 "
+                      "toggle log level printing");
                     fmt::print("\n");
                 }
                 break;
@@ -376,6 +375,31 @@ int main(int argc, char** argv) {
             default:
                 {
                 }
+            }
+
+            if(
+              (c >= ('0' + static_cast<int>(uc_log::LogLevel::trace)))
+              && (c <= ('0' + static_cast<int>(uc_log::LogLevel::crit))))
+            {
+                uc_log::LogLevel const levelToToggle = static_cast<uc_log::LogLevel>(c - '0');
+
+                bool const oldState = enabledLogs[levelToToggle];
+
+                auto const color
+                  = oldState
+                    ? fmt::bg(fmt::terminal_color::red)
+                    : (fmt::bg(fmt::terminal_color::green) | fmt::fg(fmt::terminal_color::black));
+
+                std::lock_guard<std::mutex> lock(ioMutex);
+
+                enabledLogs[levelToToggle] = !oldState;
+
+                fmt::print(
+                  "{} {}\n",
+                  levelToToggle,
+                  fmt::styled(
+                    fmt::format("printing {}!", oldState ? "disabled" : "enabled"),
+                    color));
             }
         }
     }
