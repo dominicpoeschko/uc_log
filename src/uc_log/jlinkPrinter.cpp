@@ -345,7 +345,7 @@ int main(int argc, char** argv) {
                     std::lock_guard<std::mutex> lock(ioMutex);
                     fmt::print(
                       fmt::bg(fmt::terminal_color::bright_blue),
-                      "f: reflash target, b: build, t: toggle trace, s: status, r: reset target, "
+                      "f: reflash target, b: build, s: status, r: reset target, "
                       "x: reset "
                       "jlink, v: show sysTime, h: help, q: quit, n: print function name, 0-5 "
                       "toggle log level printing");
