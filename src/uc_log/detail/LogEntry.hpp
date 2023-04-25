@@ -244,7 +244,7 @@ struct fmt::formatter<uc_log::LogLevel> {
     }
 
     template<typename FormatContext>
-    auto format(uc_log::LogLevel const& l, FormatContext& ctx) {
+    auto format(uc_log::LogLevel const& l, FormatContext& ctx) const {
         constexpr std::array<std::pair<fmt::text_style, std::string_view>, 6> LCS{
           {{fmt::fg(fmt::terminal_color::yellow), "trace"},
            {fmt::fg(fmt::terminal_color::green), "debug"},
@@ -286,7 +286,7 @@ struct fmt::formatter<uc_log::detail::LogEntry::Channel> {
     }
 
     template<typename FormatContext>
-    auto format(uc_log::detail::LogEntry::Channel const& c, FormatContext& ctx) {
+    auto format(uc_log::detail::LogEntry::Channel const& c, FormatContext& ctx) const {
         constexpr std::array<fmt::text_style, 6> Colors{
           {fmt::bg(fmt::terminal_color::green) | fmt::fg(fmt::terminal_color::black),
            fmt::fg(fmt::terminal_color::red),
@@ -332,7 +332,6 @@ struct fmt::formatter<uc_log::detail::LogEntry::UcTime> {
         return fmt::format_to(
           ctx.out(),
           "{:0>2%Q}:{:0>2%Q}:{:0>2%Q}.{:0>3%Q}.{:0>3%Q}.{:0>3%Q}",
-          days,
           hours,
           minutes,
           seconds,
@@ -392,7 +391,7 @@ struct fmt::formatter<uc_log::detail::LogEntry> {
     }
 
     template<typename FormatContext>
-    auto format(uc_log::detail::LogEntry const& entry, FormatContext& ctx) {
+    auto format(uc_log::detail::LogEntry const& entry, FormatContext& ctx) const {
         std::string const prefix{[&]() {
             auto out      = fmt::memory_buffer();
             auto appender = fmt::appender(out);
