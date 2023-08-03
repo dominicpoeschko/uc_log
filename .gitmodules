@@ -1,15 +1,15 @@
 [submodule "remote_fmt"]
 	path = remote_fmt
-	url = git@github.com:dominicpoeschko/remote_fmt.git
+	url = https://github.com/dominicpoeschko/remote_fmt.git
 [submodule "cmake_helpers"]
 	path = cmake_helpers
-	url = git@github.com:dominicpoeschko/cmake_helpers.git
+	url = https://github.com/dominicpoeschko/cmake_helpers.git
 [submodule "rtt"]
 	path = rtt
-	url = git@github.com:dominicpoeschko/rtt.git
+	url = https://github.com/dominicpoeschko/rtt.git
 [submodule "jlink"]
 	path = jlink
-	url = git@github.com:dominicpoeschko/jlink.git
+	url = https://github.com/dominicpoeschko/jlink.git
 [submodule "toxic_spokes"]
 	path = toxic_spokes
-	url = git@github.com:dominicpoeschko/toxic_spokes.git
+	url = https://github.com/dominicpoeschko/toxic_spokes.git
