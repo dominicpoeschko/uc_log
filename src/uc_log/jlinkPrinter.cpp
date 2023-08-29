@@ -48,17 +48,21 @@ static std::uint32_t parseMapFileForControllBlockAddress(std::string const& mapF
 static std::string to_iso8601_UTC_string(std::chrono::system_clock::time_point const& value) {
     //1970-01-01T00:00:00.000Z
     auto const t{std::chrono::system_clock::to_time_t(value)};
-    auto const utc          = fmt::gmtime(t);
+    auto const utc     = fmt::gmtime(t);
+    auto const seconds = std::chrono::duration_cast<std::chrono::seconds>(
+      value - std::chrono::time_point_cast<std::chrono::minutes>(value));
     auto const milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
       value - std::chrono::time_point_cast<std::chrono::seconds>(value));
-    return fmt::format("{:%FT%H:%M:%S}.{:03}Z", utc, milliseconds.count());
+    return fmt::format("{:%FT%H:%M}:{:02}.{:03}Z", utc, seconds.count(), milliseconds.count());
 }
 static std::string
 to_time_string_with_milliseconds(std::chrono::system_clock::time_point const& value) {
     //00:00:00.000
+    auto const seconds = std::chrono::duration_cast<std::chrono::seconds>(
+      value - std::chrono::time_point_cast<std::chrono::minutes>(value));
     auto const milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
       value - std::chrono::time_point_cast<std::chrono::seconds>(value));
-    return fmt::format("{:%H:%M:%S}.{:03}", value, milliseconds.count());
+    return fmt::format("{:%H:%M}:{:02}.{:03}", value, seconds.count(), milliseconds.count());
 }
 
 int main(int argc, char** argv) {
@@ -158,47 +162,45 @@ int main(int argc, char** argv) {
             logFile << s;
         };
 
-    auto consolePrinter
-      = [&](std::chrono::system_clock::time_point recv_time, uc_log::detail::LogEntry const& e) {
-            std::size_t const terminal_width = []() -> std::size_t {
-                struct winsize w {};
-                if(-1 == ::ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) || w.ws_col > 1024) {
-                    return 120;
-                }
-                return w.ws_col;
-            }();
+    auto consolePrinter =
+      [&](std::chrono::system_clock::time_point recv_time, uc_log::detail::LogEntry const& e) {
+          std::size_t const terminal_width = []() -> std::size_t {
+              struct winsize w {};
+              if(-1 == ::ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) || w.ws_col > 1024) {
+                  return 120;
+              }
+              return w.ws_col;
+          }();
 
-            std::lock_guard<std::mutex> lock(ioMutex);
-            if(enabledLogs[e.logLevel]) {
-                bool const any_disabled
-                  = std::any_of(enabledLogs.begin(), enabledLogs.end(), [](auto const& v) {
-                        return !v.second;
-                    });
+          std::lock_guard<std::mutex> lock(ioMutex);
+          if(enabledLogs[e.logLevel]) {
+              bool const any_disabled
+                = std::any_of(enabledLogs.begin(), enabledLogs.end(), [](auto const& v) {
+                      return !v.second;
+                  });
 
-                auto color
-                  = fmt::bg(any_disabled ? fmt::terminal_color::red : fmt::terminal_color::green);
-                if(!any_disabled) {
-                    color = color | fmt::fg(fmt::terminal_color::black);
-                }
-                fmt::print("{}", fmt::styled(" ", color));
-                std::size_t charsPrinted = 1;
+              auto color
+                = fmt::bg(any_disabled ? fmt::terminal_color::red : fmt::terminal_color::green);
+              if(!any_disabled) {
+                  color = color | fmt::fg(fmt::terminal_color::black);
+              }
+              fmt::print("{}", fmt::styled(" ", color));
+              std::size_t charsPrinted = 1;
 
-                if(printSysTime) {
-                    fmt::print(
-                      "{}",
-                      fmt::styled(
-                        to_time_string_with_milliseconds(recv_time),
-                        fmt::fg(fmt::terminal_color::cyan)));
-                    charsPrinted += 12;
-                }
-                fmt::print(
-                  fmt::runtime(fmt::format(
-                    "{{:<{}{}}}\n",
-                    terminal_width - charsPrinted,
-                    printFunctionName ? "#" : "")),
-                  e);
-            }
-        };
+              if(printSysTime) {
+                  auto const sysTimeString
+                    = fmt::format("{}", to_time_string_with_milliseconds(recv_time));
+                  charsPrinted += sysTimeString.size();
+                  fmt::print("{}", fmt::styled(sysTimeString, fmt::fg(fmt::terminal_color::cyan)));
+              }
+              fmt::print(
+                fmt::runtime(fmt::format(
+                  "{{:<{}{}}}\n",
+                  terminal_width - charsPrinted,
+                  printFunctionName ? "#" : "")),
+                e);
+          }
+      };
 
     auto printer
       = [&](std::chrono::system_clock::time_point recv_time, uc_log::detail::LogEntry const& e) {
