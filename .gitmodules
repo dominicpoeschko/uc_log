@@ -10,6 +10,3 @@
 [submodule "jlink"]
 	path = jlink
 	url = https://github.com/dominicpoeschko/jlink.git
-[submodule "toxic_spokes"]
-	path = toxic_spokes
-	url = https://github.com/dominicpoeschko/toxic_spokes.git

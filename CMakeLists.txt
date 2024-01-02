@@ -27,13 +27,13 @@ if(NOT CMAKE_CROSSCOMPILING)
   include(cmake_helpers/BuildOptions.cmake)
   include(cmake_helpers/FindOrFetch.cmake)
 
+  find_package(Boost REQUIRED)
   find_package(Threads REQUIRED)
   find_or_fetch_package(fmt 8 GIT_REPOSITORY https://github.com/fmtlib/fmt.git
                         GIT_TAG master)
   find_or_fetch_package(CLI11 2 GIT_REPOSITORY
                         https://github.com/CLIUtils/CLI11 GIT_TAG main)
 
-  add_subdirectory(toxic_spokes)
   add_subdirectory(jlink)
 
   add_executable(uc_log_printer src/uc_log/jlinkPrinter.cpp)
@@ -42,12 +42,13 @@ if(NOT CMAKE_CROSSCOMPILING)
     remote_fmt::parser
     fmt::fmt
     Threads::Threads
-    toxic_spokes::toxic_spokes
     uc_log::uc_log
     jlink::jlink
     CLI11::CLI11
-    atomic)
+    atomic
+    Boost::boost)
   target_add_default_build_options(uc_log_printer PUBLIC)
+  target_link_options(uc_log_printer PRIVATE -Wno-stringop-overflow)
 else()
   include(cmake_helpers/HostBuild.cmake)
   configure_host_build(uc_log_printer)
@@ -135,5 +136,7 @@ function(target_add_uc_log_rtt_jlink targetname)
     DEPENDS ${targetname} uc_log_printer ${uc_log_printer_bin})
 
   target_generate_string_constants(${targetname})
+
+  add_dependencies(${targetname} uc_log_printer)
 
 endfunction()
