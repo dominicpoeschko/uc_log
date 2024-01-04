@@ -226,6 +226,11 @@ int main(int argc, char** argv) {
       },
       [&q](std::size_t channel, std::string_view msg) {
           q.append(uc_log::detail::LogEntry{channel, msg});
+      },
+      [&ioMutex](std::string_view msg) {
+          std::lock_guard<std::mutex> lock(ioMutex);
+          fmt::print(fmt::bg(fmt::terminal_color::green), "{}", msg);
+          fmt::print("\n");
       }};
 
     {
@@ -241,18 +246,30 @@ int main(int argc, char** argv) {
         }
     }
 
+    auto doBuild = [&]() {
+        fmt::print(fmt::bg(fmt::terminal_color::green), "build");
+        fmt::print("\n");
+        int const ret = std::system(buildCommand.c_str());
+        fmt::print(
+          fmt::bg(ret == 0 ? fmt::terminal_color::green : fmt::terminal_color::red),
+          "build {}",
+          ret == 0 ? "succeeded" : "failed");
+        fmt::print("\n");
+        return ret == 0;
+    };
+
     while(!quit) {
         char       c;
         auto const status = ::read(STDIN_FILENO, std::addressof(c), 1);
         if(status != 1) {
             if(quit) {
                 std::lock_guard<std::mutex> lock(ioMutex);
-                fmt::print(fmt::bg(fmt::terminal_color::bright_blue), "interrupt!");
+                fmt::print(fmt::bg(fmt::terminal_color::bright_blue), "interrupt");
                 fmt::print("\n");
             } else {
                 quit = true;
                 std::lock_guard<std::mutex> lock(ioMutex);
-                fmt::print(fmt::bg(fmt::terminal_color::red), "read error!");
+                fmt::print(fmt::bg(fmt::terminal_color::red), "read error");
                 fmt::print("\n");
             }
         } else {
@@ -262,14 +279,14 @@ int main(int argc, char** argv) {
                     if(printSysTime) {
                         std::lock_guard<std::mutex> lock(ioMutex);
                         printSysTime = false;
-                        fmt::print(fmt::bg(fmt::terminal_color::red), "sysTime printing stopped!");
+                        fmt::print(fmt::bg(fmt::terminal_color::red), "sysTime printing stopped");
                         fmt::print("\n");
                     } else {
                         std::lock_guard<std::mutex> lock(ioMutex);
                         printSysTime = true;
                         fmt::print(
                           fmt::bg(fmt::terminal_color::green) | fmt::fg(fmt::terminal_color::black),
-                          "sysTime printing started!");
+                          "sysTime printing started");
                         fmt::print("\n");
                     }
                 }
@@ -282,14 +299,14 @@ int main(int argc, char** argv) {
                         printFunctionName = false;
                         fmt::print(
                           fmt::bg(fmt::terminal_color::red),
-                          "functionName printing stopped!");
+                          "functionName printing stopped");
                         fmt::print("\n");
                     } else {
                         std::lock_guard<std::mutex> lock(ioMutex);
                         printFunctionName = true;
                         fmt::print(
                           fmt::bg(fmt::terminal_color::green) | fmt::fg(fmt::terminal_color::black),
-                          "functionName printing started!");
+                          "functionName printing started");
                         fmt::print("\n");
                     }
                 }
@@ -303,7 +320,7 @@ int main(int argc, char** argv) {
                     fmt::print(
                       fmt::bg(fmt::terminal_color::bright_blue),
                       "Connected: {}, BytesRead: {}, Overflows: {}, UpBuffers: {}, DownBuffers: "
-                      "{}, EnabledLogs: ",
+                      "{},\nEnabledLogs: ",
                       s.isRunning != 0,
                       s.numBytesRead,
                       s.hostOverflowCount,
@@ -314,11 +331,6 @@ int main(int argc, char** argv) {
                 break;
             case 'r':
                 {
-                    {
-                        std::lock_guard<std::mutex> lock(ioMutex);
-                        fmt::print(fmt::bg(fmt::terminal_color::red), "resetting target!");
-                        fmt::print("\n");
-                    }
                     rttReader.resetTarget();
                 }
                 break;
@@ -326,7 +338,7 @@ int main(int argc, char** argv) {
                 {
                     {
                         std::lock_guard<std::mutex> lock(ioMutex);
-                        fmt::print(fmt::bg(fmt::terminal_color::red), "resetting JLink!");
+                        fmt::print(fmt::bg(fmt::terminal_color::red), "resetting JLink");
                         fmt::print("\n");
                     }
                     rttReader.resetJLink();
@@ -334,12 +346,20 @@ int main(int argc, char** argv) {
                 break;
             case 'f':
                 {
+                    bool buildOk = false;
                     {
                         std::lock_guard<std::mutex> lock(ioMutex);
-                        fmt::print(fmt::bg(fmt::terminal_color::red), "reflashing target!");
-                        fmt::print("\n");
+                        buildOk = doBuild();
+                        if(!buildOk) {
+                            fmt::print(
+                              fmt::bg(fmt::terminal_color::red),
+                              "not flashing target build failed");
+                            fmt::print("\n");
+                        }
                     }
-                    rttReader.flash();
+                    if(buildOk) {
+                        rttReader.flash();
+                    }
                 }
                 break;
             case 'h':
@@ -349,7 +369,7 @@ int main(int argc, char** argv) {
                       fmt::bg(fmt::terminal_color::bright_blue),
                       "f: reflash target, b: build, s: status, r: reset target, "
                       "x: reset "
-                      "jlink, v: show sysTime, h: help, q: quit, n: print function name, 0-5 "
+                      "jlink, v: show sysTime, h: help, q: quit, n: print function name, 0-5: "
                       "toggle log level printing");
                     fmt::print("\n");
                 }
@@ -357,14 +377,7 @@ int main(int argc, char** argv) {
             case 'b':
                 {
                     std::lock_guard<std::mutex> lock(ioMutex);
-                    fmt::print(fmt::bg(fmt::terminal_color::green), "start build");
-                    fmt::print("\n");
-                    int const ret = std::system(buildCommand.c_str());
-                    fmt::print(
-                      fmt::bg(ret == 0 ? fmt::terminal_color::green : fmt::terminal_color::red),
-                      "build {}",
-                      ret == 0 ? "succeeded" : "failed");
-                    fmt::print("\n");
+                    doBuild();
                 }
                 break;
 
@@ -400,14 +413,14 @@ int main(int argc, char** argv) {
                   "{} {}\n",
                   levelToToggle,
                   fmt::styled(
-                    fmt::format("printing {}!", oldState ? "disabled" : "enabled"),
+                    fmt::format("printing {}", oldState ? "disabled" : "enabled"),
                     color));
             }
         }
     }
     {
         std::lock_guard<std::mutex> lock(ioMutex);
-        fmt::print(fmt::bg(fmt::terminal_color::bright_blue), "quitting!");
+        fmt::print(fmt::bg(fmt::terminal_color::bright_blue), "quitting");
         fmt::print("\n");
     }
     return 0;

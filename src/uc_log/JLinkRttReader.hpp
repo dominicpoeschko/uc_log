@@ -82,7 +82,8 @@ private:
       std::function<std::uint32_t(void)>                        blockAddressf,
       std::function<std::string(void)>                          hexFileNamef,
       std::function<std::map<std::uint16_t, std::string>(void)> catalogMapf,
-      std::function<void(std::size_t, std::string_view)>        printf) {
+      std::function<void(std::size_t, std::string_view)>        entryPrintf,
+      std::function<void(std::string_view)>                     messagef) {
         while(!stoken.stop_requested()) {
             try {
                 jlink_reset_flag = false;
@@ -93,15 +94,25 @@ private:
                     return JLink{device, speed, host};
                 }();
 
+                bool restart = false;
+
                 if(flash_flag) {
+                    messagef("flashing target");
                     jlink.flash(hexFileNamef());
+                    messagef("flashing target succeeded");
                     flash_flag        = false;
                     target_reset_flag = true;
-                    continue;
+                    restart           = true;
                 }
                 if(target_reset_flag) {
+                    messagef("reseting target");
                     jlink.resetTarget();
                     target_reset_flag = false;
+                    messagef("reseting target succeeded");
+                    restart = true;
+                }
+
+                if(restart) {
                     continue;
                 }
 
@@ -116,7 +127,7 @@ private:
                       && !flash_flag && !(Clock::now() > lastMessage + std::chrono::seconds{5}))
                 {
                     for(std::size_t id{}; auto& channel : channels) {
-                        if(channel.run(stoken, jlink, printf, id++, stringConstantsMap)) {
+                        if(channel.run(stoken, jlink, entryPrintf, id++, stringConstantsMap)) {
                             lastMessage = Clock::now();
                         }
                     }
@@ -145,7 +156,12 @@ private:
     std::jthread               thread;
 
 public:
-    template<typename BlockAddressF, typename PrintF, typename HexFileNameF, typename CatalogMapF>
+    template<
+      typename BlockAddressF,
+      typename EntryPrintF,
+      typename HexFileNameF,
+      typename CatalogMapF,
+      typename MessageF>
     JLinkRttReader(
       std::string     host,
       std::string     device,
@@ -154,7 +170,8 @@ public:
       BlockAddressF&& blockAddressf,
       HexFileNameF&&  hexFileNamef,
       CatalogMapF&&   catalogMapf,
-      PrintF&&        printf)
+      EntryPrintF&&   entryPrintf,
+      MessageF&&      messagef)
       : thread{
         &JLinkRttReader::run,
         host,
@@ -168,7 +185,8 @@ public:
         std::forward<BlockAddressF>(blockAddressf),
         std::forward<HexFileNameF>(hexFileNamef),
         std::forward<CatalogMapF>(catalogMapf),
-        std::forward<PrintF>(printf)} {}
+        std::forward<EntryPrintF>(entryPrintf),
+        std::forward<MessageF>(messagef)} {}
 
     JLink::Status getStatus() { return status; }
     void          resetJLink() { jlink_reset_flag = true; }
