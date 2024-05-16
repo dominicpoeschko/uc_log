@@ -180,6 +180,46 @@ struct FTXUIGui {
 
     void errorMessage(std::string_view msg) { std::ignore = msg; }
 
+    ftxui::Element toElement(uc_log::detail::LogEntry::Channel const& c) {
+        static std::array<ftxui::Color, 6> const Colors{
+          {ftxui::Color::Black,
+           ftxui::Color::Red,
+           ftxui::Color::BlueLight,
+           ftxui::Color::Magenta,
+           ftxui::Color::Cyan,
+           ftxui::Color::Yellow}
+        };
+
+        return ftxui::text(fmt::format("{}", c.channel))
+             | ftxui::color(Colors[c.channel % Colors.size()])
+             | ((c.channel == 0) ? ftxui::bgcolor(ftxui::Color::Green) : ftxui::nothing);
+    }
+
+    ftxui::Element toElement(uc_log::LogLevel const& l) {
+        static std::array<std::pair<ftxui::Color, std::string_view>, 6> const LCS{
+          {{ftxui::Color::Yellow, "trace"},
+           {ftxui::Color::Green, "debug"},
+           {ftxui::Color::BlueLight, "info"},
+           {ftxui::Color::Magenta, "warn"},
+           {ftxui::Color::Red, "error"},
+           {ftxui::Color::White, "crit"}}
+        };
+        static std::size_t const MaxLength
+          = std::max_element(LCS.begin(), LCS.end(), [](auto rhs, auto lhs) {
+                return rhs.second.size() < lhs.second.size();
+            })->second.size();
+
+        auto index = static_cast<std::size_t>(l);
+
+        if(index >= LCS.size()) {
+            index = 0;
+        }
+
+        return ftxui::text(std::string{LCS[index].second})
+             | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, MaxLength) | ftxui::color(LCS[index].first)
+             | ((index == 5) ? ftxui::bgcolor(ftxui::Color::RedLight) : ftxui::nothing);
+    }
+
     template<typename Reader>
     int run(Reader& rttReader, std::string const& buildCommand) {
         std::ignore = rttReader;
@@ -187,7 +227,22 @@ struct FTXUIGui {
 
         auto component = ftxuiDetail::Scroller(
           [&]() -> std::vector<GuiLogEntry> const& { return logEntrys; },
-          [](auto const& e) { return ftxui::text(e.logEntry.logMsg); });
+          [&](auto const& e) {
+              return ftxui::hbox({
+                ftxui::text(detail::to_time_string_with_milliseconds(e.recv_time))
+                  | ftxui::color(ftxui::Color::Cyan),
+                toElement(e.logEntry.channel),
+                ftxui::text(fmt::format("{}", e.logEntry.ucTime))
+                  | ftxui::color(ftxui::Color::Magenta),
+                ftxui::text(" "),
+                toElement(e.logEntry.logLevel),
+                ftxui::text(fmt::format(": {}", e.logEntry.logMsg))
+                  | ftxui::color(ftxui::Color::Default) | ftxui::flex,
+                ftxui::text(fmt::format("({}:{})", e.logEntry.fileName, e.logEntry.line))
+                  | ftxui::color(ftxui::Color::BlueLight),
+                toElement(e.logEntry.channel),
+              });
+          });
 
         auto screen = ftxui::ScreenInteractive::Fullscreen();
 
