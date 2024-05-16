@@ -29,13 +29,14 @@ private:
           JLink&                                              jlink,
           std::function<void(std::size_t, std::string_view)>& printF,
           std::uint32_t                                       channel,
-          std::map<std::uint16_t, std::string>                stringConstantsMap) {
+          std::map<std::uint16_t, std::string>                stringConstantsMap,
+          std::function<void(std::string_view)>               errorMessagef) {
             read(jlink, channel);
             bool gotMessage{};
             if(!buffer.empty()) {
                 while(!stoken.stop_requested()) {
                     auto const [os, subrange, unparsed_bytes]
-                      = remote_fmt::parse(buffer, stringConstantsMap);
+                      = remote_fmt::parse(buffer, stringConstantsMap, errorMessagef);
                     buffer.erase(
                       buffer.begin(),
                       std::next(
@@ -43,12 +44,11 @@ private:
                         static_cast<std::make_signed_t<std::size_t>>(
                           buffer.size() - subrange.size())));
                     if(unparsed_bytes != 0) {
-                        fmt::print(
-                          stderr,
-                          "channel {} corrupted data removed {} byte{}\n",
+                        errorMessagef(fmt::format(
+                          "channel {} corrupted data removed {} byte{}",
                           channel,
                           unparsed_bytes,
-                          unparsed_bytes == 1 ? "" : "s");
+                          unparsed_bytes == 1 ? "" : "s"));
                     }
                     if(os) {
                         lastValidRead = Clock::now();
@@ -61,7 +61,7 @@ private:
                 if(Clock::now() > lastValidRead + std::chrono::milliseconds{100} && !buffer.empty())
                 {
                     buffer.erase(buffer.begin());
-                    fmt::print(stderr, "channel {} timeout removed 1 byte\n", channel);
+                    errorMessagef(fmt::format("channel {} timeout removed 1 byte", channel));
                 }
             } else {
                 lastValidRead = Clock::now();
@@ -83,7 +83,8 @@ private:
       std::function<std::string(void)>                          hexFileNamef,
       std::function<std::map<std::uint16_t, std::string>(void)> catalogMapf,
       std::function<void(std::size_t, std::string_view)>        entryPrintf,
-      std::function<void(std::string_view)>                     messagef) {
+      std::function<void(std::string_view)>                     messagef,
+      std::function<void(std::string_view)>                     errorMessagef) {
         while(!stoken.stop_requested()) {
             try {
                 jlink_reset_flag = false;
@@ -127,7 +128,14 @@ private:
                       && !flash_flag && !(Clock::now() > lastMessage + std::chrono::seconds{5}))
                 {
                     for(std::size_t id{}; auto& channel : channels) {
-                        if(channel.run(stoken, jlink, entryPrintf, id++, stringConstantsMap)) {
+                        if(channel.run(
+                             stoken,
+                             jlink,
+                             entryPrintf,
+                             id++,
+                             stringConstantsMap,
+                             errorMessagef))
+                        {
                             lastMessage = Clock::now();
                         }
                     }
@@ -143,7 +151,7 @@ private:
                     std::this_thread::sleep_for(std::chrono::milliseconds{1});
                 }
             } catch(std::exception const& e) {
-                fmt::print(stderr, "catched {}\n", e.what());
+                errorMessagef(fmt::format("catched {}", +e.what()));
                 std::this_thread::sleep_for(std::chrono::milliseconds{1000});
             }
         }
@@ -161,7 +169,8 @@ public:
       typename EntryPrintF,
       typename HexFileNameF,
       typename CatalogMapF,
-      typename MessageF>
+      typename MessageF,
+      typename ErrorMessageF>
     JLinkRttReader(
       std::string     host,
       std::string     device,
@@ -171,7 +180,8 @@ public:
       HexFileNameF&&  hexFileNamef,
       CatalogMapF&&   catalogMapf,
       EntryPrintF&&   entryPrintf,
-      MessageF&&      messagef)
+      MessageF&&      messagef,
+      ErrorMessageF&& errorMessagef)
       : thread{
         &JLinkRttReader::run,
         host,
@@ -186,7 +196,8 @@ public:
         std::forward<HexFileNameF>(hexFileNamef),
         std::forward<CatalogMapF>(catalogMapf),
         std::forward<EntryPrintF>(entryPrintf),
-        std::forward<MessageF>(messagef)} {}
+        std::forward<MessageF>(messagef),
+        std::forward<ErrorMessageF>(errorMessagef)} {}
 
     JLink::Status getStatus() { return status; }
     void          resetJLink() { jlink_reset_flag = true; }

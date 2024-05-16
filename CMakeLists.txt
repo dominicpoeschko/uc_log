@@ -29,10 +29,14 @@ if(NOT CMAKE_CROSSCOMPILING)
 
   find_package(Boost REQUIRED)
   find_package(Threads REQUIRED)
+
   find_or_fetch_package(fmt 8 GIT_REPOSITORY https://github.com/fmtlib/fmt.git
                         GIT_TAG master)
   find_or_fetch_package(CLI11 2 GIT_REPOSITORY
                         https://github.com/CLIUtils/CLI11 GIT_TAG main)
+
+  find_or_fetch_package(ftxui 5 GIT_REPOSITORY
+                        https://github.com/ArthurSonzogni/ftxui GIT_TAG main)
 
   add_subdirectory(jlink)
 
@@ -46,7 +50,10 @@ if(NOT CMAKE_CROSSCOMPILING)
     jlink::jlink
     CLI11::CLI11
     atomic
-    Boost::boost)
+    Boost::boost
+    ftxui::screen
+    ftxui::dom
+    ftxui::component)
   target_add_default_build_options(uc_log_printer PUBLIC)
   target_link_options(uc_log_printer PRIVATE -Wno-stringop-overflow)
 else()

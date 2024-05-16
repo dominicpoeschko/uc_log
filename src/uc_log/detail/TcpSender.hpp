@@ -10,19 +10,20 @@
 #include <vector>
 
 struct TCPSender {
-    boost::asio::io_context        ioc;
-    boost::asio::ip::tcp::acceptor acceptor;
-
     struct Session : std::enable_shared_from_this<Session> {
-        boost::asio::ip::tcp::socket        socket;
-        std::mutex                          mutex;
-        bool                                sending = false;
-        std::vector<std::vector<std::byte>> messages;
-        std::vector<std::byte>              recvData;
+        std::function<void(std::string_view)> errorMessagef;
+        boost::asio::ip::tcp::socket          socket;
+        std::mutex                            mutex;
+        bool                                  sending = false;
+        std::vector<std::vector<std::byte>>   messages;
+        std::vector<std::byte>                recvData;
 
-        explicit Session(boost::asio::ip::tcp::socket socket_) : socket{std::move(socket_)} {}
+        template<typename ErrorMessageF>
+        explicit Session(boost::asio::ip::tcp::socket socket_, ErrorMessageF&& errorMessagef_)
+          : errorMessagef{std::forward<ErrorMessageF>(errorMessagef_)}
+          , socket{std::move(socket_)} {}
 
-        void send(std::span<const std::byte> data) {
+        void send(std::span<std::byte const> data) {
             std::vector<std::byte> vec;
             vec.resize(data.size());
             std::copy(data.begin(), data.end(), vec.begin());
@@ -46,7 +47,7 @@ struct TCPSender {
                   if(!ec) {
                       self->async_read_some();
                   } else if(ec != boost::asio::error::eof) {
-                      fmt::print(stderr, "client recv error {}\n", ec.message());
+                      self->errorMessagef(fmt::format("client recv error {}", ec.message()));
                   }
               });
         }
@@ -70,18 +71,22 @@ struct TCPSender {
                       self->messages.erase(self->messages.begin());
                       self->write_rdy();
                   } else if(ec != boost::asio::error::eof) {
-                      fmt::print("client send error {}\n", ec.message());
+                      self->errorMessagef(fmt::format("client send error {}", ec.message()));
                   }
               });
         }
     };
 
-    std::vector<std::weak_ptr<Session>> clients;
-    std::mutex                          mutex;
-    std::jthread                        thread{std::bind_front(&TCPSender::runner, this)};
+    std::function<void(std::string_view)> errorMessagef;
+    boost::asio::io_context               ioc;
+    boost::asio::ip::tcp::acceptor        acceptor;
+    std::vector<std::weak_ptr<Session>>   clients;
+    std::mutex                            mutex;
+    std::jthread                          thread{std::bind_front(&TCPSender::runner, this)};
 
-    explicit TCPSender(std::uint16_t port)
-      : acceptor{
+    template<typename ErrorMessageF>
+    explicit TCPSender(std::uint16_t port, ErrorMessageF && errorMessagef_)
+      : errorMessagef{std::forward<ErrorMessageF>(errorMessagef_)}, acceptor{
         ioc,
         {boost::asio::ip::tcp::v4(), port}
     } {
@@ -97,7 +102,7 @@ struct TCPSender {
                     sp->send(std::as_bytes(std::span{msg}));
                 }
             } catch(std::exception const& e) {
-                fmt::print(stderr, "Exception: {}\n", e.what());
+                errorMessagef(fmt::format("catched: {}", e.what()));
             }
         }
         clean();
@@ -123,13 +128,13 @@ private:
         acceptor.async_accept(
           [this](boost::system::error_code ec, boost::asio::ip::tcp::socket socket) {
               if(!ec) {
-                  auto sp = std::make_shared<Session>(std::move(socket));
+                  auto sp = std::make_shared<Session>(std::move(socket), errorMessagef);
                   clients.push_back(sp);
                   sp->run();
-                  async_accept_one();
               } else {
-                  fmt::print(stderr, "asio error {}\n", ec.message());
+                  errorMessagef(fmt::format("asio error {}", ec.message()));
               }
+              async_accept_one();
           });
     }
 };

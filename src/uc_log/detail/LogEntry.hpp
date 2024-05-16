@@ -20,6 +20,16 @@
 #include <utility>
 
 namespace uc_log { namespace detail {
+
+    static std::string
+    to_time_string_with_milliseconds(std::chrono::system_clock::time_point const& value) {
+        //00:00:00.000
+        auto const seconds = std::chrono::duration_cast<std::chrono::seconds>(
+          value - std::chrono::time_point_cast<std::chrono::minutes>(value));
+        auto const milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
+          value - std::chrono::time_point_cast<std::chrono::seconds>(value));
+        return fmt::format("{:%H:%M}:{:02}.{:03}", value, seconds.count(), milliseconds.count());
+    }
     struct LogEntry {
         struct Channel {
             std::size_t channel;
