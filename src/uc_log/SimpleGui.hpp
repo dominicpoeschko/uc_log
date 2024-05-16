@@ -93,19 +93,20 @@ struct SimpleGui {
 
     template<typename Reader>
     int run(Reader& rttReader, std::string const& buildCommand) {
-        struct termios oldIos {};
-        if(::tcgetattr(STDIN_FILENO, &oldIos) < 0) {
-            std::lock_guard<std::mutex> lock(ioMutex);
-            fmt::print(stderr, "Error calling tcgetattr: {}\n", ::strerror(errno));
-            return 1;
+        {
+            struct termios oldIos {};
+            if(::tcgetattr(STDIN_FILENO, &oldIos) < 0) {
+                std::lock_guard<std::mutex> lock(ioMutex);
+                fmt::print(stderr, "Error calling tcgetattr: {}\n", ::strerror(errno));
+                return 1;
+            }
+            oldIos.c_lflag &= ~static_cast<decltype(oldIos.c_lflag)>(ICANON | ECHO);
+            if(::tcsetattr(STDIN_FILENO, TCSANOW, &oldIos) < 0) {
+                std::lock_guard<std::mutex> lock(ioMutex);
+                fmt::print(stderr, "Error calling tcsetattr: {}\n", ::strerror(errno));
+                return 1;
+            }
         }
-        oldIos.c_lflag &= ~static_cast<decltype(oldIos.c_lflag)>(ICANON | ECHO);
-        if(::tcsetattr(STDIN_FILENO, TCSANOW, &oldIos) < 0) {
-            std::lock_guard<std::mutex> lock(ioMutex);
-            fmt::print(stderr, "Error calling tcsetattr: {}\n", ::strerror(errno));
-            return 1;
-        }
-
         auto doBuild = [&]() {
             fmt::print(fmt::bg(fmt::terminal_color::green), "build");
             fmt::print("\n");
@@ -142,7 +143,10 @@ struct SimpleGui {
                     fmt::print("\n");
                 } else {
                     std::lock_guard<std::mutex> lock(ioMutex);
-                    fmt::print(fmt::bg(fmt::terminal_color::red), "read error");
+                    fmt::print(
+                      fmt::bg(fmt::terminal_color::red),
+                      "read error {}",
+                      std::strerror(errno));
                     fmt::print("\n");
                 }
             } else {
