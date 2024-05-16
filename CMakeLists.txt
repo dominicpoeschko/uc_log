@@ -65,7 +65,7 @@ function(target_add_uc_log_rtt_jlink targetname)
 
   cmake_parse_arguments(
     PARSE_ARGV 1 PARSED_ARGS ""
-    "TARGET_MPU;SWD_SPEED;JLINK_IP;CHANNELS;MAP_FILE;PREFIX;TRACE_PORT;HEX_FILE"
+    "TARGET_MPU;SWD_SPEED;JLINK_IP;CHANNELS;MAP_FILE;PREFIX;TRACE_PORT;HEX_FILE;GUI_TYPE"
     "")
 
   if(PARSED_ARGS_UNPARSED_ARGUMENTS)
@@ -100,6 +100,10 @@ function(target_add_uc_log_rtt_jlink targetname)
     set(PARSED_ARGS_TRACE_PORT 34565)
   endif()
 
+  if(NOT PARSED_ARGS_GUI_TYPE)
+    set(PARSED_ARGS_GUI_TYPE "simple")
+  endif()
+
   get_target_property(build_dir uc_log_printer BINARY_DIR)
 
   if(NOT CMAKE_CROSSCOMPILING)
@@ -129,7 +133,9 @@ function(target_add_uc_log_rtt_jlink targetname)
       --build_command
       "cmake --build . --target=${targetname}"
       --log_dir
-      ${CMAKE_CURRENT_BINARY_DIR}/rtt_log/${targetname})
+      ${CMAKE_CURRENT_BINARY_DIR}/rtt_log/${targetname}
+      --gui_type
+      ${PARSED_ARGS_GUI_TYPE})
 
   if(PARSED_ARGS_JLINK_IP AND NOT PARSED_ARGS_JLINK_IP STREQUAL "")
     list(APPEND command --host ${PARSED_ARGS_JLINK_IP})
