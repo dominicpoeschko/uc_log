@@ -27,7 +27,7 @@ if(NOT CMAKE_CROSSCOMPILING)
   include(cmake_helpers/BuildOptions.cmake)
   include(cmake_helpers/FindOrFetch.cmake)
 
-  find_package(Boost REQUIRED)
+  find_package(Boost CONFIG REQUIRED)
   find_package(Threads REQUIRED)
 
   find_or_fetch_package(fmt 8 GIT_REPOSITORY https://github.com/fmtlib/fmt.git
