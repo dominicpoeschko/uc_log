@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.18)
 
+if(POLICY CMP0174)
+    cmake_policy(SET CMP0174 NEW)
+endif()
+
 set(uc_log_dir
     ${CMAKE_CURRENT_LIST_DIR}
     CACHE INTERNAL "")
@@ -30,9 +34,9 @@ if(NOT CMAKE_CROSSCOMPILING)
   find_package(Boost CONFIG REQUIRED)
   find_package(Threads REQUIRED)
 
-  find_or_fetch_package(fmt 8 GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+  find_or_fetch_package(fmt 11.1 GIT_REPOSITORY https://github.com/fmtlib/fmt.git
                         GIT_TAG master)
-  find_or_fetch_package(CLI11 2 GIT_REPOSITORY
+  find_or_fetch_package(CLI11 2.5 GIT_REPOSITORY
                         https://github.com/CLIUtils/CLI11 GIT_TAG main)
 
   find_or_fetch_package(ftxui 5 GIT_REPOSITORY
