@@ -27,7 +27,8 @@ namespace uc_log { namespace FTXUIGui {
         ScrollerBase(ContainerGetter&& c, Transform&& tf) : containerGetter_{c}, transform_{tf} {}
 
     private:
-        ftxui::Element OnRender() {
+        ftxui::Element OnRender() final {
+
             auto const& container = containerGetter_();
             size_                 = container.size();
             int const ySpace      = (box_.y_max - box_.y_min) + 1;
