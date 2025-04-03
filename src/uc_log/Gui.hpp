@@ -14,13 +14,13 @@ struct Gui {
         return types;
     }
 
-    std::variant<SimpleGui, FTXUIGui> impl{};
+    std::variant<SimpleGui, FTXUIGui::FTXUIGui> impl{};
 
     explicit Gui(std::string_view guiType) {
         if(guiType == "simple") {
             impl.emplace<SimpleGui>();
         } else if(guiType == "ftxui") {
-            impl.emplace<FTXUIGui>();
+            impl.emplace<FTXUIGui::FTXUIGui>();
         } else {
             fmt::print(stderr, "bad gui type\n");
             std::exit(1);

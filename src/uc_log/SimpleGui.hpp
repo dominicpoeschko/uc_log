@@ -31,7 +31,7 @@ struct SimpleGui {
 
     ) {
         std::size_t const terminal_width = []() -> std::size_t {
-            struct winsize w {};
+            struct winsize w{};
             if(-1 == ::ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) || w.ws_col > 1024) {
                 return 120;
             }
@@ -94,7 +94,7 @@ struct SimpleGui {
     template<typename Reader>
     int run(Reader& rttReader, std::string const& buildCommand) {
         {
-            struct termios oldIos {};
+            struct termios oldIos{};
             if(::tcgetattr(STDIN_FILENO, &oldIos) < 0) {
                 std::lock_guard<std::mutex> lock(ioMutex);
                 fmt::print(stderr, "Error calling tcgetattr: {}\n", ::strerror(errno));
@@ -121,7 +121,7 @@ struct SimpleGui {
 
         static std::atomic<bool> gotSignal{};
         {
-            struct sigaction sa {};
+            struct sigaction sa{};
             sa.sa_handler = [](int) { gotSignal = true; };
             ::sigemptyset(&sa.sa_mask);
             if(::sigaction(SIGINT, &sa, nullptr) == -1) {
@@ -283,9 +283,8 @@ struct SimpleGui {
                     bool const oldState = enabledLogs[levelToToggle];
 
                     auto const color = oldState ? fmt::bg(fmt::terminal_color::red)
-                                                : (
-                                                  fmt::bg(fmt::terminal_color::green)
-                                                  | fmt::fg(fmt::terminal_color::black));
+                                                : (fmt::bg(fmt::terminal_color::green)
+                                                   | fmt::fg(fmt::terminal_color::black));
 
                     std::lock_guard<std::mutex> lock(ioMutex);
 
