@@ -40,7 +40,7 @@ if(NOT CMAKE_CROSSCOMPILING)
                         https://github.com/CLIUtils/CLI11 GIT_TAG main)
 
   find_or_fetch_package(ftxui 5 GIT_REPOSITORY
-                        https://github.com/ArthurSonzogni/ftxui GIT_TAG main)
+                        https://github.com/ArthurSonzogni/ftxui GIT_TAG v6.0.2)
 
   add_subdirectory(jlink)
 
