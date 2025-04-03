@@ -16,9 +16,7 @@
 #include <string>
 #include <string_view>
 
-namespace uc_log {
-
-namespace ftxuiDetail {
+namespace uc_log { namespace FTXUIGui {
 
     template<typename ContainerGetter, typename Transform>
     class ScrollerBase : public ftxui::ComponentBase {
@@ -30,6 +28,7 @@ namespace ftxuiDetail {
 
     private:
         ftxui::Element OnRender() final {
+
             auto const& container = containerGetter_();
             size_                 = container.size();
             int const ySpace      = (box_.y_max - box_.y_min) + 1;
@@ -58,6 +57,7 @@ namespace ftxuiDetail {
                 }
             }
             ftxui::Elements elements;
+            elements.reserve(static_cast<std::size_t>(ySpace + 2));
 
             elements.push_back(
               ftxui::text("")
@@ -71,9 +71,9 @@ namespace ftxuiDetail {
                     auto const selectedStyle
                       = Focused() && !stick ? ftxui::inverted : ftxui::nothing;
                     auto const selectedFocus = Focused() ? ftxui::focus : ftxui::select;
-                    elements.push_back(transform_(e) | selectedStyle | selectedFocus);
+                    elements.push_back(transform_(*e) | selectedStyle | selectedFocus);
                 } else {
-                    elements.push_back(transform_(e));
+                    elements.push_back(transform_(*e));
                 }
 
                 ++x;
@@ -150,43 +150,13 @@ namespace ftxuiDetail {
           std::forward<Transform>(tf));
     }
 
-}   // namespace ftxuiDetail
-
-struct FTXUIGui {
-    struct GuiLogEntry {
-        std::chrono::system_clock::time_point recv_time;
-        uc_log::detail::LogEntry              logEntry;
-    };
-
-    std::mutex mutex;
-
-    std::function<ftxui::ScreenInteractive&(void)> getScreen;
-
-    std::vector<GuiLogEntry> logEntrys;
-
-    void add(std::chrono::system_clock::time_point recv_time, uc_log::detail::LogEntry const& e) {
-        {
-            std::lock_guard<std::mutex> lock{mutex};
-            logEntrys.emplace_back(recv_time, e);
-        }
-        if(getScreen) {
-            getScreen().PostEvent(ftxui::Event::Custom);
-        }
-    }
-
-    void fatalError(std::string_view msg) { std::ignore = msg; }
-
-    void statusMessage(std::string_view msg) { std::ignore = msg; }
-
-    void errorMessage(std::string_view msg) { std::ignore = msg; }
-
-    ftxui::Element toElement(uc_log::detail::LogEntry::Channel const& c) {
+    inline ftxui::Element toElement(uc_log::detail::LogEntry::Channel const& c) {
         static std::array<ftxui::Color, 6> const Colors{
           {ftxui::Color::Black,
            ftxui::Color::Red,
-           ftxui::Color::BlueLight,
+           ftxui::Color::Blue,
            ftxui::Color::Magenta,
-           ftxui::Color::Cyan,
+           ftxui::Color::White,
            ftxui::Color::Yellow}
         };
 
@@ -195,7 +165,7 @@ struct FTXUIGui {
              | ((c.channel == 0) ? ftxui::bgcolor(ftxui::Color::Green) : ftxui::nothing);
     }
 
-    ftxui::Element toElement(uc_log::LogLevel const& l) {
+    inline ftxui::Element toElement(uc_log::LogLevel const& l) {
         static std::array<std::pair<ftxui::Color, std::string_view>, 6> const LCS{
           {{ftxui::Color::Yellow, "trace"},
            {ftxui::Color::Green, "debug"},
@@ -220,45 +190,137 @@ struct FTXUIGui {
              | ((index == 5) ? ftxui::bgcolor(ftxui::Color::RedLight) : ftxui::nothing);
     }
 
-    template<typename Reader>
-    int run(Reader& rttReader, std::string const& buildCommand) {
-        std::ignore = rttReader;
-        std::ignore = buildCommand;
+    struct FTXUIGui {
+        struct GuiLogEntry {
+            std::chrono::system_clock::time_point recv_time;
+            uc_log::detail::LogEntry              logEntry;
+        };
 
-        auto component = ftxuiDetail::Scroller(
-          [&]() -> std::vector<GuiLogEntry> const& { return logEntrys; },
-          [&](auto const& e) {
-              return ftxui::hbox({
-                ftxui::text(detail::to_time_string_with_milliseconds(e.recv_time))
-                  | ftxui::color(ftxui::Color::Cyan),
-                toElement(e.logEntry.channel),
-                ftxui::text(fmt::format("{}", e.logEntry.ucTime))
-                  | ftxui::color(ftxui::Color::Magenta),
-                ftxui::text(" "),
-                toElement(e.logEntry.logLevel),
-                ftxui::text(fmt::format(": {}", e.logEntry.logMsg))
-                  | ftxui::color(ftxui::Color::Default) | ftxui::flex,
-                ftxui::text(fmt::format("({}:{})", e.logEntry.fileName, e.logEntry.line))
-                  | ftxui::color(ftxui::Color::BlueLight),
-                toElement(e.logEntry.channel),
-              });
-          });
+        std::mutex mutex;
 
-        auto screen = ftxui::ScreenInteractive::Fullscreen();
+        std::function<ftxui::ScreenInteractive&(void)> getScreen;
 
-        getScreen = [&screen]() -> ftxui::ScreenInteractive& { return screen; };
+        std::vector<std::shared_ptr<GuiLogEntry const>> allLogEntrys;
+        std::vector<std::shared_ptr<GuiLogEntry const>> filteredLogEntrys;
 
-        ftxui::Loop loop(&screen, component);
+        std::function<bool(GuiLogEntry const&)> currentFilter
+          = [](GuiLogEntry const&) { return true; };
 
-        while(!loop.HasQuitted()) {
-            {
-                std::lock_guard<std::mutex> lock{mutex};
-                loop.RunOnce();
+        std::function<ftxui::Element(GuiLogEntry const&)> currentRenderFunction
+          = [this](GuiLogEntry const& e) { return defaultRender(e); };
+
+        bool showSysTime{true};
+        bool showFunctionName{false};
+        bool showUcTime{true};
+        bool showLocation{true};
+        bool showChannel{true};
+        bool showLogLevel{true};
+
+        ftxui::Element defaultRender(GuiLogEntry const& e) {
+            ftxui::Elements elements;
+            elements.reserve(12);
+
+            if(showSysTime) {
+                elements.push_back(
+                  ftxui::text(detail::to_time_string_with_milliseconds(e.recv_time))
+                  | ftxui::color(ftxui::Color::Cyan));
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+            if(showChannel) {
+                elements.push_back(toElement(e.logEntry.channel));
+            }
+
+            if(showUcTime) {
+                elements.push_back(
+                  ftxui::text(fmt::format("{}", e.logEntry.ucTime))
+                  | ftxui::color(ftxui::Color::Magenta));
+            }
+
+            if(showSysTime || showChannel || showUcTime) {
+                elements.push_back(ftxui::text(" ") | ftxui::color(ftxui::Color::Default));
+            }
+
+            if(showLogLevel) {
+                elements.push_back(toElement(e.logEntry.logLevel));
+            }
+
+            if(showSysTime || showChannel || showUcTime || showLogLevel) {
+                elements.push_back(ftxui::text(": ") | ftxui::color(ftxui::Color::Default));
+            }
+
+            elements.push_back(
+              ftxui::text(e.logEntry.logMsg) | ftxui::color(ftxui::Color::Default) | ftxui::flex);
+
+            if(showFunctionName) {
+                elements.push_back(ftxui::text(" ") | ftxui::color(ftxui::Color::Default));
+
+                elements.push_back(
+                  ftxui::text(e.logEntry.functionName) | ftxui::color(ftxui::Color::RedLight));
+
+                if(showLocation || showChannel) {
+                    elements.push_back(ftxui::text(" ") | ftxui::color(ftxui::Color::Default));
+                }
+            }
+
+            if(showLocation) {
+                elements.push_back(
+                  ftxui::text(fmt::format("({}:{})", e.logEntry.fileName, e.logEntry.line))
+                  | ftxui::color(ftxui::Color::BlueLight));
+            }
+
+            if(showChannel) {
+                elements.push_back(toElement(e.logEntry.channel));
+            }
+            return ftxui::hbox(elements);
         }
 
-        return 0;
-    }
-};
-}   // namespace uc_log
+        void
+        add(std::chrono::system_clock::time_point recv_time, uc_log::detail::LogEntry const& e) {
+            {
+                std::lock_guard<std::mutex> lock{mutex};
+                auto entry = std::make_shared<GuiLogEntry const>(recv_time, e);
+                allLogEntrys.push_back(entry);
+                if(currentFilter(*entry)) {
+                    filteredLogEntrys.push_back(entry);
+                }
+            }
+            if(getScreen) {
+                getScreen().PostEvent(ftxui::Event::Custom);
+            }
+        }
+
+        void fatalError(std::string_view msg) { std::ignore = msg; }
+
+        void statusMessage(std::string_view msg) { std::ignore = msg; }
+
+        void errorMessage(std::string_view msg) { std::ignore = msg; }
+
+        template<typename Reader>
+        int run(Reader& rttReader, std::string const& buildCommand) {
+            std::ignore = rttReader;
+            std::ignore = buildCommand;
+
+            auto component = Scroller(
+              [&]() -> std::vector<std::shared_ptr<GuiLogEntry const>> const& {
+                  return filteredLogEntrys;
+              },
+              [&](auto const& e) { return currentRenderFunction(e); });
+
+            auto screen = ftxui::ScreenInteractive::Fullscreen();
+
+            getScreen = [&screen]() -> ftxui::ScreenInteractive& { return screen; };
+
+            ftxui::Loop loop(&screen, component);
+
+            while(!loop.HasQuitted()) {
+                {
+                    std::lock_guard<std::mutex> lock{mutex};
+                    loop.RunOnce();
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+
+            return 0;
+        }
+    };
+}}   // namespace uc_log::FTXUIGui
