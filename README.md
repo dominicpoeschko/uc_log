@@ -1,11 +1,11 @@
 # UC_LOG
 
 A great way to log your [kvasir-io project](https://github.com/kvasir-io) with an (jLink)[https://www.segger.com/downloads/jlink/].
-If you look for an example projet check this out: (rp2040_example)[https://github.com/kvasir-io/rp2040_example]
+Looking for an example? Check out the (rp2040_example)[https://github.com/kvasir-io/rp2040_example]
 
 ## Installing / Getting started
 
-A quick introduction to get the uc_log example gui running.
+A quick guide to get the `uc_log` example GUI up and running:
 
 ```shell
 git clone --recursive git@github.com:dominicpoeschko/uc_log.git
@@ -32,15 +32,24 @@ cmake --build .
 ```
 
 ## Features
-- terminal programm
-- terminal gui
-- enable/disable log level(trace, debug, info, warn. error, crit)
-- select different channels
-- filter
-- display information (system Time, Function Name, Target Time, Source Location, Log Channel, Log Level)
-- debug functions (reset target, reset Debugger, Flash Target)
-- build function
-- status tab
+- Terminal application
+- Terminal GUI
+- Enable/Disable log levels (trace, debug, info, warn. error, crit)
+- Channel Selection
+- Log filtering
+- Display information
+    - System Time
+    - Function Name
+    - Target Time
+    - Source Location
+    - Log Channel
+    - Log Level
+- Debug tools
+    - Reset Target
+    - Reset Debugger
+    - Flash Target
+- Build function
+- Status tab
 
 ## Contributing
 
