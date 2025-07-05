@@ -17,6 +17,7 @@ private:
         std::chrono::system_clock::time_point sys_entryTime;
         Entry                                 entry;
     };
+
     std::vector<QEntry>                                                      q{};
     std::function<void(std::chrono::system_clock::time_point, Entry const&)> f;
 
@@ -63,4 +64,3 @@ public:
         cv.notify_one();
     }
 };
-

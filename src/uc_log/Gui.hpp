@@ -27,7 +27,8 @@ struct Gui {
         }
     }
 
-    void add(std::chrono::system_clock::time_point recv_time, uc_log::detail::LogEntry const& e) {
+    void add(std::chrono::system_clock::time_point recv_time,
+             uc_log::detail::LogEntry const&       e) {
         std::visit([&](auto& i) { i.add(recv_time, e); }, impl);
     }
 
@@ -44,7 +45,8 @@ struct Gui {
     }
 
     template<typename Reader>
-    int run(Reader& rttReader, std::string const& buildCommand) {
+    int run(Reader&            rttReader,
+            std::string const& buildCommand) {
         return std::visit([&](auto& i) { return i.run(rttReader, buildCommand); }, impl);
     }
 };

@@ -19,8 +19,9 @@
 #include <fmt/color.h>
 #include <fmt/format.h>
 
-static std::pair<std::uint32_t, std::string>
-parseMapFileForControllBlockAddress(std::string const& mapFile) {
+static std::pair<std::uint32_t,
+                 std::string>
+parseMapFileForControlBlockAddress(std::string const& mapFile) {
     try {
         std::ifstream file(mapFile);
         std::string   line;
@@ -33,7 +34,7 @@ parseMapFileForControllBlockAddress(std::string const& mapFile) {
     } catch(std::exception const& e) {
         return {0, fmt::format("read mapfile failed: {}", e.what())};
     }
-    return {0, "error cant find rtt control block address"};
+    return {0, "error can't find rtt control block address"};
 }
 
 static std::string to_iso8601_UTC_string(std::chrono::system_clock::time_point const& value) {
@@ -47,7 +48,8 @@ static std::string to_iso8601_UTC_string(std::chrono::system_clock::time_point c
     return fmt::format("{:%FT%H:%M}:{:02}.{:03}Z", utc, seconds.count(), milliseconds.count());
 }
 
-int main(int argc, char** argv) {
+int main(int    argc,
+         char** argv) {
     CLI::App app{};
 
     std::uint32_t speed{};
@@ -80,7 +82,7 @@ int main(int argc, char** argv) {
       ->capture_default_str()
       ->check(CLI::IsMember(uc_log::Gui::getTypes()));
 
-    CLI11_PARSE(app, argc, argv);
+    CLI11_PARSE(app, argc, argv)
 
     std::string const logFileName
       = logDir + "/" + to_iso8601_UTC_string(std::chrono::system_clock::now()) + ".rttlog";
@@ -92,9 +94,8 @@ int main(int argc, char** argv) {
 
     uc_log::Gui gui{guiType};
 
-    auto logFilePrinter = [&gui, &logFile](
-                            std::chrono::system_clock::time_point recv_time,
-                            uc_log::detail::LogEntry const&       e) {
+    auto logFilePrinter = [&gui, &logFile](std::chrono::system_clock::time_point recv_time,
+                                           uc_log::detail::LogEntry const&       e) {
         if(logFile) {
             std::stringstream quotedMsg;
             quotedMsg << std::quoted(e.logMsg, '"', '"');
@@ -105,20 +106,19 @@ int main(int argc, char** argv) {
             std::stringstream quotedFunctionName;
             quotedFunctionName << std::quoted(e.functionName, '"', '"');
 
-            auto const s = fmt::format(
-              "{},{},{},{},{},{:#},{},{}\n",
-              to_iso8601_UTC_string(recv_time),
-              e.channel.channel,
-              quotedFilename.str(),
-              quotedFunctionName.str(),
-              e.line,
-              e.logLevel,
-              e.ucTime.time,
-              quotedMsg.str());
+            auto const s = fmt::format("{},{},{},{},{},{:#},{},{}\n",
+                                       to_iso8601_UTC_string(recv_time),
+                                       e.channel.channel,
+                                       quotedFilename.str(),
+                                       quotedFunctionName.str(),
+                                       e.line,
+                                       e.logLevel,
+                                       e.ucTime.time,
+                                       quotedMsg.str());
 
             logFile << s;
         } else {
-            gui.errorMessage("error writting logFile");
+            gui.errorMessage("error writing logFile");
         }
     };
 
@@ -132,47 +132,45 @@ int main(int argc, char** argv) {
             }
         };
 
-    auto printer = [&tcpPrinter, &logFilePrinter, &gui](
-                     std::chrono::system_clock::time_point recv_time,
-                     uc_log::detail::LogEntry const&       e) {
-        tcpPrinter(recv_time, e);
-        logFilePrinter(recv_time, e);
-        gui.add(recv_time, e);
-    };
+    auto printer
+      = [&tcpPrinter, &logFilePrinter, &gui](std::chrono::system_clock::time_point recv_time,
+                                             uc_log::detail::LogEntry const&       e) {
+            tcpPrinter(recv_time, e);
+            logFilePrinter(recv_time, e);
+            gui.add(recv_time, e);
+        };
 
-    TimeDelayedQueue<uc_log::detail::LogEntry, decltype([](auto const& e) {
-                         return e.entry.ucTime;
-                     })>
+    TimeDelayedQueue<uc_log::detail::LogEntry,
+                     decltype([](auto const& e) { return e.entry.ucTime; })>
       q{printer};
 
-    JLinkRttReader rttReader{
-      host,
-      device,
-      speed,
-      channels,
-      [&mapFile, &gui]() {
-          auto result = parseMapFileForControllBlockAddress(mapFile);
-          if(result.second.empty()) {
-              return result.first;
-          }
-          gui.fatalError(result.second);
-          return decltype(result.first){};
-      },
-      [&hexFile]() { return hexFile; },
-      [&stringConstantsFile, &gui]() {
-          auto result = remote_fmt::parseStringConstantsFromJsonFile(stringConstantsFile);
-          if(result.second.empty()) {
-              return result.first;
-          }
-          gui.fatalError(result.second);
-          return decltype(result.first){};
-      },
-      [&q](std::size_t channel, std::string_view msg) {
-          q.append(uc_log::detail::LogEntry{channel, msg});
-      },
-      [&gui](std::string_view msg) { gui.statusMessage(msg); },
-      [&gui](std::string_view msg) { gui.errorMessage(msg); }};
+    JLinkRttReader rttReader{host,
+                             device,
+                             speed,
+                             channels,
+                             [&mapFile, &gui]() {
+                                 auto result = parseMapFileForControlBlockAddress(mapFile);
+                                 if(result.second.empty()) {
+                                     return result.first;
+                                 }
+                                 gui.fatalError(result.second);
+                                 return decltype(result.first){};
+                             },
+                             [&hexFile]() { return hexFile; },
+                             [&stringConstantsFile, &gui]() {
+                                 auto result = remote_fmt::parseStringConstantsFromJsonFile(
+                                   stringConstantsFile);
+                                 if(result.second.empty()) {
+                                     return result.first;
+                                 }
+                                 gui.fatalError(result.second);
+                                 return decltype(result.first){};
+                             },
+                             [&q](std::size_t channel, std::string_view msg) {
+                                 q.append(uc_log::detail::LogEntry{channel, msg});
+                             },
+                             [&gui](std::string_view msg) { gui.statusMessage(msg); },
+                             [&gui](std::string_view msg) { gui.errorMessage(msg); }};
 
     return gui.run(rttReader, buildCommand);
 }
-

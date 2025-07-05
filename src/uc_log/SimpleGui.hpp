@@ -25,11 +25,8 @@ struct SimpleGui {
     bool printSysTime{true};
     bool printFunctionName{false};
 
-    void add(
-      std::chrono::system_clock::time_point recv_time,
-      uc_log::detail::LogEntry const&       e
-
-    ) {
+    void add(std::chrono::system_clock::time_point recv_time,
+             uc_log::detail::LogEntry const&       e) {
         std::size_t const terminal_width = []() -> std::size_t {
             struct winsize w{};
             if(-1 == ::ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) || w.ws_col > 1024) {
@@ -40,10 +37,9 @@ struct SimpleGui {
         if(!quit) {
             std::lock_guard<std::mutex> lock(ioMutex);
             if(enabledLogs[e.logLevel]) {
-                bool const any_disabled
-                  = std::any_of(enabledLogs.begin(), enabledLogs.end(), [](auto const& v) {
-                        return !v.second;
-                    });
+                bool const any_disabled = std::any_of(enabledLogs.begin(),
+                                                      enabledLogs.end(),
+                                                      [](auto const& v) { return !v.second; });
 
                 auto color
                   = fmt::bg(any_disabled ? fmt::terminal_color::red : fmt::terminal_color::green);
@@ -57,16 +53,13 @@ struct SimpleGui {
                     auto const sysTimeString
                       = fmt::format("{}", detail::to_time_string_with_milliseconds(recv_time));
                     charsPrinted += sysTimeString.size();
-                    fmt::print(
-                      "{}",
-                      fmt::styled(sysTimeString, fmt::fg(fmt::terminal_color::cyan)));
+                    fmt::print("{}",
+                               fmt::styled(sysTimeString, fmt::fg(fmt::terminal_color::cyan)));
                 }
-                fmt::print(
-                  fmt::runtime(fmt::format(
-                    "{{:<{}{}}}\n",
-                    terminal_width - charsPrinted,
-                    printFunctionName ? "#" : "")),
-                  e);
+                fmt::print(fmt::runtime(fmt::format("{{:<{}{}}}\n",
+                                                    terminal_width - charsPrinted,
+                                                    printFunctionName ? "#" : "")),
+                           e);
             }
         }
     }
@@ -92,16 +85,18 @@ struct SimpleGui {
     }
 
     template<typename Reader>
-    int run(Reader& rttReader, std::string const& buildCommand) {
+    int run(Reader&            rttReader,
+            std::string const& buildCommand) {
         {
-            struct termios oldIos{};
-            if(::tcgetattr(STDIN_FILENO, &oldIos) < 0) {
+            struct termios oldTerminalSettings{};
+            if(::tcgetattr(STDIN_FILENO, &oldTerminalSettings) < 0) {
                 std::lock_guard<std::mutex> lock(ioMutex);
                 fmt::print(stderr, "Error calling tcgetattr: {}\n", ::strerror(errno));
                 return 1;
             }
-            oldIos.c_lflag &= ~static_cast<decltype(oldIos.c_lflag)>(ICANON | ECHO);
-            if(::tcsetattr(STDIN_FILENO, TCSANOW, &oldIos) < 0) {
+            oldTerminalSettings.c_lflag
+              &= ~static_cast<decltype(oldTerminalSettings.c_lflag)>(ICANON | ECHO);
+            if(::tcsetattr(STDIN_FILENO, TCSANOW, &oldTerminalSettings) < 0) {
                 std::lock_guard<std::mutex> lock(ioMutex);
                 fmt::print(stderr, "Error calling tcsetattr: {}\n", ::strerror(errno));
                 return 1;
@@ -111,20 +106,19 @@ struct SimpleGui {
             fmt::print(fmt::bg(fmt::terminal_color::green), "build");
             fmt::print("\n");
             int const ret = std::system(buildCommand.c_str());
-            fmt::print(
-              fmt::bg(ret == 0 ? fmt::terminal_color::green : fmt::terminal_color::red),
-              "build {}",
-              ret == 0 ? "succeeded" : "failed");
+            fmt::print(fmt::bg(ret == 0 ? fmt::terminal_color::green : fmt::terminal_color::red),
+                       "build {}",
+                       ret == 0 ? "succeeded" : "failed");
             fmt::print("\n");
             return ret == 0;
         };
 
         static std::atomic<bool> gotSignal{};
         {
-            struct sigaction sa{};
-            sa.sa_handler = [](int) { gotSignal = true; };
-            ::sigemptyset(&sa.sa_mask);
-            if(::sigaction(SIGINT, &sa, nullptr) == -1) {
+            struct sigaction signalAction{};
+            signalAction.sa_handler = [](int) { gotSignal = true; };
+            ::sigemptyset(&signalAction.sa_mask);
+            if(::sigaction(SIGINT, &signalAction, nullptr) == -1) {
                 std::lock_guard<std::mutex> lock(ioMutex);
                 fmt::print(stderr, "Failed to register signal handler: {}\n", std::strerror(errno));
                 return 1;
@@ -143,10 +137,9 @@ struct SimpleGui {
                     fmt::print("\n");
                 } else {
                     std::lock_guard<std::mutex> lock(ioMutex);
-                    fmt::print(
-                      fmt::bg(fmt::terminal_color::red),
-                      "read error {}",
-                      std::strerror(errno));
+                    fmt::print(fmt::bg(fmt::terminal_color::red),
+                               "read error {}",
+                               std::strerror(errno));
                     fmt::print("\n");
                 }
             } else {
@@ -156,17 +149,15 @@ struct SimpleGui {
                         if(printSysTime) {
                             std::lock_guard<std::mutex> lock(ioMutex);
                             printSysTime = false;
-                            fmt::print(
-                              fmt::bg(fmt::terminal_color::red),
-                              "sysTime printing stopped");
+                            fmt::print(fmt::bg(fmt::terminal_color::red),
+                                       "sysTime printing stopped");
                             fmt::print("\n");
                         } else {
                             std::lock_guard<std::mutex> lock(ioMutex);
                             printSysTime = true;
-                            fmt::print(
-                              fmt::bg(fmt::terminal_color::green)
-                                | fmt::fg(fmt::terminal_color::black),
-                              "sysTime printing started");
+                            fmt::print(fmt::bg(fmt::terminal_color::green)
+                                         | fmt::fg(fmt::terminal_color::black),
+                                       "sysTime printing started");
                             fmt::print("\n");
                         }
                     }
@@ -177,17 +168,15 @@ struct SimpleGui {
                         if(printFunctionName) {
                             std::lock_guard<std::mutex> lock(ioMutex);
                             printFunctionName = false;
-                            fmt::print(
-                              fmt::bg(fmt::terminal_color::red),
-                              "functionName printing stopped");
+                            fmt::print(fmt::bg(fmt::terminal_color::red),
+                                       "functionName printing stopped");
                             fmt::print("\n");
                         } else {
                             std::lock_guard<std::mutex> lock(ioMutex);
                             printFunctionName = true;
-                            fmt::print(
-                              fmt::bg(fmt::terminal_color::green)
-                                | fmt::fg(fmt::terminal_color::black),
-                              "functionName printing started");
+                            fmt::print(fmt::bg(fmt::terminal_color::green)
+                                         | fmt::fg(fmt::terminal_color::black),
+                                       "functionName printing started");
                             fmt::print("\n");
                         }
                     }
@@ -198,16 +187,15 @@ struct SimpleGui {
                         auto const s = rttReader.getStatus();
 
                         std::lock_guard<std::mutex> lock(ioMutex);
-                        fmt::print(
-                          fmt::bg(fmt::terminal_color::bright_blue),
-                          "Connected: {}, BytesRead: {}, Overflows: {}, UpBuffers: {}, "
-                          "DownBuffers: "
-                          "{},\nEnabledLogs: ",
-                          s.isRunning != 0,
-                          s.numBytesRead,
-                          s.hostOverflowCount,
-                          s.numUpBuffers,
-                          s.numDownBuffers);
+                        fmt::print(fmt::bg(fmt::terminal_color::bright_blue),
+                                   "Connected: {}, BytesRead: {}, Overflows: {}, UpBuffers: {}, "
+                                   "DownBuffers: "
+                                   "{},\nEnabledLogs: ",
+                                   s.isRunning != 0,
+                                   s.numBytesRead,
+                                   s.hostOverflowCount,
+                                   s.numUpBuffers,
+                                   s.numDownBuffers);
                         fmt::print("{}\n", enabledLogs);
                     }
                     break;
@@ -216,7 +204,7 @@ struct SimpleGui {
                         rttReader.resetTarget();
                     }
                     break;
-                case 'x':
+                case 'd':
                     {
                         {
                             std::lock_guard<std::mutex> lock(ioMutex);
@@ -233,9 +221,8 @@ struct SimpleGui {
                             std::lock_guard<std::mutex> lock(ioMutex);
                             buildOk = doBuild();
                             if(!buildOk) {
-                                fmt::print(
-                                  fmt::bg(fmt::terminal_color::red),
-                                  "not flashing target build failed");
+                                fmt::print(fmt::bg(fmt::terminal_color::red),
+                                           "not flashing target build failed");
                                 fmt::print("\n");
                             }
                         }
@@ -250,7 +237,7 @@ struct SimpleGui {
                         fmt::print(
                           fmt::bg(fmt::terminal_color::bright_blue),
                           "f: reflash target, b: build, s: status, r: reset target, "
-                          "x: reset "
+                          "d: reset "
                           "jlink, v: show sysTime, h: help, q: quit, n: print function name, 0-5: "
                           "toggle log level printing");
                         fmt::print("\n");
@@ -274,9 +261,8 @@ struct SimpleGui {
                     }
                 }
 
-                if(
-                  (c >= ('0' + static_cast<int>(uc_log::LogLevel::trace)))
-                  && (c <= ('0' + static_cast<int>(uc_log::LogLevel::crit))))
+                if((c >= ('0' + static_cast<int>(uc_log::LogLevel::trace)))
+                   && (c <= ('0' + static_cast<int>(uc_log::LogLevel::crit))))
                 {
                     uc_log::LogLevel const levelToToggle = static_cast<uc_log::LogLevel>(c - '0');
 
@@ -293,9 +279,8 @@ struct SimpleGui {
                     fmt::print(
                       "{} {}\n",
                       levelToToggle,
-                      fmt::styled(
-                        fmt::format("printing {}", oldState ? "disabled" : "enabled"),
-                        color));
+                      fmt::styled(fmt::format("printing {}", oldState ? "disabled" : "enabled"),
+                                  color));
                 }
             }
         }

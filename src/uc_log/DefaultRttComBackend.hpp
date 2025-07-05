@@ -10,11 +10,10 @@
 
 namespace uc_log {
 
-template<
-  typename DebuggerPresentFunction,
-  std::size_t     MainBufferSize,
-  std::size_t     IsrBufferSize = MainBufferSize,
-  rtt::BufferMode Mode          = rtt::BufferMode::block>
+template<typename DebuggerPresentFunction,
+         std::size_t     MainBufferSize,
+         std::size_t     IsrBufferSize = MainBufferSize,
+         rtt::BufferMode Mode          = rtt::BufferMode::block>
 struct DefaultRttComBackend {
 private:
     using RttConfig = rtt::SingleModeUpOnlyEmptyNameConfig<Mode, MainBufferSize, IsrBufferSize>;

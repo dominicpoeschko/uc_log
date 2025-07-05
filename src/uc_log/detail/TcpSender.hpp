@@ -1,6 +1,46 @@
 #pragma once
 
+#ifdef __GNUC__
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wredundant-decls"
+    #pragma GCC diagnostic ignored "-Woverloaded-virtual"
+    #pragma GCC diagnostic ignored "-Wsign-conversion"
+    #pragma GCC diagnostic ignored "-Wshadow"
+#endif
+
+#ifdef __clang__
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wsign-conversion"
+    #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+    #pragma clang diagnostic ignored "-Wunsafe-buffer-usage-in-libc-call"
+    #pragma clang diagnostic ignored "-Wreserved-macro-identifier"
+    #pragma clang diagnostic ignored "-Wsuggest-override"
+    #pragma clang diagnostic ignored "-Wdeprecated-redundant-constexpr-static-def"
+    #pragma clang diagnostic ignored "-Wmissing-noreturn"
+    #pragma clang diagnostic ignored "-Wzero-as-null-pointer-constant"
+    #pragma clang diagnostic ignored "-Wglobal-constructors"
+    #pragma clang diagnostic ignored "-Wdocumentation"
+    #pragma clang diagnostic ignored "-Wsuggest-destructor-override"
+    #pragma clang diagnostic ignored "-Wshorten-64-to-32"
+    #pragma clang diagnostic ignored "-Wswitch-default"
+    #pragma clang diagnostic ignored "-Wdocumentation-unknown-command"
+    #pragma clang diagnostic ignored "-Wdisabled-macro-expansion"
+    #pragma clang diagnostic ignored "-Wold-style-cast"
+    #pragma clang diagnostic ignored "-Wcovered-switch-default"
+    #pragma clang diagnostic ignored "-Wswitch-enum"
+    #pragma clang diagnostic ignored "-Wimplicit-fallthrough"
+    #pragma clang diagnostic ignored "-Wexit-time-destructors"
+#endif
+
 #include <boost/asio.hpp>
+
+#ifdef __GNUC__
+    #pragma GCC diagnostic pop
+#endif
+#ifdef __clang__
+    #pragma clang diagnostic pop
+#endif
+
 #include <chrono>
 #include <fmt/format.h>
 #include <functional>
@@ -19,7 +59,8 @@ struct TCPSender {
         std::vector<std::byte>                recvData;
 
         template<typename ErrorMessageF>
-        explicit Session(boost::asio::ip::tcp::socket socket_, ErrorMessageF&& errorMessagef_)
+        explicit Session(boost::asio::ip::tcp::socket socket_,
+                         ErrorMessageF&&              errorMessagef_)
           : errorMessagef{std::forward<ErrorMessageF>(errorMessagef_)}
           , socket{std::move(socket_)} {}
 
@@ -102,7 +143,7 @@ struct TCPSender {
                     sp->send(std::as_bytes(std::span{msg}));
                 }
             } catch(std::exception const& e) {
-                errorMessagef(fmt::format("catched: {}", e.what()));
+                errorMessagef(fmt::format("caught: {}", e.what()));
             }
         }
         clean();
@@ -110,12 +151,10 @@ struct TCPSender {
 
 private:
     void clean() {
-        clients.erase(
-          std::remove_if(
-            clients.begin(),
-            clients.end(),
-            [](auto& client) { return client.use_count() == 0; }),
-          clients.end());
+        clients.erase(std::remove_if(clients.begin(),
+                                     clients.end(),
+                                     [](auto& client) { return client.use_count() == 0; }),
+                      clients.end());
     }
 
     void runner(std::stop_token stoken) {

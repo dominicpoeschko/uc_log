@@ -17,7 +17,8 @@ namespace uc_log { namespace detail {
     struct FileName {
     private:
         std::string_view sv;
-        consteval auto   basename(std::string_view f) {
+
+        consteval auto basename(std::string_view f) {
             auto it = std::find(f.begin(), f.end(), '/');
             if(it == f.end()) {
                 return f;
@@ -32,40 +33,42 @@ namespace uc_log { namespace detail {
         constexpr operator std::string_view() const { return sv; }
     };
 
-    template<typename ComBackend, char... chars, typename... Args>
-    constexpr void log(sc::StringConstant<chars...> fmt, Args&&... args) {
+    template<typename ComBackend,
+             char... chars,
+             typename... Args>
+    constexpr void log(sc::StringConstant<chars...> fmt,
+                       Args&&... args) {
         remote_fmt::Printer<ComBackend>::staticPrint(fmt, std::forward<Args>(args)...);
     }
 
 }}   // namespace uc_log::detail
 
 #ifdef USE_UC_LOG
-    #define UC_LOG_IMPL(level, line, filename, fmt, ...)                                          \
-        do {                                                                                      \
-            if(!std::is_constant_evaluated()) {                                                   \
-                constexpr auto UC_LOG_DO_NOT_USE_FUNCTION_NAME = __PRETTY_FUNCTION__;             \
-                using namespace ::remote_fmt::detail;                                             \
-                using namespace ::sc::literals;                                                   \
-                ::uc_log::detail::log<::uc_log::ComBackend<::uc_log::Tag::User>>(                 \
-                  "(\""_sc + SC_LIFT(::uc_log::detail::FileName{filename}) + "\", "_sc            \
-                    + ::sc::detail::                                                              \
-                      format<static_cast<std::uint32_t>(line), static_cast<std::uint8_t>(level)>( \
-                        "{}, {}"_sc)                                                              \
-                    + ", {}, \"\"\""_sc                                                           \
-                    + ::sc::escape(                                                               \
-                      SC_LIFT(UC_LOG_DO_NOT_USE_FUNCTION_NAME),                                   \
-                      [](auto c) { return c == '{' || c == '}'; },                                \
-                      [](auto c) { return c; })                                                   \
-                    + "\"\"\")"_sc + SC_LIFT(fmt),                                                \
-                  ::uc_log::LogClock<::uc_log::Tag::User>::now() __VA_OPT__(, ) __VA_ARGS__);     \
-            }                                                                                     \
+    #define UC_LOG_IMPL(level, line, filename, fmt, ...)                                      \
+        do {                                                                                  \
+            if(!std::is_constant_evaluated()) {                                               \
+                constexpr auto UC_LOG_DO_NOT_USE_FUNCTION_NAME = __PRETTY_FUNCTION__;         \
+                using namespace ::remote_fmt::detail;                                         \
+                using namespace ::sc::literals;                                               \
+                ::uc_log::detail::log<::uc_log::ComBackend<::uc_log::Tag::User>>(             \
+                  "(\""_sc + SC_LIFT(::uc_log::detail::FileName{filename}) + "\", "_sc        \
+                    + ::sc::detail::format<static_cast<std::uint32_t>(line),                  \
+                                           static_cast<std::uint8_t>(level)>("{}, {}"_sc)     \
+                    + ", {}, \"\"\""_sc                                                       \
+                    + ::sc::escape(                                                           \
+                      SC_LIFT(UC_LOG_DO_NOT_USE_FUNCTION_NAME),                               \
+                      [](auto c) { return c == '{' || c == '}'; },                            \
+                      [](auto c) { return c; })                                               \
+                    + "\"\"\")"_sc + SC_LIFT(fmt),                                            \
+                  ::uc_log::LogClock<::uc_log::Tag::User>::now() __VA_OPT__(, ) __VA_ARGS__); \
+            }                                                                                 \
         } while(false)
 #else
     #define UC_LOG_IMPL(level, line, filename, fmt, ...) (void)0
 #endif
 
 #ifdef USE_UC_LOG
-    #define UC_LOG(level, fmt, ...) \
+    #define UC_LOG(level, fmt, ...)                                                 \
         UC_LOG_IMPL(level, __LINE__, __FILE_NAME__, fmt __VA_OPT__(, ) __VA_ARGS__)
 #else
     #define UC_LOG(level, fmt, ...) (void)0
