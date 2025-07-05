@@ -319,55 +319,66 @@ namespace uc_log { namespace FTXUIGui {
                                   false);
 
                 buildThread = std::jthread{[this]() {
-                    stdoutPipe = std::make_unique<boost::asio::readable_pipe>(*buildIoContext);
-                    stderrPipe = std::make_unique<boost::asio::readable_pipe>(*buildIoContext);
+                    try {
+                        stdoutPipe = std::make_unique<boost::asio::readable_pipe>(*buildIoContext);
+                        stderrPipe = std::make_unique<boost::asio::readable_pipe>(*buildIoContext);
 
-                    auto [execPath, execArgs] = createColoredBuildCommand();
-                    std::vector<std::string> envVars;
+                        auto [execPath, execArgs] = createColoredBuildCommand();
+                        std::vector<std::string> envVars;
 
-                    auto currentEnv = boost::this_process::environment();
-                    for(auto const& envVar : currentEnv) {
-                        envVars.push_back(envVar.get_name() + "=" + envVar.to_string());
-                    }
-                    envVars.push_back("FORCE_COLOR=1");
-                    envVars.push_back("CLICOLOR_FORCE=1");
-                    envVars.push_back("COLORTERM=truecolor");
-                    envVars.push_back("CMAKE_COLOR_DIAGNOSTICS=ON");
-                    envVars.push_back("NINJA_STATUS=[%f/%t] ");
-
-                    buildProcess = std::make_unique<boost::process::v2::process>(
-                      *buildIoContext,
-                      execPath,
-                      execArgs,
-                      boost::process::v2::process_stdio{nullptr, *stdoutPipe, *stderrPipe},
-                      boost::process::v2::process_environment{envVars});
-
-                    startAsyncReadStdout();
-                    startAsyncReadStderr();
-
-                    buildProcess->async_wait([this](boost::system::error_code ec, int exitCode) {
-                        {
-                            std::lock_guard<std::mutex> lock{mutex};
-                            buildStatus
-                              = (exitCode == 0) ? BuildStatus::Success : BuildStatus::Failed;
+                        auto currentEnv = boost::this_process::environment();
+                        for(auto const& envVar : currentEnv) {
+                            envVars.push_back(envVar.get_name() + "=" + envVar.to_string());
                         }
+                        envVars.push_back("FORCE_COLOR=1");
+                        envVars.push_back("CLICOLOR_FORCE=1");
+                        envVars.push_back("COLORTERM=truecolor");
+                        envVars.push_back("CMAKE_COLOR_DIAGNOSTICS=ON");
+                        envVars.push_back("NINJA_STATUS=[%f/%t] ");
 
-                        if(ec) {
-                            addBuildOutput(fmt::format("❌ Process error: {}", ec.message()),
-                                           false,
-                                           true);
-                        } else {
-                            addBuildOutput(fmt::format("🏁 Build {} (exit code: {})",
-                                                       exitCode == 0 ? "succeeded" : "failed",
-                                                       exitCode),
-                                           false,
-                                           exitCode != 0);
+                        buildProcess = std::make_unique<boost::process::v2::process>(
+                          *buildIoContext,
+                          execPath,
+                          execArgs,
+                          boost::process::v2::process_stdio{nullptr, *stdoutPipe, *stderrPipe},
+                          boost::process::v2::process_environment{envVars});
+
+                        startAsyncReadStdout();
+                        startAsyncReadStderr();
+
+                        buildProcess->async_wait([this](boost::system::error_code ec, int exitCode) {
+                            {
+                                std::lock_guard<std::mutex> lock{mutex};
+                                buildStatus
+                                  = (exitCode == 0) ? BuildStatus::Success : BuildStatus::Failed;
+                            }
+
+                            if(ec) {
+                                addBuildOutput(fmt::format("❌ Process error: {}", ec.message()),
+                                               false,
+                                               true);
+                            } else {
+                                addBuildOutput(fmt::format("🏁 Build {} (exit code: {})",
+                                                           exitCode == 0 ? "succeeded" : "failed",
+                                                           exitCode),
+                                               false,
+                                               exitCode != 0);
+                            }
+                        });
+                        buildIoContext->run();
+
+                        addBuildOutputGui(fmt::format("foo"), true);
+
+                        if(buildStatus == BuildStatus::Running){
+                            addBuildOutputGui(fmt::format("bar"), true);
+                            buildProcess->terminate();
+                        }else if(buildStatus == BuildStatus::Success){
+                            addBuildOutputGui(fmt::format("foobar"), true);
+                        }else if(buildStatus == BuildStatus::Failed){
+                            addBuildOutputGui(fmt::format("barfoo"), true);
                         }
-                    });
-                    buildIoContext->run();
-
-                    if(buildProcess->running()) {
-                        buildProcess->terminate();
+                    } catch (boost::process::system_error const& e) {
+                        addBuildOutputGui(fmt::format("System error: {}", e.what()), true);
                     }
                 }};
 
