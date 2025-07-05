@@ -8,15 +8,15 @@ If you look for an example projet check this out: (rp2040_example)[https://githu
 A quick introduction to get the uc_log example gui running.
 
 ```shell
-    git clone --recursive git@github.com:dominicpoeschko/uc_log.git
+git clone --recursive git@github.com:dominicpoeschko/uc_log.git
 ```
 
 ```shell
-    cd uc_log
+cd uc_log
 ```
 
 ```shell
-    mkdir build
+mkdir build
 ```
 
 ```shell
