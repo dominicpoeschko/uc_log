@@ -1,7 +1,7 @@
 # UC_LOG
 
-A great way to log your [kvasir-io project](https://github.com/kvasir-io) with an (jLink)[https://www.segger.com/downloads/jlink/].
-Looking for an example? Check out the (rp2040_example)[https://github.com/kvasir-io/rp2040_example]
+A great way to log your [kvasir-io project](https://github.com/kvasir-io) with an [jLink](https://www.segger.com/downloads/jlink/).
+Looking for an example? Check out the [rp2040_example](https://github.com/kvasir-io/rp2040_example)
 
 ## Installing / Getting started
 
@@ -61,12 +61,12 @@ branch. Pull requests are warmly welcome."
 - Repository: https://github.com/dominicpoeschko/uc_log
 - Issue tracker: https://github.com/dominicpoeschko/uc_log/issues
 - Related projects:
-  - (kvasir-io)[https://github.com/kvasir-io/Kvasir]
-  - (rp2040_example)[https://github.com/kvasir-io/rp2040_example]
-  - (rtt)[https://github.com/dominicpoeschko/rtt]
-  - (remote_fmt)[https://github.com/dominicpoeschko/remote_fmt]
-  - (jlink connector)[https://github.com/dominicpoeschko/jlink]
-  - (cmake_helpers)[https://github.com/dominicpoeschko/cmake_helpers]
+  - [kvasir-io](https://github.com/kvasir-io/Kvasir)
+  - [rp2040_example](https://github.com/kvasir-io/rp2040_example)
+  - [rtt](https://github.com/dominicpoeschko/rtt)
+  - [remote_fmt](https://github.com/dominicpoeschko/remote_fmt)
+  - [jlink connector](https://github.com/dominicpoeschko/jlink)
+  - [cmake_helpers](https://github.com/dominicpoeschko/cmake_helpers)
 
 ## Licensing
 
