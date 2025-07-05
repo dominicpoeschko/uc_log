@@ -101,6 +101,7 @@ if(NOT CMAKE_CROSSCOMPILING)
             ftxui::screen
             ftxui::dom
             ftxui::component)
+
         target_add_default_build_options(uc_log_gui_test PUBLIC)
     endif()
 else()
@@ -138,13 +139,13 @@ function(target_add_uc_log_rtt_jlink targetname)
 
     if(NOT PARSED_ARGS_SWD_SPEED)
         set(PARSED_ARGS_SWD_SPEED 100000)
-    elseif(PARSED_ARGS_SWD_SPEED LESS 1000 OR PARSED_ARGS_SWD_SPEED GREATER 50000000)
+    elseif(${PARSED_ARGS_SWD_SPEED} LESS 1000 OR ${PARSED_ARGS_SWD_SPEED} GREATER 50000000)
         message(WARNING "SWD_SPEED ${PARSED_ARGS_SWD_SPEED} may be out of valid range (1000-50000000)")
     endif()
 
     if(NOT PARSED_ARGS_CHANNELS)
         set(PARSED_ARGS_CHANNELS 2)
-    elseif(PARSED_ARGS_CHANNELS LESS 1 OR PARSED_ARGS_CHANNELS GREATER 16)
+    elseif(${PARSED_ARGS_CHANNELS} LESS 1 OR ${PARSED_ARGS_CHANNELS} GREATER 16)
         message(WARNING "CHANNELS ${PARSED_ARGS_CHANNELS} may be out of valid range (1-16)")
     endif()
 
@@ -162,17 +163,14 @@ function(target_add_uc_log_rtt_jlink targetname)
 
     if(NOT PARSED_ARGS_TRACE_PORT)
         set(PARSED_ARGS_TRACE_PORT 34565)
-    elseif(PARSED_ARGS_TRACE_PORT LESS 1024 OR PARSED_ARGS_TRACE_PORT GREATER 65535)
+    elseif(${PARSED_ARGS_TRACE_PORT} LESS 1024 OR PARSED_ARGS_TRACE_PORT GREATER 65535)
         message(WARNING "TRACE_PORT ${PARSED_ARGS_TRACE_PORT} may be out of valid range (1024-65535)")
     endif()
 
     if(NOT PARSED_ARGS_GUI_TYPE)
-        set(PARSED_ARGS_GUI_TYPE "simple")
-    elseif(NOT PARSED_ARGS_GUI_TYPE IN_LIST "simple;ftxui")
-        message(WARNING "GUI_TYPE '${PARSED_ARGS_GUI_TYPE}' is not recognized. Valid options: simple, ftxui")
+        set(PARSED_ARGS_GUI_TYPE "ftxui")
     endif()
 
-    # Determine uc_log_printer binary location
     get_target_property(build_dir uc_log_printer BINARY_DIR)
     if(NOT build_dir)
         message(FATAL_ERROR "Could not determine uc_log_printer binary directory")
