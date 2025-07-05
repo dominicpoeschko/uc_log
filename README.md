@@ -1,12 +1,3 @@
-- [Name of the project](#uc_log)
-  - [Installing / Getting started](#installing--getting-started)
-  - [Developing](#developing)
-  - [Features](#features)
-  - [Configuration](#configuration)
-  - [Contributing](#contributing)
-  - [Links](#links)
-  - [Licensing](#licensing)
-
 # UC_LOG
 
 A great way to log your [kvasir-io project](https://github.com/kvasir-io) with an (jLink)[https://www.segger.com/downloads/jlink/].
