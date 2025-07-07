@@ -17,16 +17,23 @@ struct Status {
 };
 
 struct Reader {
-    Status status;
+    std::mutex statusMutex{};
+    Status     status;
 
-    Status getStatus() { return status; }
+    Status getStatus() {
+        std::lock_guard lock{statusMutex};
+        return status;
+    }
 
     void resetJLink() {
         if(msg) {
             msg("Reset debugger");
         }
-        status.hostOverflowCount = 0;
-        status.isRunning         = true;
+        {
+            std::lock_guard lock{statusMutex};
+            status.hostOverflowCount = 0;
+            status.isRunning         = true;
+        }
         if(msg) {
             msg("Reset debugger done");
         }
@@ -36,8 +43,11 @@ struct Reader {
         if(msg) {
             msg("Reset target");
         }
-        status.numBytesTransferred = 0;
-        status.numBytesRead        = 0;
+        {
+            std::lock_guard lock{statusMutex};
+            status.numBytesTransferred = 0;
+            status.numBytesRead        = 0;
+        }
         if(msg) {
             msg("Reset target done");
         }
@@ -113,7 +123,10 @@ int main(int    argc,
         std::mt19937 gen{std::random_device{}()};
         while(!stoken.stop_requested()) {
             updateMessage(e, gen);
-            updateStatus(reader.status);
+            {
+                std::lock_guard lock{reader.statusMutex};
+                updateStatus(reader.status);
+            }
             e.ucTime.time += addTime;
             gui.add(std::chrono::system_clock::now(), e);
 

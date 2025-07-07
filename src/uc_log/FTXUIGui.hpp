@@ -43,7 +43,6 @@
 #include <boost/asio.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/process.hpp>
-#include <boost/process/v1/search_path.hpp>
 
 #ifdef __GNUC__
     #pragma GCC diagnostic pop
@@ -69,26 +68,29 @@
 namespace uc_log { namespace FTXUIGui {
 
     struct FTXUIGui {
-        struct GuiLogEntry {
-            std::chrono::system_clock::time_point recv_time;
-            uc_log::detail::LogEntry              logEntry;
-        };
+        FTXUIGui() = default;
 
-        FTXUIGui()                           = default;
+        ~FTXUIGui() {
+            if(buildThread.joinable()) {
+                buildThread.request_stop();
+                if(buildIoContext) {
+                    buildIoContext->stop();
+                }
+                buildThread.join();
+            }
+        }
+
         FTXUIGui(FTXUIGui const&)            = delete;
         FTXUIGui& operator=(FTXUIGui const&) = delete;
 
         FTXUIGui(FTXUIGui&&)            = delete;
         FTXUIGui& operator=(FTXUIGui&&) = delete;
 
-        ~FTXUIGui() {
-            if(buildIoContext) {
-                buildIoContext->stop();
-            }
-            if(buildThread.joinable()) {
-                buildThread.join();
-            }
-        }
+    private:
+        struct GuiLogEntry {
+            std::chrono::system_clock::time_point recv_time;
+            uc_log::detail::LogEntry              logEntry;
+        };
 
         struct FilterState {
             std::set<uc_log::LogLevel> enabledLogLevels;
@@ -98,28 +100,6 @@ namespace uc_log { namespace FTXUIGui {
             bool operator==(FilterState const&) const = default;
         };
 
-        std::mutex mutex;
-
-        ftxui::ScreenInteractive* screen_ptr = nullptr;
-
-        std::map<SourceLocation, std::size_t>           allSourceLocations;
-        std::vector<std::shared_ptr<GuiLogEntry const>> allLogEntries;
-        std::vector<std::shared_ptr<GuiLogEntry const>> filteredLogEntries;
-
-        FilterState activeFilterState;
-        FilterState editedFilterState;
-
-        static constexpr auto NoFilter = [](GuiLogEntry const&) { return true; };
-
-        std::function<bool(GuiLogEntry const&)> currentFilter = NoFilter;
-
-        bool showSysTime{true};
-        bool showFunctionName{false};
-        bool showUcTime{true};
-        bool showLocation{true};
-        bool showChannel{true};
-        bool showLogLevel{true};
-
         struct MessageEntry {
             enum class Level { Fatal, Error, Status };
 
@@ -127,8 +107,6 @@ namespace uc_log { namespace FTXUIGui {
             std::chrono::system_clock::time_point time;
             std::string                           message;
         };
-
-        std::vector<MessageEntry> messages;
 
         struct BuildEntry {
             std::chrono::system_clock::time_point time;
@@ -139,27 +117,58 @@ namespace uc_log { namespace FTXUIGui {
 
         enum class BuildStatus { Idle, Running, Success, Failed };
 
+        static constexpr auto NoFilter = [](GuiLogEntry const&) { return true; };
+
+        std::mutex mutex;
+
+        std::atomic<bool> callJoin{false};
+
+        ftxui::ScreenInteractive* screenPointer = nullptr;
+
+        std::map<SourceLocation, std::size_t>           allSourceLocations;
+        std::vector<std::shared_ptr<GuiLogEntry const>> allLogEntries;
+        std::vector<std::shared_ptr<GuiLogEntry const>> filteredLogEntries;
+
+        FilterState activeFilterState;
+        FilterState editedFilterState;
+
+        std::function<bool(GuiLogEntry const&)> currentFilter = NoFilter;
+
+        bool showSysTime{true};
+        bool showFunctionName{false};
+        bool showUcTime{true};
+        bool showLocation{true};
+        bool showChannel{true};
+        bool showLogLevel{true};
+
+        std::vector<MessageEntry> statusMessages;
+
         std::vector<BuildEntry> buildOutput;
         BuildStatus             buildStatus = BuildStatus::Idle;
 
-        std::vector<std::string> parsedBuildArgs;
-        boost::filesystem::path  buildExecutablePath;
+        std::vector<std::string> originalBuildArguments;
+        boost::filesystem::path  originalBuildExecutablePath;
 
-        std::string                                  stdoutBuffer;
-        std::string                                  stderrBuffer;
-        std::jthread                                 buildThread;
-        std::unique_ptr<boost::asio::io_context>     buildIoContext{};
-        std::unique_ptr<boost::asio::readable_pipe>  stdoutPipe{};
-        std::unique_ptr<boost::asio::readable_pipe>  stderrPipe{};
-        std::unique_ptr<boost::process::v2::process> buildProcess{};
+        std::vector<std::string> buildArguments;
+        boost::filesystem::path  buildExecutablePath;
+        std::vector<std::string> buildEnvironment;
+
+        int            selectedLocationIndex{};
+        SourceLocation selectedSourceLocation;
+        std::string    locationFilterInput;
+
+        int selectedTab{};
+
+        std::unique_ptr<boost::asio::io_context> buildIoContext;
+        std::jthread                             buildThread;
 
         void addBuildOutput(std::string const& line,
                             bool               fromTool,
                             bool               isError) {
-            std::lock_guard<std::mutex> lock{mutex};
+            std::lock_guard lock{mutex};
             buildOutput.emplace_back(std::chrono::system_clock::now(), line, fromTool, isError);
-            if(screen_ptr) {
-                screen_ptr->PostEvent(ftxui::Event::Custom);
+            if(screenPointer) {
+                screenPointer->PostEvent(ftxui::Event::Custom);
             }
         }
 
@@ -168,86 +177,10 @@ namespace uc_log { namespace FTXUIGui {
             buildOutput.emplace_back(std::chrono::system_clock::now(), line, false, isError);
         }
 
-        void startAsyncReadStdout() {
-            boost::asio::async_read_until(
-              *stdoutPipe,
-              boost::asio::dynamic_buffer(stdoutBuffer),
-              '\n',
-              [this](boost::system::error_code ec, std::size_t bytes_transferred) {
-                  if(!ec && bytes_transferred > 0) {
-                      auto pos = stdoutBuffer.find('\n');
-                      if(pos != std::string::npos) {
-                          std::string line = stdoutBuffer.substr(0, pos);
-                          stdoutBuffer.erase(0, pos + 1);
-                          addBuildOutput(line, true, false);
-                      }
-                      startAsyncReadStdout();
-                  }
-              });
-        }
-
-        void startAsyncReadStderr() {
-            boost::asio::async_read_until(
-              *stderrPipe,
-              boost::asio::dynamic_buffer(stderrBuffer),
-              '\n',
-              [this](boost::system::error_code ec, std::size_t bytes_transferred) {
-                  if(!ec && bytes_transferred > 0) {
-                      auto pos = stderrBuffer.find('\n');
-                      if(pos != std::string::npos) {
-                          std::string line = stderrBuffer.substr(0, pos);
-                          stderrBuffer.erase(0, pos + 1);
-                          addBuildOutput(line, true, true);
-                      }
-                      startAsyncReadStderr();
-                  }
-              });
-        }
-
-    private:
-        bool hasScript() const {
-            try {
-                auto scriptPath = boost::process::v1::search_path("script");
-                return !scriptPath.empty();
-            } catch(...) {
-                return false;
-            }
-        }
-
-        std::pair<boost::filesystem::path,
-                  std::vector<std::string>>
-        createColoredBuildCommand() const {
-            if(hasScript()) {
-                auto scriptPath = boost::process::v1::search_path("script");
-                if(!scriptPath.empty()) {
-                    std::vector<std::string> wrappedArgs;
-                    wrappedArgs.push_back("-q");
-                    wrappedArgs.push_back("-c");
-
-                    std::string commandStr = buildExecutablePath.string();
-                    for(auto const& arg : parsedBuildArgs) {
-                        commandStr += " ";
-                        if(arg.find(' ') != std::string::npos) {
-                            commandStr += "\"" + arg + "\"";
-                        } else {
-                            commandStr += arg;
-                        }
-                    }
-                    wrappedArgs.push_back(commandStr);
-                    wrappedArgs.push_back("/dev/null");
-
-                    return {scriptPath, wrappedArgs};
-                }
-            }
-
-            return {buildExecutablePath, parsedBuildArgs};
-        }
-
-        bool initializeBuildCommand(std::string const& buildCommandStr) {
-            std::vector<std::string> args;
-            std::string              currentArgument;
-            bool                     in_quotes   = false;
-            bool                     escape_next = false;
+        void initializeBuildCommand(std::string const& buildCommandStr) {
+            std::string currentArgument;
+            bool        in_quotes   = false;
+            bool        escape_next = false;
 
             for(char c : buildCommandStr) {
                 if(escape_next) {
@@ -259,7 +192,7 @@ namespace uc_log { namespace FTXUIGui {
                     in_quotes = !in_quotes;
                 } else if(c == ' ' && !in_quotes) {
                     if(!currentArgument.empty()) {
-                        args.push_back(currentArgument);
+                        originalBuildArguments.push_back(currentArgument);
                         currentArgument.clear();
                     }
                 } else {
@@ -268,122 +201,183 @@ namespace uc_log { namespace FTXUIGui {
             }
 
             if(!currentArgument.empty()) {
-                args.push_back(currentArgument);
+                originalBuildArguments.push_back(currentArgument);
             }
 
-            if(args.empty()) {
-                return false;
+            if(originalBuildArguments.empty()) {
+                throw std::invalid_argument("empty build command");
             }
 
-            std::string executable = args[0];
-            args.erase(args.begin());
+            originalBuildExecutablePath
+              = boost::process::environment::find_executable(originalBuildArguments[0]);
 
-            auto const ex = boost::process::v1::search_path(executable);
-            if(ex.empty()) {
-                return false;
+            if(originalBuildExecutablePath.empty()) {
+                throw std::invalid_argument(
+                  fmt::format("executable {} not found", originalBuildArguments[0]));
             }
 
-            parsedBuildArgs     = std::move(args);
-            buildExecutablePath = ex;
+            originalBuildArguments.erase(originalBuildArguments.begin());
 
-            return true;
+            auto const scriptPath = boost::process::environment::find_executable("script");
+            if(!scriptPath.empty()) {
+                buildArguments.push_back("-q");
+                buildArguments.push_back("-c");
+
+                std::string commandStr = originalBuildExecutablePath.string();
+                for(auto const& arg : originalBuildArguments) {
+                    commandStr += " ";
+                    if(arg.find(' ') != std::string::npos) {
+                        commandStr += "\"" + arg + "\"";
+                    } else {
+                        commandStr += arg;
+                    }
+                }
+                buildArguments.push_back(commandStr);
+                buildArguments.push_back("/dev/null");
+
+                buildExecutablePath = scriptPath;
+            } else {
+                buildArguments      = originalBuildArguments;
+                buildExecutablePath = originalBuildExecutablePath;
+            }
+
+            for(auto const& var : boost::process::environment::current()) {
+                buildEnvironment.push_back(var.string());
+            }
+
+            buildEnvironment.push_back("FORCE_COLOR=1");
+            buildEnvironment.push_back("CLICOLOR_FORCE=1");
+            buildEnvironment.push_back("COLORTERM=truecolor");
+            buildEnvironment.push_back("CMAKE_COLOR_DIAGNOSTICS=ON");
+            buildEnvironment.push_back("NINJA_STATUS=[%f/%t] ");
         }
 
-    public:
-        void executeAsyncBuild() {
-            if(buildStatus == BuildStatus::Running) {
+        void cancelBuild() {
+            try {
+                if(buildStatus != BuildStatus::Running || !buildIoContext) {
+                    return;
+                }
+
+                if(buildThread.joinable()) {
+                    buildThread.request_stop();
+                    buildIoContext->stop();
+                }
+
+            } catch(std::exception const& e) {
+                addBuildOutputGui(fmt::format("❌ Error stopping build: {}", e.what()), true);
+            }
+        }
+
+        void executeBuild() {
+            if(buildStatus == BuildStatus::Running || buildThread.joinable()) {
                 return;
             }
 
-            if(buildIoContext) {
-                buildIoContext->stop();
-            }
-
             buildOutput.clear();
+
             buildStatus = BuildStatus::Running;
 
-            if(buildThread.joinable()) {
-                buildThread.join();
-            }
-
             try {
-                stdoutPipe.reset();
-                stderrPipe.reset();
-                buildProcess.reset();
-
                 buildIoContext = std::make_unique<boost::asio::io_context>();
 
                 addBuildOutputGui(fmt::format("🚀 Starting process: {} {}",
-                                              buildExecutablePath.string(),
-                                              parsedBuildArgs),
+                                              originalBuildExecutablePath.string(),
+                                              originalBuildArguments),
                                   false);
 
-                buildThread = std::jthread{[this]() {
-                    stdoutPipe = std::make_unique<boost::asio::readable_pipe>(*buildIoContext);
-                    stderrPipe = std::make_unique<boost::asio::readable_pipe>(*buildIoContext);
+                buildThread = std::jthread{[this](std::stop_token stoken) {
+                    try {
+                        std::string                stdoutBuffer;
+                        std::string                stderrBuffer;
+                        boost::asio::readable_pipe stdoutPipe{*buildIoContext};
+                        boost::asio::readable_pipe stderrPipe{*buildIoContext};
 
-                    auto [execPath, execArgs] = createColoredBuildCommand();
-                    std::vector<std::string> envVars;
+                        boost::process::v2::process buildProcess{
+                          *buildIoContext,
+                          buildExecutablePath,
+                          buildArguments,
+                          boost::process::v2::process_stdio{nullptr, stdoutPipe, stderrPipe},
+                          boost::process::process_environment{buildEnvironment}
+                        };
 
-                    auto currentEnv = boost::this_process::environment();
-                    for(auto const& envVar : currentEnv) {
-                        envVars.push_back(envVar.get_name() + "=" + envVar.to_string());
-                    }
-                    envVars.push_back("FORCE_COLOR=1");
-                    envVars.push_back("CLICOLOR_FORCE=1");
-                    envVars.push_back("COLORTERM=truecolor");
-                    envVars.push_back("CMAKE_COLOR_DIAGNOSTICS=ON");
-                    envVars.push_back("NINJA_STATUS=[%f/%t] ");
+                        auto createRead =
+                          [this](auto& pipe, auto& buffer, auto& self, bool isError) {
+                              return [this, &pipe, &buffer, &self, isError]() {
+                                  boost::asio::async_read_until(
+                                    pipe,
+                                    boost::asio::dynamic_buffer(buffer),
+                                    '\n',
+                                    [this, &buffer, &self, isError](boost::system::error_code ec,
+                                                                    std::size_t bytes_transferred) {
+                                        if(!ec && bytes_transferred > 0) {
+                                            auto pos = buffer.find('\n');
+                                            if(pos != std::string::npos) {
+                                                std::string line = buffer.substr(0, pos);
+                                                buffer.erase(0, pos + 1);
+                                                addBuildOutput(line, true, isError);
+                                            }
+                                            self();
+                                        }
+                                    });
+                              };
+                          };
 
-                    buildProcess = std::make_unique<boost::process::v2::process>(
-                      *buildIoContext,
-                      execPath,
-                      execArgs,
-                      boost::process::v2::process_stdio{nullptr, *stdoutPipe, *stderrPipe},
-                      boost::process::v2::process_environment{envVars});
+                        std::function<void(void)> readOut;
+                        readOut = createRead(stdoutPipe, stdoutBuffer, readOut, false);
+                        std::function<void(void)> readErr;
+                        readErr = createRead(stderrPipe, stderrBuffer, readErr, true);
 
-                    startAsyncReadStdout();
-                    startAsyncReadStderr();
+                        readOut();
+                        readErr();
 
-                    buildProcess->async_wait([this](boost::system::error_code ec, int exitCode) {
+                        int processExitCode = 1;
+
+                        buildProcess.async_wait(
+                          [this, &processExitCode](boost::system::error_code ec, int exitCode) {
+                              processExitCode = exitCode;
+                              if(ec) {
+                                  addBuildOutput(fmt::format("❌ Process error: {}", ec.message()),
+                                                 false,
+                                                 true);
+                              } else {
+                                  addBuildOutput(fmt::format("🏁 Build {} (exit code: {})",
+                                                             exitCode == 0 ? "succeeded" : "failed",
+                                                             exitCode),
+                                                 false,
+                                                 exitCode != 0);
+                              }
+                              buildThread.request_stop();
+                          });
+                        while(!stoken.stop_requested()) {
+                            buildIoContext->run_one_for(std::chrono::milliseconds{100});
+                        }
+                        if(buildProcess.running()) {
+                            addBuildOutput("❌ Build ended by user", false, true);
+                            buildProcess.terminate();
+                        }
+
                         {
                             std::lock_guard<std::mutex> lock{mutex};
                             buildStatus
-                              = (exitCode == 0) ? BuildStatus::Success : BuildStatus::Failed;
+                              = (processExitCode == 0) ? BuildStatus::Success : BuildStatus::Failed;
                         }
 
-                        if(ec) {
-                            addBuildOutput(fmt::format("❌ Process error: {}", ec.message()),
-                                           false,
-                                           true);
-                        } else {
-                            addBuildOutput(fmt::format("🏁 Build {} (exit code: {})",
-                                                       exitCode == 0 ? "succeeded" : "failed",
-                                                       exitCode),
-                                           false,
-                                           exitCode != 0);
+                    } catch(std::exception const& e) {
+                        {
+                            std::lock_guard<std::mutex> lock{mutex};
+                            buildStatus = BuildStatus::Failed;
                         }
-                    });
-                    buildIoContext->run();
 
-                    if(buildProcess->running()) {
-                        buildProcess->terminate();
+                        addBuildOutput(fmt::format("❌ Build error: {}", e.what()), false, true);
                     }
-                }};
 
-            } catch(boost::system::system_error const& e) {
-                buildStatus = BuildStatus::Failed;
-                addBuildOutputGui(fmt::format("❌ System error: {}", e.what()), true);
+                    callJoin = true;
+                }};
             } catch(std::exception const& e) {
                 buildStatus = BuildStatus::Failed;
                 addBuildOutputGui(fmt::format("❌ Build error: {}", e.what()), true);
-            } catch(...) {
-                buildStatus = BuildStatus::Failed;
-                addBuildOutputGui("❌ Unknown error occurred during build", true);
             }
         }
-
-        void executeBuild() { executeAsyncBuild(); }
 
         auto defaultRender(GuiLogEntry const& e) {
             ftxui::Elements elements;
@@ -511,55 +505,6 @@ namespace uc_log { namespace FTXUIGui {
             updateFilteredLogEntries();
         }
 
-        void add(std::chrono::system_clock::time_point recv_time,
-                 uc_log::detail::LogEntry const&       e) {
-            {
-                std::lock_guard<std::mutex> lock{mutex};
-                auto entry = std::make_shared<GuiLogEntry const>(recv_time, e);
-                allLogEntries.push_back(entry);
-                allSourceLocations[SourceLocation{e.fileName, e.line}]++;
-                if(currentFilter(*entry)) {
-                    filteredLogEntries.push_back(entry);
-                }
-            }
-            {
-                std::lock_guard<std::mutex> lock{mutex};
-                if(screen_ptr) {
-                    screen_ptr->PostEvent(ftxui::Event::Custom);
-                }
-            }
-        }
-
-        void fatalError(std::string_view msg) {
-            std::lock_guard<std::mutex> lock{mutex};
-            messages.emplace_back(MessageEntry::Level::Fatal,
-                                  std::chrono::system_clock::now(),
-                                  std::string{msg});
-            if(screen_ptr) {
-                screen_ptr->PostEvent(ftxui::Event::Custom);
-            }
-        }
-
-        void statusMessage(std::string_view msg) {
-            std::lock_guard<std::mutex> lock{mutex};
-            messages.emplace_back(MessageEntry::Level::Status,
-                                  std::chrono::system_clock::now(),
-                                  std::string{msg});
-            if(screen_ptr) {
-                screen_ptr->PostEvent(ftxui::Event::Custom);
-            }
-        }
-
-        void errorMessage(std::string_view msg) {
-            std::lock_guard<std::mutex> lock{mutex};
-            messages.emplace_back(MessageEntry::Level::Error,
-                                  std::chrono::system_clock::now(),
-                                  std::string{msg});
-            if(screen_ptr) {
-                screen_ptr->PostEvent(ftxui::Event::Custom);
-            }
-        }
-
         ftxui::Component getLogComponent() {
             return Scroller(
               [&]() -> std::vector<std::shared_ptr<GuiLogEntry const>> const& {
@@ -571,12 +516,12 @@ namespace uc_log { namespace FTXUIGui {
         ftxui::Component getStatusComponent() {
             auto clearButton = ftxui::Button(
               "🗑️ Clear messages",
-              [this]() { messages.clear(); },
+              [this]() { statusMessages.clear(); },
               ftxui::ButtonOption::Animated(ftxui::Color::Yellow));
 
             return ftxui::Container::Vertical(
               {clearButton,
-               Scroller([&]() -> std::vector<MessageEntry> const& { return messages; },
+               Scroller([&]() -> std::vector<MessageEntry> const& { return statusMessages; },
                         [&](auto const& e) { return renderMessage(e); })});
         }
 
@@ -599,6 +544,31 @@ namespace uc_log { namespace FTXUIGui {
             return ftxui::hbox(elements);
         }
 
+        ftxui::Element buildStatusToElement() {
+            std::string  statusText;
+            ftxui::Color statusColor;
+
+            switch(buildStatus) {
+            case BuildStatus::Idle:
+                statusText  = "⚪ Idle";
+                statusColor = ftxui::Color::GrayDark;
+                break;
+            case BuildStatus::Running:
+                statusText  = "🟡 Building...";
+                statusColor = ftxui::Color::Yellow;
+                break;
+            case BuildStatus::Success:
+                statusText  = "✅ Success";
+                statusColor = ftxui::Color::Green;
+                break;
+            case BuildStatus::Failed:
+                statusText  = "❌ Failed";
+                statusColor = ftxui::Color::Red;
+                break;
+            }
+            return ftxui::text(statusText) | ftxui::color(statusColor) | ftxui::bold;
+        }
+
         ftxui::Component getBuildComponent() {
             auto clearButton = ftxui::Button(
               "🗑️ Clear Output",
@@ -607,62 +577,20 @@ namespace uc_log { namespace FTXUIGui {
 
             auto stopButton = ftxui::Button(
               "⏸ Stop Build",
-              [this]() {
-                  try {
-                      if(buildIoContext) {
-                          boost::asio::post(*buildIoContext, [this]() {
-                              if(buildProcess->running()) {
-                                  buildProcess->terminate();
-                                  addBuildOutputGui("Stopped build process...", false);
-                              }
-                              buildIoContext->stop();
-                          });
-                      }
-
-                      if(buildThread.joinable()) {
-                          buildThread.join();
-                      }
-                      buildStatus = BuildStatus::Failed;
-                  } catch(std::exception const& e) {
-                      addBuildOutputGui(fmt::format("❌ Error stopping build: {}", e.what()), true);
-                  }
-              },
+              [this]() { cancelBuild(); },
               ftxui::ButtonOption::Animated(ftxui::Color::Red));
 
             auto buildButton = ftxui::Button(
               "🔨 Start Build [b]",
-              [this]() { executeAsyncBuild(); },
+              [this]() { executeBuild(); },
               ftxui::ButtonOption::Animated(ftxui::Color::Green));
 
             auto statusDisplay = ftxui::Renderer([this]() {
-                std::string  statusText;
-                ftxui::Color statusColor;
-
-                switch(buildStatus) {
-                case BuildStatus::Idle:
-                    statusText  = "⚪ Idle";
-                    statusColor = ftxui::Color::GrayDark;
-                    break;
-                case BuildStatus::Running:
-                    statusText  = "🟡 Building...";
-                    statusColor = ftxui::Color::Yellow;
-                    break;
-                case BuildStatus::Success:
-                    statusText  = "✅ Success";
-                    statusColor = ftxui::Color::Green;
-                    break;
-                case BuildStatus::Failed:
-                    statusText  = "❌ Failed";
-                    statusColor = ftxui::Color::Red;
-                    break;
-                }
-
                 return ftxui::vbox({ftxui::text("🔨 Build Status") | ftxui::bold
                                       | ftxui::color(ftxui::Color::Cyan) | ftxui::center,
                                     ftxui::separator(),
                                     ftxui::hbox({ftxui::text("Status: ") | ftxui::bold,
-                                                 ftxui::text(statusText) | ftxui::color(statusColor)
-                                                   | ftxui::bold}),
+                                                 buildStatusToElement()}),
                                     ftxui::hbox({ftxui::text("Output Lines: ") | ftxui::bold,
                                                  ftxui::text(fmt::format("{}", buildOutput.size()))
                                                    | ftxui::color(ftxui::Color::Cyan)})})
@@ -779,10 +707,6 @@ namespace uc_log { namespace FTXUIGui {
 
             return ftxui::Container::Vertical(channel_components) | ftxui::border;
         }
-
-        int            selectedLocationIndex{};
-        SourceLocation selectedSourceLocation;
-        std::string    locationFilterInput;
 
         ftxui::Component getLocationFilterComponent() {
             auto addEntry = [this](SourceLocation const& sc) {
@@ -1062,8 +986,6 @@ namespace uc_log { namespace FTXUIGui {
                statusDisplay});
         }
 
-        int tab_selected{};
-
         ftxui::Component
         generateTabsComponent(std::vector<std::pair<std::string_view,
                                                     ftxui::Component>> const& entries) {
@@ -1076,28 +998,13 @@ namespace uc_log { namespace FTXUIGui {
             }
 
             auto toggle
-              = ftxui::Toggle(std::move(tab_values), &tab_selected) | ftxui::bold | ftxui::border;
+              = ftxui::Toggle(std::move(tab_values), &selectedTab) | ftxui::bold | ftxui::border;
 
             ftxui::Components vertical_components{
               toggle,
-              ftxui::Container::Tab(std::move(tab_components), &tab_selected) | ftxui::flex};
+              ftxui::Container::Tab(std::move(tab_components), &selectedTab) | ftxui::flex};
 
             return ftxui::Container::Vertical(vertical_components);
-        }
-
-        template<typename Reader>
-        ftxui::Component getTabComponent(Reader& rttReader) {
-            auto tabs = generateTabsComponent({
-              {   "📄 Logs",                getLogComponent()},
-              { "🔍 Filter",             getFilterComponent()},
-              {"🎨 Display", getAppearanceSettingsComponent()},
-              {  "🔧 Debug",  getDebuggerComponent(rttReader)},
-              {  "🔨 Build",              getBuildComponent()},
-              { "💬 Status",             getStatusComponent()}
-            });
-
-            return ftxui::Container::Vertical(
-              {getStatusLineComponent(rttReader), tabs | ftxui::flex});
         }
 
         template<typename Reader>
@@ -1107,27 +1014,6 @@ namespace uc_log { namespace FTXUIGui {
                 auto const logCount     = filteredLogEntries.size();
                 auto const totalCount   = allLogEntries.size();
                 bool const filterActive = activeFilterState != FilterState{};
-
-                std::string  statusText;
-                ftxui::Color statusColor;
-                switch(buildStatus) {
-                case BuildStatus::Idle:
-                    statusText  = "⚪ Idle";
-                    statusColor = ftxui::Color::GrayDark;
-                    break;
-                case BuildStatus::Running:
-                    statusText  = "🟡 Building...";
-                    statusColor = ftxui::Color::Yellow;
-                    break;
-                case BuildStatus::Success:
-                    statusText  = "✅ Success";
-                    statusColor = ftxui::Color::Green;
-                    break;
-                case BuildStatus::Failed:
-                    statusText  = "❌ Failed";
-                    statusColor = ftxui::Color::Red;
-                    break;
-                }
 
                 return ftxui::hbox(
                          {ftxui::text(rttStatus.isRunning != 0 ? "● Connected" : "○ Disconnected")
@@ -1149,7 +1035,8 @@ namespace uc_log { namespace FTXUIGui {
                             | ftxui::color(filterActive ? ftxui::Color::Yellow
                                                         : ftxui::Color::Green),
                           ftxui::separator(),
-                          ftxui::text(fmt::format("🔨 {}", statusText)) | ftxui::color(statusColor),
+                          ftxui::text("🔨 "),
+                          buildStatusToElement(),
                           ftxui::separator(),
                           ftxui::filler(),
                           ftxui::text("[q]uit [r]eset [f]lash [b]uild [d]ebugger_reset")
@@ -1159,12 +1046,71 @@ namespace uc_log { namespace FTXUIGui {
         }
 
         template<typename Reader>
+        ftxui::Component getTabComponent(Reader& rttReader) {
+            auto tabs = generateTabsComponent({
+              {   "📄 Logs",                getLogComponent()},
+              { "🔍 Filter",             getFilterComponent()},
+              {"🎨 Display", getAppearanceSettingsComponent()},
+              {  "🔧 Debug",  getDebuggerComponent(rttReader)},
+              {  "🔨 Build",              getBuildComponent()},
+              { "💬 Status",             getStatusComponent()}
+            });
+
+            return ftxui::Container::Vertical(
+              {getStatusLineComponent(rttReader), tabs | ftxui::flex});
+        }
+
+    public:
+        void add(std::chrono::system_clock::time_point recv_time,
+                 uc_log::detail::LogEntry const&       e) {
+            {
+                std::lock_guard<std::mutex> lock{mutex};
+                auto entry = std::make_shared<GuiLogEntry const>(recv_time, e);
+                allLogEntries.push_back(entry);
+                allSourceLocations[SourceLocation{e.fileName, e.line}]++;
+                if(currentFilter(*entry)) {
+                    filteredLogEntries.push_back(entry);
+                }
+                if(screenPointer) {
+                    screenPointer->PostEvent(ftxui::Event::Custom);
+                }
+            }
+        }
+
+        void fatalError(std::string_view msg) {
+            std::lock_guard<std::mutex> lock{mutex};
+            statusMessages.emplace_back(MessageEntry::Level::Fatal,
+                                        std::chrono::system_clock::now(),
+                                        std::string{msg});
+            if(screenPointer) {
+                screenPointer->PostEvent(ftxui::Event::Custom);
+            }
+        }
+
+        void statusMessage(std::string_view msg) {
+            std::lock_guard<std::mutex> lock{mutex};
+            statusMessages.emplace_back(MessageEntry::Level::Status,
+                                        std::chrono::system_clock::now(),
+                                        std::string{msg});
+            if(screenPointer) {
+                screenPointer->PostEvent(ftxui::Event::Custom);
+            }
+        }
+
+        void errorMessage(std::string_view msg) {
+            std::lock_guard<std::mutex> lock{mutex};
+            statusMessages.emplace_back(MessageEntry::Level::Error,
+                                        std::chrono::system_clock::now(),
+                                        std::string{msg});
+            if(screenPointer) {
+                screenPointer->PostEvent(ftxui::Event::Custom);
+            }
+        }
+
+        template<typename Reader>
         int run(Reader&            rttReader,
                 std::string const& buildCommand) {
-            if(!initializeBuildCommand(buildCommand)) {
-                fmt::print(stderr, "❌ Invalid build command: {}\n", buildCommand);
-                return 1;
-            }
+            initializeBuildCommand(buildCommand);
 
             static std::atomic<bool> gotSignal{};
             {
@@ -1183,11 +1129,11 @@ namespace uc_log { namespace FTXUIGui {
             ftxui::Component mainComponent;
             {
                 std::lock_guard<std::mutex> lock{mutex};
-                screen_ptr = &screen;
+                screenPointer = &screen;
 
                 mainComponent
                   = ftxui::CatchEvent(getTabComponent(rttReader), [&](ftxui::Event event) {
-                        if(tab_selected == 1 && event.is_character()) {
+                        if(selectedTab == 1 && event.is_character()) {
                             return false;
                         }
 
@@ -1208,14 +1154,14 @@ namespace uc_log { namespace FTXUIGui {
                             return true;
                         }
                         if(event == ftxui::Event::Character('q')) {
-                            screen_ptr->Exit();
+                            screenPointer->Exit();
                             return true;
                         }
 
                         return false;
                     });
             }
-            ftxui::Loop loop(screen_ptr, mainComponent);
+            ftxui::Loop loop(screenPointer, mainComponent);
 
             while(!loop.HasQuitted() && !gotSignal) {
                 {
@@ -1223,6 +1169,12 @@ namespace uc_log { namespace FTXUIGui {
                     loop.RunOnce();
                 }
                 std::this_thread::sleep_for(GUI_Constants::UpdateInterval);
+                if(callJoin == true) {
+                    if(buildThread.joinable()) {
+                        buildThread.join();
+                    }
+                    callJoin = false;
+                }
             }
 
             return 0;
