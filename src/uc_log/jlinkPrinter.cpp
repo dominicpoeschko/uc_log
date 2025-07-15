@@ -54,15 +54,15 @@ int main(int    argc,
 
     std::uint32_t speed{};
     std::string   device{};
-    std::uint32_t channels;
-    std::string   mapFile;
-    std::string   hexFile;
-    std::string   stringConstantsFile;
+    std::uint32_t channels{};
+    std::string   mapFile{};
+    std::string   hexFile{};
+    std::string   stringConstantsFile{};
     std::string   host{};
     std::string   logDir{};
     std::string   buildCommand{};
     std::string   guiType{uc_log::Gui::getTypes().front()};
-    std::uint16_t port;
+    std::uint16_t port{};
 
     app.add_option("--trace_port", port, "tcp for trace")->required();
     app.add_option("--speed", speed, "swd speed")->required();
@@ -93,8 +93,7 @@ int main(int    argc,
     }
 
     uc_log::Gui gui{guiType};
-
-    auto logFilePrinter = [&gui, &logFile](std::chrono::system_clock::time_point recv_time,
+    auto        logFilePrinter = [&gui, &logFile](std::chrono::system_clock::time_point recv_time,
                                            uc_log::detail::LogEntry const&       e) {
         if(logFile) {
             std::stringstream quotedMsg;
@@ -131,7 +130,6 @@ int main(int    argc,
                 tcpSender.send(fmt::format("/*{:%Q},{}*/\n", e.ucTime.time, e.logMsg));
             }
         };
-
     auto printer
       = [&tcpPrinter, &logFilePrinter, &gui](std::chrono::system_clock::time_point recv_time,
                                              uc_log::detail::LogEntry const&       e) {
@@ -139,7 +137,6 @@ int main(int    argc,
             logFilePrinter(recv_time, e);
             gui.add(recv_time, e);
         };
-
     TimeDelayedQueue<uc_log::detail::LogEntry,
                      decltype([](auto const& e) { return e.entry.ucTime; })>
       q{printer};

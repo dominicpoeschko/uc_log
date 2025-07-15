@@ -9,8 +9,8 @@ namespace uc_log {
 struct Gui {
     static std::vector<std::string> getTypes() {
         std::vector<std::string> types;
-        types.push_back("simple");
         types.push_back("ftxui");
+        types.push_back("simple");
         return types;
     }
 

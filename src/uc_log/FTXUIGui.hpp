@@ -38,6 +38,8 @@
     #pragma clang diagnostic ignored "-Wreserved-identifier"
     #pragma clang diagnostic ignored "-Wnewline-eof"
     #pragma clang diagnostic ignored "-Wredundant-parens"
+    #pragma clang diagnostic ignored "-Winconsistent-missing-destructor-override"
+    #pragma clang diagnostic ignored "-Wundef"
 #endif
 
 #include <boost/asio.hpp>
@@ -165,7 +167,7 @@ namespace uc_log { namespace FTXUIGui {
         void addBuildOutput(std::string const& line,
                             bool               fromTool,
                             bool               isError) {
-            std::lock_guard lock{mutex};
+            std::lock_guard<std::mutex> lock{mutex};
             buildOutput.emplace_back(std::chrono::system_clock::now(), line, fromTool, isError);
             if(screenPointer) {
                 screenPointer->PostEvent(ftxui::Event::Custom);
@@ -241,7 +243,7 @@ namespace uc_log { namespace FTXUIGui {
                 buildExecutablePath = originalBuildExecutablePath;
             }
 
-            for(auto const& var : boost::process::environment::current()) {
+            for(auto const var : boost::process::environment::current()) {
                 buildEnvironment.push_back(var.string());
             }
 
@@ -330,16 +332,19 @@ namespace uc_log { namespace FTXUIGui {
                         readOut();
                         readErr();
 
-                        int processExitCode = 1;
+                        int  processExitCode = 1;
+                        bool completed       = false;
 
                         buildProcess.async_wait(
-                          [this, &processExitCode](boost::system::error_code ec, int exitCode) {
+                          [this, &processExitCode, &completed](boost::system::error_code ec,
+                                                               int                       exitCode) {
                               processExitCode = exitCode;
                               if(ec) {
                                   addBuildOutput(fmt::format("❌ Process error: {}", ec.message()),
                                                  false,
                                                  true);
                               } else {
+                                  completed = true;
                                   addBuildOutput(fmt::format("🏁 Build {} (exit code: {})",
                                                              exitCode == 0 ? "succeeded" : "failed",
                                                              exitCode),
@@ -351,7 +356,7 @@ namespace uc_log { namespace FTXUIGui {
                         while(!stoken.stop_requested()) {
                             buildIoContext->run_one_for(std::chrono::milliseconds{100});
                         }
-                        if(buildProcess.running()) {
+                        if(!completed && buildProcess.running()) {
                             addBuildOutput("❌ Build ended by user", false, true);
                             buildProcess.terminate();
                         }
@@ -1113,7 +1118,7 @@ namespace uc_log { namespace FTXUIGui {
             initializeBuildCommand(buildCommand);
 
             static std::atomic<bool> gotSignal{};
-            {
+            /* {
                 struct sigaction sa{};
                 sa.sa_handler = [](int) { gotSignal = true; };
                 ::sigemptyset(&sa.sa_mask);
@@ -1123,13 +1128,13 @@ namespace uc_log { namespace FTXUIGui {
                                std::strerror(errno));
                     return 1;
                 }
-            }
+            }*/
 
-            auto             screen = ftxui::ScreenInteractive::Fullscreen();
+            auto screen = ftxui::ScreenInteractive::Fullscreen();
+            screen.ForceHandleCtrlC(true);
             ftxui::Component mainComponent;
             {
                 std::lock_guard<std::mutex> lock{mutex};
-                screenPointer = &screen;
 
                 mainComponent
                   = ftxui::CatchEvent(getTabComponent(rttReader), [&](ftxui::Event event) {
@@ -1161,12 +1166,15 @@ namespace uc_log { namespace FTXUIGui {
                         return false;
                     });
             }
-            ftxui::Loop loop(screenPointer, mainComponent);
+            ftxui::Loop loop(&screen, mainComponent);
 
             while(!loop.HasQuitted() && !gotSignal) {
                 {
                     std::lock_guard<std::mutex> lock{mutex};
                     loop.RunOnce();
+                    if(screenPointer == nullptr) {
+                        screenPointer = &screen;
+                    }
                 }
                 std::this_thread::sleep_for(GUI_Constants::UpdateInterval);
                 if(callJoin == true) {
@@ -1175,6 +1183,10 @@ namespace uc_log { namespace FTXUIGui {
                     }
                     callJoin = false;
                 }
+            }
+            {
+                std::lock_guard<std::mutex> lock{mutex};
+                screenPointer = nullptr;
             }
 
             return 0;
