@@ -47,7 +47,7 @@ namespace uc_log { namespace detail {
     #define UC_LOG_IMPL(level, line, filename, fmt, ...)                                      \
         do {                                                                                  \
             if(!std::is_constant_evaluated()) {                                               \
-                constexpr auto UC_LOG_DO_NOT_USE_FUNCTION_NAME = __PRETTY_FUNCTION__;         \
+                constexpr auto UC_LOG_DO_NOT_USE_FUNCTION_NAME = __FUNCTION__;                \
                 using namespace ::remote_fmt::detail;                                         \
                 using namespace ::sc::literals;                                               \
                 ::uc_log::detail::log<::uc_log::ComBackend<::uc_log::Tag::User>>(             \
@@ -80,3 +80,4 @@ namespace uc_log { namespace detail {
 #define UC_LOG_W(...) UC_LOG(::uc_log::LogLevel::warn, __VA_ARGS__)
 #define UC_LOG_E(...) UC_LOG(::uc_log::LogLevel::error, __VA_ARGS__)
 #define UC_LOG_C(...) UC_LOG(::uc_log::LogLevel::crit, __VA_ARGS__)
+
