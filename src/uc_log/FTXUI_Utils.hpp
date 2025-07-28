@@ -725,41 +725,50 @@ namespace uc_log { namespace FTXUIGui {
         std::string currentHyperlink;
 
         auto applyStyles = [&](std::string const& text) {
-            auto element = ftxui::text(text);
+            ftxui::Elements textElements;
 
-            if(currentFgColor != ftxui::Color::Default) {
-                element |= ftxui::color(currentFgColor);
-            }
-            if(currentBgColor != ftxui::Color::Default) {
-                element |= ftxui::bgcolor(currentBgColor);
-            }
-            if(bold) {
-                element |= ftxui::bold;
-            }
-            if(dim) {
-                element |= ftxui::dim;
-            }
-            if(italic) {
-                element |= ftxui::italic;
-            }
-            if(underline) {
-                element |= ftxui::underlined;
-            }
-            if(blink) {
-                element |= ftxui::blink;
-            }
-            if(reverse) {
-                element |= ftxui::inverted;
-            }
-            if(strikethrough) {
-                element |= ftxui::strikethrough;
-            }
+            for(bool first = true; auto line : std::views::split(text, '\n')) {
+                if(!first) {
+                    textElements.push_back(ftxui::text("↩") | ftxui::color(ftxui::Color::Red));
+                }
+                first = false;
 
-            if(!currentHyperlink.empty()) {
-                element = ftxui::hyperlink(currentHyperlink, element);
-            }
+                auto element = ftxui::text(std::string{line.begin(), line.end()});
 
-            return element;
+                if(currentFgColor != ftxui::Color::Default) {
+                    element |= ftxui::color(currentFgColor);
+                }
+                if(currentBgColor != ftxui::Color::Default) {
+                    element |= ftxui::bgcolor(currentBgColor);
+                }
+                if(bold) {
+                    element |= ftxui::bold;
+                }
+                if(dim) {
+                    element |= ftxui::dim;
+                }
+                if(italic) {
+                    element |= ftxui::italic;
+                }
+                if(underline) {
+                    element |= ftxui::underlined;
+                }
+                if(blink) {
+                    element |= ftxui::blink;
+                }
+                if(reverse) {
+                    element |= ftxui::inverted;
+                }
+                if(strikethrough) {
+                    element |= ftxui::strikethrough;
+                }
+
+                if(!currentHyperlink.empty()) {
+                    element = ftxui::hyperlink(currentHyperlink, element);
+                }
+                textElements.push_back(element);
+            }
+            return ftxui::hbox(textElements);
         };
 
         auto parseAnsiCode = [&](std::string const& codeStr) {
@@ -935,3 +944,4 @@ namespace uc_log { namespace FTXUIGui {
     }
 
 }}   // namespace uc_log::FTXUIGui
+
