@@ -522,12 +522,20 @@ namespace uc_log { namespace FTXUIGui {
             auto clearButton = ftxui::Button(
               "🗑️ Clear messages",
               [this]() { statusMessages.clear(); },
-              ftxui::ButtonOption::Animated(ftxui::Color::Yellow));
+              createButtonStyle(ftxui::Color::RedLight, ftxui::Color::Black));
 
             return ftxui::Container::Vertical(
               {clearButton,
-               Scroller([&]() -> std::vector<MessageEntry> const& { return statusMessages; },
-                        [&](auto const& e) { return renderMessage(e); })});
+               ftxui::Renderer([]() { return ftxui::separator(); }),
+               ftxui::Container::Vertical(
+                 {Scroller([&]() -> std::vector<MessageEntry> const& { return statusMessages; },
+                           [&](auto const& e) { return renderMessage(e); })})
+                 | ftxui::Renderer([](ftxui::Element inner) {
+                       return ftxui::vbox({ftxui::text("💬 Status Messages") | ftxui::bold
+                                             | ftxui::color(ftxui::Color::Green) | ftxui::center,
+                                           ftxui::separator(),
+                                           inner});
+                   })});
         }
 
         ftxui::Element renderBuildEntry(BuildEntry const& entry) {
@@ -578,39 +586,42 @@ namespace uc_log { namespace FTXUIGui {
             auto clearButton = ftxui::Button(
               "🗑️ Clear Output",
               [this]() { buildOutput.clear(); },
-              ftxui::ButtonOption::Animated(ftxui::Color::Yellow));
+              createButtonStyle(ftxui::Color::RedLight, ftxui::Color::Black));
 
             auto stopButton = ftxui::Button(
               "⏸ Stop Build",
               [this]() { cancelBuild(); },
-              ftxui::ButtonOption::Animated(ftxui::Color::Red));
+              createButtonStyle(ftxui::Color::Red, ftxui::Color::Black));
 
             auto buildButton = ftxui::Button(
               "🔨 Start Build [b]",
               [this]() { executeBuild(); },
-              ftxui::ButtonOption::Animated(ftxui::Color::Green));
-
-            auto statusDisplay = ftxui::Renderer([this]() {
-                return ftxui::vbox({ftxui::text("🔨 Build Status") | ftxui::bold
-                                      | ftxui::color(ftxui::Color::Cyan) | ftxui::center,
-                                    ftxui::separator(),
-                                    ftxui::hbox({ftxui::text("Status: ") | ftxui::bold,
-                                                 buildStatusToElement()}),
-                                    ftxui::hbox({ftxui::text("Output Lines: ") | ftxui::bold,
-                                                 ftxui::text(fmt::format("{}", buildOutput.size()))
-                                                   | ftxui::color(ftxui::Color::Cyan)})})
-                     | ftxui::borderRounded;
-            });
+              createButtonStyle(ftxui::Color::GreenLight, ftxui::Color::Black));
 
             auto outputScroller
               = Scroller([&]() -> std::vector<BuildEntry> const& { return buildOutput; },
                          [&](auto const& e) { return renderBuildEntry(e); });
 
+            auto statusDisplay
+              = ftxui::Container::Vertical({outputScroller | ftxui::flex})
+              | ftxui::Renderer([this](ftxui::Element inner) {
+                    return ftxui::vbox(
+                      {ftxui::text("🔨 Build Status") | ftxui::bold
+                         | ftxui::color(ftxui::Color::Cyan) | ftxui::center,
+                       ftxui::separator(),
+                       ftxui::hbox({ftxui::text("Status: ") | ftxui::bold, buildStatusToElement()}),
+                       ftxui::hbox({ftxui::text("Output Lines: ") | ftxui::bold,
+                                    ftxui::text(fmt::format("{}", buildOutput.size()))
+                                      | ftxui::color(ftxui::Color::Cyan)}),
+                       ftxui::separator(),
+                       inner});
+                });
+
             return ftxui::Container::Vertical(
               {ftxui::Container::Horizontal(
                  {buildButton | ftxui::flex, stopButton | ftxui::flex, clearButton | ftxui::flex}),
-               statusDisplay,
-               outputScroller | ftxui::flex});
+               ftxui::Renderer([]() { return ftxui::separator(); }),
+               statusDisplay | ftxui::flex});
         }
 
         ftxui::Component getLogLevelFilterComponent() {
@@ -629,7 +640,7 @@ namespace uc_log { namespace FTXUIGui {
                   editedFilterState.enabledLogLevels.clear();
                   updateCurrentFilter();
               },
-              ftxui::ButtonOption::Animated(ftxui::Color::Cyan));
+              createButtonStyle(ftxui::Color::CyanLight, ftxui::Color::Black));
 
             logLevel_components.push_back(allButton);
 
@@ -676,7 +687,7 @@ namespace uc_log { namespace FTXUIGui {
                   editedFilterState.enabledChannels.clear();
                   updateCurrentFilter();
               },
-              ftxui::ButtonOption::Animated(ftxui::Color::Yellow));
+              createButtonStyle(ftxui::Color::YellowLight, ftxui::Color::Black));
 
             channel_components.push_back(allButton);
 
@@ -758,7 +769,7 @@ namespace uc_log { namespace FTXUIGui {
                                      locationFilterInput.clear();
                                  }
                              },
-                             ftxui::ButtonOption::Animated(ftxui::Color::Green)),
+                             createButtonStyle(ftxui::Color::Black, ftxui::Color::GreenLight)),
                            [this, stringToSourceLocation]() {
                                return stringToSourceLocation(locationFilterInput).has_value();
                            }));
@@ -789,7 +800,7 @@ namespace uc_log { namespace FTXUIGui {
               ftxui::Maybe(ftxui::Button(
                              "+ Add",
                              [addEntry, this]() { addEntry(selectedSourceLocation); },
-                             ftxui::ButtonOption::Animated(ftxui::Color::Green)),
+                             createButtonStyle(ftxui::Color::Black, ftxui::Color::GreenLight)),
                            [this]() { return !selectedSourceLocation.first.empty(); }));
 
             auto dropdownComponent = ftxui::Container::Horizontal(dropdownComponents);
@@ -856,7 +867,7 @@ namespace uc_log { namespace FTXUIGui {
                   editedFilterState = FilterState{};
                   updateCurrentFilter();
               },
-              ftxui::ButtonOption::Animated(ftxui::Color::Red));
+              createButtonStyle(ftxui::Color::RedLight, ftxui::Color::Black));
 
             std::vector<ftxui::Component> mainComponents;
 
@@ -885,14 +896,14 @@ namespace uc_log { namespace FTXUIGui {
 
             return ftxui::Container::Vertical(
               {clearButton,
+               ftxui::Renderer([]() { return ftxui::separator(); }),
                ftxui::Container::Vertical(mainComponents)
                  | ftxui::Renderer([](ftxui::Element inner) {
-                       return ftxui::vbox({ftxui::text("🔍 Filters") | ftxui::bold
+                       return ftxui::vbox({ftxui::text("🔍 Filter Settings") | ftxui::bold
                                              | ftxui::color(ftxui::Color::Cyan) | ftxui::center,
                                            ftxui::separator(),
                                            inner});
-                   })
-                 | ftxui::borderRounded});
+                   })});
         }
 
         ftxui::Component getAppearanceSettingsComponent() {
@@ -906,7 +917,7 @@ namespace uc_log { namespace FTXUIGui {
                   showChannel      = true;
                   showLogLevel     = true;
               },
-              ftxui::ButtonOption::Animated(ftxui::Color::Blue));
+              createButtonStyle(ftxui::Color::BlueLight, ftxui::Color::Black));
 
             auto clearButton = ftxui::Button(
               "❌ Clear log entries",
@@ -914,10 +925,11 @@ namespace uc_log { namespace FTXUIGui {
                   allLogEntries.clear();
                   filteredLogEntries.clear();
               },
-              ftxui::ButtonOption::Animated(ftxui::Color::Red));
+              createButtonStyle(ftxui::Color::RedLight, ftxui::Color::Black));
 
             return ftxui::Container::Vertical(
               {ftxui::Container::Horizontal({resetButton | ftxui::flex, clearButton | ftxui::flex}),
+               ftxui::Renderer([]() { return ftxui::separator(); }),
                ftxui::Container::Vertical({ftxui::Checkbox("⏰ System Time", &showSysTime),
                                            ftxui::Checkbox("🔍 Function Names", &showFunctionName),
                                            ftxui::Checkbox("🕐 Target Time", &showUcTime),
@@ -929,8 +941,7 @@ namespace uc_log { namespace FTXUIGui {
                                              | ftxui::color(ftxui::Color::Magenta) | ftxui::center,
                                            ftxui::separator(),
                                            inner});
-                   })
-                 | ftxui::borderRounded});
+                   })});
         }
 
         template<typename Reader>
@@ -938,56 +949,55 @@ namespace uc_log { namespace FTXUIGui {
             auto resetTargetBtn = ftxui::Button(
               "🔄 Reset Target [r]",
               [&rttReader]() { rttReader.resetTarget(); },
-              ftxui::ButtonOption::Animated(ftxui::Color::Blue));
+              createButtonStyle(ftxui::Color::BlueLight, ftxui::Color::Black));
 
             auto resetDebuggerBtn = ftxui::Button(
               "🔌 Reset Debugger [d]",
               [&rttReader]() { rttReader.resetJLink(); },
-              ftxui::ButtonOption::Animated(ftxui::Color::Magenta));
+              createButtonStyle(ftxui::Color::CyanLight, ftxui::Color::Black));
 
             auto flashBtn = ftxui::Button(
               "⚡ Flash Target [f]",
               [&rttReader]() { rttReader.flash(); },
-              ftxui::ButtonOption::Animated(ftxui::Color::Yellow));
+              createButtonStyle(ftxui::Color::GreenLight, ftxui::Color::Black));
 
             auto statusDisplay = ftxui::Renderer([&rttReader]() {
                 auto const rttStatus = rttReader.getStatus();
 
                 return ftxui::vbox(
-                         {ftxui::text("📊 Debugger Status") | ftxui::bold
-                            | ftxui::color(ftxui::Color::Cyan) | ftxui::center,
-                          ftxui::separator(),
+                  {ftxui::text("📊 Debugger Status") | ftxui::bold
+                     | ftxui::color(ftxui::Color::Cyan) | ftxui::center,
+                   ftxui::separator(),
 
-                          ftxui::hbox(
-                            {ftxui::text("Connection: ") | ftxui::bold,
-                             ftxui::text(rttStatus.isRunning != 0 ? "✓ Active" : "✗ Inactive")
-                               | ftxui::color(rttStatus.isRunning != 0 ? ftxui::Color::Green
-                                                                       : ftxui::Color::Red)
-                               | ftxui::bold}),
+                   ftxui::hbox({ftxui::text("Connection: ") | ftxui::bold,
+                                ftxui::text(rttStatus.isRunning != 0 ? "✓ Active" : "✗ Inactive")
+                                  | ftxui::color(rttStatus.isRunning != 0 ? ftxui::Color::Green
+                                                                          : ftxui::Color::Red)
+                                  | ftxui::bold}),
 
-                          ftxui::hbox(
-                            {ftxui::text("Overflows: ") | ftxui::bold,
-                             ftxui::text(fmt::format("{}", rttStatus.hostOverflowCount))
-                               | ftxui::color(rttStatus.hostOverflowCount == 0 ? ftxui::Color::Green
-                                                                               : ftxui::Color::Red)
-                               | ftxui::bold}),
+                   ftxui::hbox(
+                     {ftxui::text("Overflows: ") | ftxui::bold,
+                      ftxui::text(fmt::format("{}", rttStatus.hostOverflowCount))
+                        | ftxui::color(rttStatus.hostOverflowCount == 0 ? ftxui::Color::Green
+                                                                        : ftxui::Color::Red)
+                        | ftxui::bold}),
 
-                          ftxui::hbox({ftxui::text("Read: ") | ftxui::bold,
-                                       ftxui::text(fmt::format("{} bytes", rttStatus.numBytesRead))
-                                         | ftxui::color(ftxui::Color::Cyan)}),
+                   ftxui::hbox({ftxui::text("Read: ") | ftxui::bold,
+                                ftxui::text(fmt::format("{} bytes", rttStatus.numBytesRead))
+                                  | ftxui::color(ftxui::Color::Cyan)}),
 
-                          ftxui::hbox({ftxui::text("Buffers: ") | ftxui::bold,
-                                       ftxui::text(fmt::format("↑{} ↓{}",
-                                                               rttStatus.numUpBuffers,
-                                                               rttStatus.numDownBuffers))
-                                         | ftxui::color(ftxui::Color::Yellow)})})
-                     | ftxui::borderRounded;
+                   ftxui::hbox(
+                     {ftxui::text("Buffers: ") | ftxui::bold,
+                      ftxui::text(
+                        fmt::format("↑{} ↓{}", rttStatus.numUpBuffers, rttStatus.numDownBuffers))
+                        | ftxui::color(ftxui::Color::Yellow)})});
             });
 
             return ftxui::Container::Vertical(
               {ftxui::Container::Horizontal({resetTargetBtn | ftxui::flex,
                                              resetDebuggerBtn | ftxui::flex,
                                              flashBtn | ftxui::flex}),
+               ftxui::Renderer([]() { return ftxui::separator(); }),
                statusDisplay});
         }
 
@@ -999,14 +1009,14 @@ namespace uc_log { namespace FTXUIGui {
 
             for(auto const& [name, component] : entries) {
                 tab_values.push_back(std::string{name} + " ");
-                tab_components.push_back(component | ftxui::border);
+                tab_components.push_back(component);
             }
 
-            auto toggle
-              = ftxui::Toggle(std::move(tab_values), &selectedTab) | ftxui::bold | ftxui::border;
+            auto toggle = ftxui::Toggle(std::move(tab_values), &selectedTab) | ftxui::bold;
 
             ftxui::Components vertical_components{
               toggle,
+              ftxui::Renderer([]() { return ftxui::separator(); }),
               ftxui::Container::Tab(std::move(tab_components), &selectedTab) | ftxui::flex};
 
             return ftxui::Container::Vertical(vertical_components);
@@ -1014,40 +1024,78 @@ namespace uc_log { namespace FTXUIGui {
 
         template<typename Reader>
         ftxui::Component getStatusLineComponent(Reader& rttReader) {
-            return ftxui::Renderer([&rttReader, this]() {
+            auto quitBtn = ftxui::Button(
+              "[q]uit",
+              [this]() { screenPointer->Exit(); },
+              createButtonStyle(ftxui::Color::Black, ftxui::Color::RedLight));
+
+            auto resetBtn = ftxui::Button(
+              "[r]eset",
+              [&rttReader]() { rttReader.resetTarget(); },
+              createButtonStyle(ftxui::Color::Black, ftxui::Color::CyanLight));
+
+            auto flashBtn = ftxui::Button(
+              "[f]lash",
+              [&rttReader]() { rttReader.flash(); },
+              createButtonStyle(ftxui::Color::Black, ftxui::Color::GreenLight));
+
+            auto buildBtn = ftxui::Button(
+              "[b]uild",
+              [this]() { executeBuild(); },
+              createButtonStyle(ftxui::Color::Black, ftxui::Color::YellowLight));
+
+            auto debuggerBtn = ftxui::Button(
+              "[d]ebugger_reset",
+              [&rttReader]() { rttReader.resetJLink(); },
+              createButtonStyle(ftxui::Color::Black, ftxui::Color::MagentaLight));
+
+            auto statusRenderer = ftxui::Renderer([&rttReader, this]() {
                 auto const rttStatus    = rttReader.getStatus();
                 auto const logCount     = filteredLogEntries.size();
                 auto const totalCount   = allLogEntries.size();
                 bool const filterActive = activeFilterState != FilterState{};
 
                 return ftxui::hbox(
-                         {ftxui::text(rttStatus.isRunning != 0 ? "● Connected" : "○ Disconnected")
-                            | ftxui::color(rttStatus.isRunning != 0 ? ftxui::Color::Green
-                                                                    : ftxui::Color::Red)
-                            | ftxui::bold,
-                          ftxui::separator(),
-                          ftxui::text(fmt::format("Logs: {}/{}", logCount, totalCount))
-                            | ftxui::color(ftxui::Color::Cyan),
-                          ftxui::separator(),
-                          ftxui::text(fmt::format("Overflows: {}", rttStatus.hostOverflowCount))
-                            | ftxui::color(rttStatus.hostOverflowCount == 0 ? ftxui::Color::Green
-                                                                            : ftxui::Color::Red),
-                          ftxui::separator(),
-                          ftxui::text(fmt::format("Bytes: {}", rttStatus.numBytesRead))
-                            | ftxui::color(ftxui::Color::Yellow),
-                          ftxui::separator(),
-                          ftxui::text(filterActive ? "✓ Filters Active" : "○ No Filters")
-                            | ftxui::color(filterActive ? ftxui::Color::Yellow
-                                                        : ftxui::Color::Green),
-                          ftxui::separator(),
-                          ftxui::text("🔨 "),
-                          buildStatusToElement(),
-                          ftxui::separator(),
-                          ftxui::filler(),
-                          ftxui::text("[q]uit [r]eset [f]lash [b]uild [d]ebugger_reset")
-                            | ftxui::color(ftxui::Color::GrayDark)})
-                     | ftxui::border;
+                  {ftxui::text(rttStatus.isRunning != 0 ? "● Connected" : "○ Disconnected")
+                     | ftxui::color(rttStatus.isRunning != 0 ? ftxui::Color::Green
+                                                             : ftxui::Color::Red)
+                     | ftxui::bold,
+                   ftxui::separator(),
+                   ftxui::text(fmt::format("Logs: {}/{}", logCount, totalCount))
+                     | ftxui::color(ftxui::Color::Cyan),
+                   ftxui::separator(),
+                   ftxui::text(fmt::format("Overflows: {}", rttStatus.hostOverflowCount))
+                     | ftxui::color(rttStatus.hostOverflowCount == 0 ? ftxui::Color::Green
+                                                                     : ftxui::Color::Red),
+                   ftxui::separator(),
+                   ftxui::text(fmt::format("Bytes: {}", rttStatus.numBytesRead))
+                     | ftxui::color(ftxui::Color::Yellow),
+                   ftxui::separator(),
+                   ftxui::text(filterActive ? "✓ Filters Active" : "○ No Filters")
+                     | ftxui::color(filterActive ? ftxui::Color::Yellow : ftxui::Color::Green),
+                   ftxui::separator(),
+                   ftxui::text("🔨 "),
+                   buildStatusToElement(),
+                   ftxui::separator(),
+                   ftxui::filler()});
             });
+
+            auto hotkeyContainer = ftxui::Container::Horizontal(
+              {quitBtn,
+               ftxui::Renderer(
+                 []() { return ftxui::text(" | ") | ftxui::color(ftxui::Color::GrayDark); }),
+               resetBtn,
+               ftxui::Renderer(
+                 []() { return ftxui::text(" | ") | ftxui::color(ftxui::Color::GrayDark); }),
+               flashBtn,
+               ftxui::Renderer(
+                 []() { return ftxui::text(" | ") | ftxui::color(ftxui::Color::GrayDark); }),
+               buildBtn,
+               ftxui::Renderer(
+                 []() { return ftxui::text(" | ") | ftxui::color(ftxui::Color::GrayDark); }),
+               debuggerBtn});
+
+            return ftxui::Container::Horizontal({statusRenderer | ftxui::flex, hotkeyContainer});
         }
 
         template<typename Reader>
@@ -1061,8 +1109,10 @@ namespace uc_log { namespace FTXUIGui {
               { "💬 Status",             getStatusComponent()}
             });
 
-            return ftxui::Container::Vertical(
-              {getStatusLineComponent(rttReader), tabs | ftxui::flex});
+            return ftxui::Container::Vertical({getStatusLineComponent(rttReader),
+                                               ftxui::Renderer([]() { return ftxui::separator(); }),
+                                               tabs | ftxui::flex})
+                 | ftxui::border;
         }
 
     public:
@@ -1117,19 +1167,6 @@ namespace uc_log { namespace FTXUIGui {
                 std::string const& buildCommand) {
             initializeBuildCommand(buildCommand);
 
-            static std::atomic<bool> gotSignal{};
-            /* {
-                struct sigaction sa{};
-                sa.sa_handler = [](int) { gotSignal = true; };
-                ::sigemptyset(&sa.sa_mask);
-                if(::sigaction(SIGINT, &sa, nullptr) == -1) {
-                    fmt::print(stderr,
-                               "Failed to register signal handler: {}\n",
-                               std::strerror(errno));
-                    return 1;
-                }
-            }*/
-
             auto screen = ftxui::ScreenInteractive::Fullscreen();
             screen.ForceHandleCtrlC(true);
             ftxui::Component mainComponent;
@@ -1168,7 +1205,7 @@ namespace uc_log { namespace FTXUIGui {
             }
             ftxui::Loop loop(&screen, mainComponent);
 
-            while(!loop.HasQuitted() && !gotSignal) {
+            while(!loop.HasQuitted()) {
                 {
                     std::lock_guard<std::mutex> lock{mutex};
                     loop.RunOnce();

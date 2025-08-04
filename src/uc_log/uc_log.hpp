@@ -80,4 +80,3 @@ namespace uc_log { namespace detail {
 #define UC_LOG_W(...) UC_LOG(::uc_log::LogLevel::warn, __VA_ARGS__)
 #define UC_LOG_E(...) UC_LOG(::uc_log::LogLevel::error, __VA_ARGS__)
 #define UC_LOG_C(...) UC_LOG(::uc_log::LogLevel::crit, __VA_ARGS__)
-

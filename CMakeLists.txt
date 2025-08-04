@@ -16,13 +16,6 @@ if(TARGET uc_log_printer)
     return()
 endif()
 
-project(
-    uc_log
-    VERSION 0.1.0
-    DESCRIPTION "Microcontroller logging system with RTT and Remote FMT"
-    HOMEPAGE_URL "https://github.com/dominicpoeschko/uc_log"
-    LANGUAGES CXX C)
-
 set(UC_LOG_BUILD_TEST_GUI
     false
     CACHE BOOL "build the test gui")
@@ -37,6 +30,14 @@ target_link_libraries(uc_log INTERFACE rtt::rtt remote_fmt::remote_fmt)
 add_library(uc_log::uc_log ALIAS uc_log)
 
 if(NOT CMAKE_CROSSCOMPILING)
+
+    project(
+        uc_log
+        VERSION 0.1.0
+        DESCRIPTION "Microcontroller logging system with RTT and Remote FMT"
+        HOMEPAGE_URL "https://github.com/dominicpoeschko/uc_log"
+        LANGUAGES CXX)
+
     include(cmake_helpers/BuildOptions.cmake)
     include(cmake_helpers/FindOrFetch.cmake)
 

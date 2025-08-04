@@ -943,5 +943,22 @@ namespace uc_log { namespace FTXUIGui {
         return elements.empty() ? ftxui::text("") : ftxui::hbox(elements);
     }
 
-}}   // namespace uc_log::FTXUIGui
+    static ftxui::ButtonOption createButtonStyle(ftxui::Color bgColor,
+                                                 ftxui::Color textColor = ftxui::Color::Black) {
+        auto option      = ftxui::ButtonOption::Simple();
+        option.transform = [bgColor, textColor](ftxui::EntryState const& s) {
+            auto element = ftxui::text(s.label) | ftxui::center;
+            if(s.focused) {
+                element |= ftxui::bold | ftxui::color(textColor) | ftxui::bgcolor(bgColor)
+                         | ftxui::inverted;
+            } else if(s.active) {
+                element |= ftxui::bold | ftxui::color(textColor) | ftxui::bgcolor(bgColor);
+            } else {
+                element |= ftxui::color(textColor) | ftxui::bgcolor(bgColor);
+            }
+            return element;
+        };
+        return option;
+    }
 
+}}   // namespace uc_log::FTXUIGui
