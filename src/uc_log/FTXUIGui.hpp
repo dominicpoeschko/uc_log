@@ -398,7 +398,7 @@ namespace uc_log { namespace FTXUIGui {
             if(showSysTime) {
                 elements.push_back(
                   ftxui::text(detail::to_time_string_with_milliseconds(e.recv_time))
-                  | ftxui::color(Theme::Text::timestamp));
+                  | ftxui::color(Theme::Text::timestamp()));
                 elements.push_back(ftxui::text(" "));
             }
 
@@ -409,13 +409,13 @@ namespace uc_log { namespace FTXUIGui {
 
             if(showUcTime) {
                 elements.push_back(ftxui::text(fmt::format("{}", e.logEntry.ucTime))
-                                   | ftxui::color(Theme::Text::ucTime));
+                                   | ftxui::color(Theme::Text::ucTime()));
                 elements.push_back(ftxui::text(" "));
             }
 
             if(showLogLevel) {
                 elements.push_back(toElement(e.logEntry.logLevel));
-                elements.push_back(ftxui::text("│ ") | ftxui::color(Theme::Text::separator));
+                elements.push_back(ftxui::text("│ ") | ftxui::color(Theme::Text::separator()));
             }
 
             elements.push_back(ansiColoredTextToFtxui(e.logEntry.logMsg));
@@ -425,7 +425,7 @@ namespace uc_log { namespace FTXUIGui {
             ftxui::Elements metadata;
             if(showFunctionName) {
                 metadata.push_back(ftxui::text(e.logEntry.functionName)
-                                   | ftxui::color(Theme::Text::functionName));
+                                   | ftxui::color(Theme::Text::functionName()));
             }
 
             if(showLocation) {
@@ -434,7 +434,7 @@ namespace uc_log { namespace FTXUIGui {
                 }
                 metadata.push_back(
                   ftxui::text(fmt::format("{}:{}", e.logEntry.fileName, e.logEntry.line))
-                  | ftxui::color(Theme::Text::metadata));
+                  | ftxui::color(Theme::Text::metadata()));
             }
 
             ftxui::Element metadataElement = nullptr;
@@ -451,14 +451,14 @@ namespace uc_log { namespace FTXUIGui {
             elements.reserve(3);
 
             elements.push_back(ftxui::text(detail::to_time_string_with_milliseconds(e.time))
-                               | ftxui::color(Theme::Text::timestamp));
+                               | ftxui::color(Theme::Text::timestamp()));
 
-            elements.push_back(ftxui::text(" | ") | ftxui::color(Theme::Text::normal));
+            elements.push_back(ftxui::text(" | ") | ftxui::color(Theme::Text::normal()));
 
             auto messageColor
-              = e.level == MessageEntry::Level::Fatal ? ftxui::color(Theme::Message::fatal)
-              : e.level == MessageEntry::Level::Error ? ftxui::color(Theme::Message::error)
-                                                      : ftxui::color(Theme::Message::status);
+              = e.level == MessageEntry::Level::Fatal ? ftxui::color(Theme::Message::fatal())
+              : e.level == MessageEntry::Level::Error ? ftxui::color(Theme::Message::error())
+                                                      : ftxui::color(Theme::Message::status());
 
             elements.push_back(ftxui::text(e.message) | messageColor | ftxui::flex);
 
@@ -529,7 +529,7 @@ namespace uc_log { namespace FTXUIGui {
             auto clearButton = ftxui::Button(
               "🗑️ Clear messages",
               [this]() { statusMessages.clear(); },
-              createButtonStyle(Theme::Button::Background::destructive, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
 
             return ftxui::Container::Vertical(
               {clearButton,
@@ -539,7 +539,7 @@ namespace uc_log { namespace FTXUIGui {
                            [&](auto const& e) { return renderMessage(e); })})
                  | ftxui::Renderer([](ftxui::Element inner) {
                        return ftxui::vbox({ftxui::text("💬 Status Messages") | ftxui::bold
-                                             | ftxui::color(Theme::Header::secondary)
+                                             | ftxui::color(Theme::Header::secondary())
                                              | ftxui::center,
                                            ftxui::separator(),
                                            inner});
@@ -551,15 +551,15 @@ namespace uc_log { namespace FTXUIGui {
             elements.reserve(3);
 
             elements.push_back(ftxui::text(detail::to_time_string_with_milliseconds(entry.time))
-                               | ftxui::color(Theme::Text::timestamp));
+                               | ftxui::color(Theme::Text::timestamp()));
 
-            elements.push_back(ftxui::text(" | ") | ftxui::color(Theme::Text::normal));
+            elements.push_back(ftxui::text(" | ") | ftxui::color(Theme::Text::normal()));
 
             if(entry.fromTool) {
                 elements.push_back(ansiColoredTextToFtxui(entry.line) | ftxui::flex);
             } else {
-                auto lineColor = entry.isError ? ftxui::color(Theme::Status::error)
-                                               : ftxui::color(Theme::Text::normal);
+                auto lineColor = entry.isError ? ftxui::color(Theme::Status::error())
+                                               : ftxui::color(Theme::Text::normal());
                 elements.push_back(ftxui::text(entry.line) | lineColor | ftxui::flex);
             }
             return ftxui::hbox(elements);
@@ -572,19 +572,19 @@ namespace uc_log { namespace FTXUIGui {
             switch(buildStatus) {
             case BuildStatus::Idle:
                 statusText  = "⚪ Idle";
-                statusColor = Theme::Status::inactive;
+                statusColor = Theme::Status::inactive();
                 break;
             case BuildStatus::Running:
                 statusText  = "🟡 Building...";
-                statusColor = Theme::Status::running;
+                statusColor = Theme::Status::running();
                 break;
             case BuildStatus::Success:
                 statusText  = "✅ Success";
-                statusColor = Theme::Status::success;
+                statusColor = Theme::Status::success();
                 break;
             case BuildStatus::Failed:
                 statusText  = "❌ Failed";
-                statusColor = Theme::Status::failed;
+                statusColor = Theme::Status::failed();
                 break;
             }
             return ftxui::text(statusText) | ftxui::color(statusColor) | ftxui::bold;
@@ -616,17 +616,17 @@ namespace uc_log { namespace FTXUIGui {
             auto clearButton = ftxui::Button(
               "🗑️ Clear Output",
               [this]() { buildOutput.clear(); },
-              createButtonStyle(Theme::Button::Background::destructive, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
 
             auto stopButton = ftxui::Button(
               "⏸ Stop Build",
               [this]() { cancelBuild(); },
-              createButtonStyle(Theme::Button::Background::danger, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::danger(), Theme::Button::text()));
 
             auto buildButton = ftxui::Button(
               "🔨 Start Build [b]",
               [this]() { executeBuild(); },
-              createButtonStyle(Theme::Button::Background::positive, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
 
             auto outputScroller
               = Scroller([&]() -> std::vector<BuildEntry> const& { return buildOutput; },
@@ -637,12 +637,12 @@ namespace uc_log { namespace FTXUIGui {
               | ftxui::Renderer([this](ftxui::Element inner) {
                     return ftxui::vbox(
                       {ftxui::text("🔨 Build Status") | ftxui::bold
-                         | ftxui::color(Theme::Header::primary) | ftxui::center,
+                         | ftxui::color(Theme::Header::primary()) | ftxui::center,
                        ftxui::separator(),
                        ftxui::hbox({ftxui::text("Status: ") | ftxui::bold, buildStatusToElement()}),
                        ftxui::hbox({ftxui::text("Output Lines: ") | ftxui::bold,
                                     ftxui::text(fmt::format("{}", buildOutput.size()))
-                                      | ftxui::color(Theme::Status::info)}),
+                                      | ftxui::color(Theme::Status::info())}),
                        ftxui::separator(),
                        inner});
                 });
@@ -661,7 +661,7 @@ namespace uc_log { namespace FTXUIGui {
                   metricEntries.clear();
                   metricPlotWidget.setSelectedMetric(std::nullopt);
               },
-              createButtonStyle(Theme::Button::Background::destructive, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
 
             std::vector<ftxui::Component> components;
             components.push_back(clearButton);
@@ -669,7 +669,7 @@ namespace uc_log { namespace FTXUIGui {
 
             components.push_back(ftxui::Renderer([this]() {
                 return ftxui::text(fmt::format("📈 Metrics ({} entries)", metricEntries.size()))
-                     | ftxui::bold | ftxui::color(Theme::Header::primary) | ftxui::center;
+                     | ftxui::bold | ftxui::color(Theme::Header::primary()) | ftxui::center;
             }));
             components.push_back(ftxui::Renderer([]() { return ftxui::separator(); }));
 
@@ -690,7 +690,7 @@ namespace uc_log { namespace FTXUIGui {
                         if(metricEntries.empty()) {
                             metricsContainer->Add(ftxui::Renderer([]() {
                                 return ftxui::text("No metrics available")
-                                     | ftxui::color(Theme::Status::inactive) | ftxui::center;
+                                     | ftxui::color(Theme::Status::inactive()) | ftxui::center;
                             }));
                         } else {
                             for(auto const& [metricInfo, metricValues] : metricEntries) {
@@ -703,16 +703,17 @@ namespace uc_log { namespace FTXUIGui {
                                   [this, metricInfo]() {
                                       metricPlotWidget.setSelectedMetric(metricInfo);
                                   },
-                                  createButtonStyle(isSelected ? Theme::Button::Background::positive
-                                                               : Theme::Button::Background::build,
-                                                    Theme::Button::text));
+                                  createButtonStyle(isSelected
+                                                      ? Theme::Button::Background::positive()
+                                                      : Theme::Button::Background::build(),
+                                                    Theme::Button::text()));
 
                                 auto metricRow = ftxui::Container::Horizontal(
                                   {ftxui::Renderer([this, metricInfo]() {
                                        auto it = metricEntries.find(metricInfo);
                                        if(it == metricEntries.end()) {
                                            return ftxui::text("Metric not found")
-                                                | ftxui::color(Theme::Status::error);
+                                                | ftxui::color(Theme::Status::error());
                                        }
 
                                        auto const& currentValues = it->second;
@@ -721,24 +722,25 @@ namespace uc_log { namespace FTXUIGui {
 
                                        return ftxui::hbox(
                                                 {ftxui::text("📊 ")
-                                                   | ftxui::color(Theme::Data::icon),
+                                                   | ftxui::color(Theme::Data::icon()),
                                                  ftxui::text(metricInfo.scope)
-                                                   | ftxui::color(Theme::Data::scope),
+                                                   | ftxui::color(Theme::Data::scope()),
                                                  ftxui::text("::")
-                                                   | ftxui::color(Theme::UI::separator),
+                                                   | ftxui::color(Theme::UI::separator()),
                                                  ftxui::text(metricInfo.name)
-                                                   | ftxui::color(Theme::Data::name) | ftxui::bold,
+                                                   | ftxui::color(Theme::Data::name())
+                                                   | ftxui::bold,
                                                  ftxui::text(
                                                    metricInfo.unit.empty()
                                                      ? ""
                                                      : fmt::format(" [{}]", metricInfo.unit))
-                                                   | ftxui::color(Theme::Data::unit),
+                                                   | ftxui::color(Theme::Data::unit()),
                                                  ftxui::text(fmt::format(" = {:.3f}", latestValue))
-                                                   | ftxui::color(Theme::Status::info)
+                                                   | ftxui::color(Theme::Status::info())
                                                    | ftxui::bold,
                                                  ftxui::text(fmt::format(" ({} values)",
                                                                          currentValues.size()))
-                                                   | ftxui::color(Theme::Data::count)})
+                                                   | ftxui::color(Theme::Data::count())})
                                             | ftxui::flex;
                                    }) | ftxui::flex,
                                    selectButton});
@@ -784,7 +786,7 @@ namespace uc_log { namespace FTXUIGui {
                   editedFilterState.enabledLogLevels.clear();
                   updateCurrentFilter();
               },
-              createButtonStyle(Theme::Button::Background::reset, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::reset(), Theme::Button::text()));
 
             logLevel_components.push_back(allButton);
 
@@ -831,7 +833,7 @@ namespace uc_log { namespace FTXUIGui {
                   editedFilterState.enabledChannels.clear();
                   updateCurrentFilter();
               },
-              createButtonStyle(Theme::Button::Background::build, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::build(), Theme::Button::text()));
 
             channel_components.push_back(allButton);
 
@@ -899,7 +901,7 @@ namespace uc_log { namespace FTXUIGui {
             std::vector<ftxui::Component> manualInputComponents;
             manualInputComponents.push_back(ftxui::Renderer([] {
                 return ftxui::text("📝 Manual:") | ftxui::bold
-                     | ftxui::color(Theme::Header::accent);
+                     | ftxui::color(Theme::Header::accent());
             }));
             manualInputComponents.push_back(ftxui::Input(&locationFilterInput, "filename:line")
                                             | ftxui::flex);
@@ -913,7 +915,7 @@ namespace uc_log { namespace FTXUIGui {
                         locationFilterInput.clear();
                     }
                 },
-                createButtonStyle(Theme::Button::Background::positive, Theme::Button::text)),
+                createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text())),
               [this, stringToSourceLocation]() {
                   return stringToSourceLocation(locationFilterInput).has_value();
               }));
@@ -922,7 +924,7 @@ namespace uc_log { namespace FTXUIGui {
 
             std::vector<ftxui::Component> dropdownComponents;
             dropdownComponents.push_back(ftxui::Renderer([] {
-                return ftxui::text("📋 Known:") | ftxui::bold | ftxui::color(Theme::Status::info);
+                return ftxui::text("📋 Known:") | ftxui::bold | ftxui::color(Theme::Status::info());
             }));
 
             ftxui::DropdownOption dropdownOptions;
@@ -944,7 +946,7 @@ namespace uc_log { namespace FTXUIGui {
               ftxui::Button(
                 "+ Add",
                 [addEntry, this]() { addEntry(selectedSourceLocation); },
-                createButtonStyle(Theme::Button::Background::positive, Theme::Button::text)),
+                createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text())),
               [this]() { return !selectedSourceLocation.first.empty(); }));
 
             auto dropdownComponent = ftxui::Container::Horizontal(dropdownComponents);
@@ -952,7 +954,7 @@ namespace uc_log { namespace FTXUIGui {
             std::vector<ftxui::Component> inputSectionComponents;
             inputSectionComponents.push_back(ftxui::Renderer([] {
                 return ftxui::text("📍 Add Location Filter") | ftxui::bold
-                     | ftxui::color(Theme::Header::accent) | ftxui::center;
+                     | ftxui::color(Theme::Header::accent()) | ftxui::center;
             }));
             inputSectionComponents.push_back(manualInputComponent);
             inputSectionComponents.push_back(dropdownComponent);
@@ -965,7 +967,7 @@ namespace uc_log { namespace FTXUIGui {
             location_components.push_back(ftxui::Renderer([this]() {
                 return ftxui::text(fmt::format("📂 Active Filters ({})",
                                                editedFilterState.enabledLocations.size()))
-                     | ftxui::bold | ftxui::color(Theme::Status::info);
+                     | ftxui::bold | ftxui::color(Theme::Status::info());
             }));
 
             RadioboxOption radioboxOption = RadioboxOption::Simple();
@@ -978,7 +980,7 @@ namespace uc_log { namespace FTXUIGui {
                 if(s.focused) {
                     t |= ftxui::inverted;
                 }
-                return ftxui::hbox({ftxui::text("❌ ") | ftxui::color(Theme::UI::remove), t});
+                return ftxui::hbox({ftxui::text("❌ ") | ftxui::color(Theme::UI::remove()), t});
             };
 
             radioboxOption.entries
@@ -1011,21 +1013,21 @@ namespace uc_log { namespace FTXUIGui {
                   editedFilterState = FilterState{};
                   updateCurrentFilter();
               },
-              createButtonStyle(Theme::Button::Background::destructive, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
 
             std::vector<ftxui::Component> mainComponents;
 
             std::vector<ftxui::Component> levelComponents;
             levelComponents.push_back(ftxui::Renderer([] {
                 return ftxui::text("📊 Log Levels") | ftxui::bold
-                     | ftxui::color(Theme::Header::primary) | ftxui::center;
+                     | ftxui::color(Theme::Header::primary()) | ftxui::center;
             }));
             levelComponents.push_back(getLogLevelFilterComponent());
 
             std::vector<ftxui::Component> channelComponents;
             channelComponents.push_back(ftxui::Renderer([] {
                 return ftxui::text("📡 Channels") | ftxui::bold
-                     | ftxui::color(Theme::Header::warning) | ftxui::center;
+                     | ftxui::color(Theme::Header::warning()) | ftxui::center;
             }));
             channelComponents.push_back(getChannelFilterComponent());
 
@@ -1044,7 +1046,8 @@ namespace uc_log { namespace FTXUIGui {
                ftxui::Container::Vertical(mainComponents)
                  | ftxui::Renderer([](ftxui::Element inner) {
                        return ftxui::vbox({ftxui::text("🔍 Filter Settings") | ftxui::bold
-                                             | ftxui::color(Theme::Header::primary) | ftxui::center,
+                                             | ftxui::color(Theme::Header::primary())
+                                             | ftxui::center,
                                            ftxui::separator(),
                                            inner});
                    })});
@@ -1061,7 +1064,7 @@ namespace uc_log { namespace FTXUIGui {
                   showChannel      = true;
                   showLogLevel     = true;
               },
-              createButtonStyle(Theme::Button::Background::settings, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
 
             auto clearButton = ftxui::Button(
               "❌ Clear log entries",
@@ -1069,7 +1072,7 @@ namespace uc_log { namespace FTXUIGui {
                   allLogEntries.clear();
                   filteredLogEntries.clear();
               },
-              createButtonStyle(Theme::Button::Background::destructive, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
 
             return ftxui::Container::Vertical(
               {ftxui::Container::Horizontal({resetButton | ftxui::flex, clearButton | ftxui::flex}),
@@ -1082,7 +1085,8 @@ namespace uc_log { namespace FTXUIGui {
                                            ftxui::Checkbox("📊 Log Level", &showLogLevel)})
                  | ftxui::Renderer([](ftxui::Element inner) {
                        return ftxui::vbox({ftxui::text("🎨 Display Settings") | ftxui::bold
-                                             | ftxui::color(Theme::Header::accent) | ftxui::center,
+                                             | ftxui::color(Theme::Header::accent())
+                                             | ftxui::center,
                                            ftxui::separator(),
                                            inner});
                    })});
@@ -1093,48 +1097,48 @@ namespace uc_log { namespace FTXUIGui {
             auto resetTargetBtn = ftxui::Button(
               "🔄 Reset Target [r]",
               [&rttReader]() { rttReader.resetTarget(); },
-              createButtonStyle(Theme::Button::Background::settings, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
 
             auto resetDebuggerBtn = ftxui::Button(
               "🔌 Reset Debugger",
               [&rttReader]() { rttReader.resetJLink(); },
-              createButtonStyle(Theme::Button::Background::reset, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::reset(), Theme::Button::text()));
 
             auto flashBtn = ftxui::Button(
               "⚡ Flash Target [f]",
               [&rttReader]() { rttReader.flash(); },
-              createButtonStyle(Theme::Button::Background::positive, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
 
             auto statusDisplay = ftxui::Renderer([&rttReader]() {
                 auto const rttStatus = rttReader.getStatus();
 
                 return ftxui::vbox(
                   {ftxui::text("📊 Debugger Status") | ftxui::bold
-                     | ftxui::color(Theme::Header::primary) | ftxui::center,
+                     | ftxui::color(Theme::Header::primary()) | ftxui::center,
                    ftxui::separator(),
 
                    ftxui::hbox({ftxui::text("Connection: ") | ftxui::bold,
                                 ftxui::text(rttStatus.isRunning != 0 ? "✓ Active" : "✗ Inactive")
-                                  | ftxui::color(rttStatus.isRunning != 0 ? Theme::Status::active
-                                                                          : Theme::Status::error)
+                                  | ftxui::color(rttStatus.isRunning != 0 ? Theme::Status::active()
+                                                                          : Theme::Status::error())
                                   | ftxui::bold}),
 
                    ftxui::hbox(
                      {ftxui::text("Overflows: ") | ftxui::bold,
                       ftxui::text(fmt::format("{}", rttStatus.hostOverflowCount))
-                        | ftxui::color(rttStatus.hostOverflowCount == 0 ? Theme::Status::success
-                                                                        : Theme::Status::error)
+                        | ftxui::color(rttStatus.hostOverflowCount == 0 ? Theme::Status::success()
+                                                                        : Theme::Status::error())
                         | ftxui::bold}),
 
                    ftxui::hbox({ftxui::text("Read: ") | ftxui::bold,
                                 ftxui::text(fmt::format("{} bytes", rttStatus.numBytesRead))
-                                  | ftxui::color(Theme::Status::info)}),
+                                  | ftxui::color(Theme::Status::info())}),
 
                    ftxui::hbox(
                      {ftxui::text("Buffers: ") | ftxui::bold,
                       ftxui::text(
                         fmt::format("↑{} ↓{}", rttStatus.numUpBuffers, rttStatus.numDownBuffers))
-                        | ftxui::color(Theme::Status::warning)})});
+                        | ftxui::color(Theme::Status::warning())})});
             });
 
             return ftxui::Container::Vertical(
@@ -1192,22 +1196,22 @@ namespace uc_log { namespace FTXUIGui {
             auto quitBtn = ftxui::Button(
               "[q]uit",
               [this]() { screenPointer->Exit(); },
-              createButtonStyle(Theme::Button::Background::destructive, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
 
             auto resetBtn = ftxui::Button(
               "[r]eset",
               [&rttReader]() { rttReader.resetTarget(); },
-              createButtonStyle(Theme::Button::Background::reset, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::reset(), Theme::Button::text()));
 
             auto flashBtn = ftxui::Button(
               "[f]lash",
               [&rttReader]() { rttReader.flash(); },
-              createButtonStyle(Theme::Button::Background::positive, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
 
             auto buildBtn = ftxui::Button(
               "[b]uild",
               [this]() { executeBuild(); },
-              createButtonStyle(Theme::Button::Background::build, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::build(), Theme::Button::text()));
 
             auto statusRenderer = ftxui::Renderer([&rttReader, this]() {
                 auto const rttStatus    = rttReader.getStatus();
@@ -1219,12 +1223,13 @@ namespace uc_log { namespace FTXUIGui {
 
                 return ftxui::hbox(
                   {ftxui::text("🔗 " + std::string(rttStatus.isRunning != 0 ? "●" : "○"))
-                     | ftxui::color(rttStatus.isRunning != 0 ? Theme::Status::success
-                                                             : Theme::Text::normal),
+                     | ftxui::color(rttStatus.isRunning != 0 ? Theme::Status::success()
+                                                             : Theme::Text::normal()),
                    ftxui::separator(),
 
                    ftxui::text("🔍 " + std::string(filterActive ? "●" : "○"))
-                     | ftxui::color(filterActive ? Theme::Status::success : Theme::Text::normal),
+                     | ftxui::color(filterActive ? Theme::Status::success()
+                                                 : Theme::Text::normal()),
                    ftxui::separator(),
 
                    ftxui::text("🔨 "
@@ -1233,27 +1238,27 @@ namespace uc_log { namespace FTXUIGui {
                                                ? "●"
                                                : "○"))
                      | ftxui::color(buildRunning
-                                      ? Theme::Status::warning
-                                      : (buildSuccess ? Theme::Status::success
+                                      ? Theme::Status::warning()
+                                      : (buildSuccess ? Theme::Status::success()
                                                       : (buildStatus == BuildStatus::Failed
-                                                           ? Theme::Status::error
-                                                           : Theme::Text::normal))),
+                                                           ? Theme::Status::error()
+                                                           : Theme::Text::normal()))),
                    ftxui::separator(),
 
                    ftxui::text(fmt::format("LOGS {}/{}",
                                            FTXUIGui::formatCount(logCount),
                                            FTXUIGui::formatCount(totalCount)))
-                     | ftxui::color(Theme::Status::info),
+                     | ftxui::color(Theme::Status::info()),
                    ftxui::separator(),
 
                    ftxui::text(
                      fmt::format("DATA {}B", FTXUIGui::formatCount(rttStatus.numBytesRead)))
-                     | ftxui::color(Theme::Status::warning),
+                     | ftxui::color(Theme::Status::warning()),
                    ftxui::separator(),
 
                    ftxui::text(fmt::format("OVFL {}", rttStatus.hostOverflowCount))
-                     | ftxui::color(rttStatus.hostOverflowCount == 0 ? Theme::Status::success
-                                                                     : Theme::Status::error),
+                     | ftxui::color(rttStatus.hostOverflowCount == 0 ? Theme::Status::success()
+                                                                     : Theme::Status::error()),
                    ftxui::separator(),
                    ftxui::filler()});
             });
@@ -1261,13 +1266,13 @@ namespace uc_log { namespace FTXUIGui {
             auto hotkeyContainer = ftxui::Container::Horizontal(
               {quitBtn,
                ftxui::Renderer(
-                 []() { return ftxui::text(" | ") | ftxui::color(Theme::UI::separator); }),
+                 []() { return ftxui::text(" | ") | ftxui::color(Theme::UI::separator()); }),
                resetBtn,
                ftxui::Renderer(
-                 []() { return ftxui::text(" | ") | ftxui::color(Theme::UI::separator); }),
+                 []() { return ftxui::text(" | ") | ftxui::color(Theme::UI::separator()); }),
                flashBtn,
                ftxui::Renderer(
-                 []() { return ftxui::text(" | ") | ftxui::color(Theme::UI::separator); }),
+                 []() { return ftxui::text(" | ") | ftxui::color(Theme::UI::separator()); }),
                buildBtn});
 
             return ftxui::Container::Horizontal({statusRenderer | ftxui::flex, hotkeyContainer});

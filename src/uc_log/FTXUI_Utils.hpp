@@ -1272,12 +1272,12 @@ namespace uc_log { namespace FTXUIGui {
             auto yZoomOutBtn = ftxui::Button(
               "🔍➖",
               [this]() { config_.yZoomLevel = std::max(0.1, config_.yZoomLevel / 1.5); },
-              createButtonStyle(Theme::Button::Background::settings, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
 
             auto yZoomInBtn = ftxui::Button(
               "🔍➕",
               [this]() { config_.yZoomLevel = std::min(10.0, config_.yZoomLevel * 1.5); },
-              createButtonStyle(Theme::Button::Background::settings, Theme::Button::text));
+              createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
 
             std::vector<std::string> timeRangeModeOptions = {"📈 Show All", "⏰ Last Period"};
             auto timeModeToggle = ftxui::Toggle(timeRangeModeOptions, &timeModeIndex_);
@@ -1307,7 +1307,7 @@ namespace uc_log { namespace FTXUIGui {
 
             auto yAxisRow = ftxui::Container::Horizontal({
               ftxui::Renderer(
-                []() { return ftxui::text("Y-Axis:") | ftxui::color(Theme::Header::primary); }),
+                []() { return ftxui::text("Y-Axis:") | ftxui::color(Theme::Header::primary()); }),
               yAutoFitCheckbox,
               ftxui::Maybe(yZoomOutBtn, [this]() { return !config_.autoFitY; }),
               ftxui::Maybe(yZoomInBtn, [this]() { return !config_.autoFitY; }),
@@ -1315,13 +1315,13 @@ namespace uc_log { namespace FTXUIGui {
 
             auto xAxisRow = ftxui::Container::Horizontal({
               ftxui::Renderer(
-                []() { return ftxui::text("X-Axis:") | ftxui::color(Theme::Header::primary); }),
+                []() { return ftxui::text("X-Axis:") | ftxui::color(Theme::Header::primary()); }),
               timeModeToggle,
               ftxui::Maybe(ftxui::Container::Horizontal({
                              ftxui::Renderer([]() { return ftxui::separator(); }),
                              ftxui::Renderer([]() {
                                  return ftxui::text("Show last:")
-                                      | ftxui::color(Theme::Text::normal);
+                                      | ftxui::color(Theme::Text::normal());
                              }),
                              timePeriodInput | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 6),
                              timeUnitToggle,
@@ -1345,20 +1345,20 @@ namespace uc_log { namespace FTXUIGui {
                                       dataProvider)]() mutable -> ftxui::Element {
                 if(!selectedMetric_) {
                     ftxui::Elements noSelectionElements
-                      = {ftxui::text("No metric selected") | ftxui::color(Theme::Status::warning)
+                      = {ftxui::text("No metric selected") | ftxui::color(Theme::Status::warning())
                            | ftxui::center,
                          ftxui::text("Select a metric from the overview tab")
-                           | ftxui::color(Theme::Text::metadata) | ftxui::center};
+                           | ftxui::color(Theme::Text::metadata()) | ftxui::center};
                     return ftxui::vbox(noSelectionElements);
                 }
 
                 auto metricData = dataProvider(*selectedMetric_);
                 if(!metricData || (*metricData)->empty()) {
                     ftxui::Elements noDataElements
-                      = {ftxui::text("No data available") | ftxui::color(Theme::Status::error)
+                      = {ftxui::text("No data available") | ftxui::color(Theme::Status::error())
                            | ftxui::center,
                          ftxui::text("Waiting for metric data...")
-                           | ftxui::color(Theme::Text::metadata) | ftxui::center};
+                           | ftxui::color(Theme::Text::metadata()) | ftxui::center};
                     return ftxui::vbox(noDataElements);
                 }
 
@@ -1370,10 +1370,10 @@ namespace uc_log { namespace FTXUIGui {
 
                 if(visibleDataSize == 0) {
                     ftxui::Elements noRangeElements
-                      = {ftxui::text("No data in time range") | ftxui::color(Theme::Status::warning)
-                           | ftxui::center,
-                         ftxui::text("Adjust X-axis controls") | ftxui::color(Theme::Text::metadata)
-                           | ftxui::center};
+                      = {ftxui::text("No data in time range")
+                           | ftxui::color(Theme::Status::warning()) | ftxui::center,
+                         ftxui::text("Adjust X-axis controls")
+                           | ftxui::color(Theme::Text::metadata()) | ftxui::center};
                     return ftxui::vbox(noRangeElements);
                 }
 
@@ -1421,7 +1421,7 @@ namespace uc_log { namespace FTXUIGui {
                     return output;
                 };
 
-                auto graph = ftxui::graph(graphFunc) | ftxui::color(Theme::Header::accent);
+                auto graph = ftxui::graph(graphFunc) | ftxui::color(Theme::Header::accent());
 
                 if(values.size() < 2) {
                     return graph;
@@ -1433,7 +1433,7 @@ namespace uc_log { namespace FTXUIGui {
                 ftxui::Elements yLabelElements;
                 for(std::size_t i = 0; i < yLabels.size(); ++i) {
                     yLabelElements.push_back(ftxui::text(yLabels[i])
-                                             | ftxui::color(Theme::Text::metadata));
+                                             | ftxui::color(Theme::Text::metadata()));
                     if(i < yLabels.size() - 1) {
                         yLabelElements.push_back(ftxui::filler());
                     }
@@ -1442,7 +1442,7 @@ namespace uc_log { namespace FTXUIGui {
                 ftxui::Elements xLabelElements;
                 for(auto const& label : xLabels) {
                     xLabelElements.push_back(ftxui::text(label)
-                                             | ftxui::color(Theme::Text::metadata));
+                                             | ftxui::color(Theme::Text::metadata()));
                 }
 
                 auto yAxisColumn = ftxui::vbox(yLabelElements)
@@ -1503,30 +1503,31 @@ namespace uc_log { namespace FTXUIGui {
                 auto [yMin, yMax] = calculateYAxisRange(dataMinVal, dataMaxVal);
 
                 ftxui::Elements titleElements = {
-                  ftxui::text("📊 ") | ftxui::color(Theme::Data::icon),
-                  ftxui::text(info.scope) | ftxui::color(Theme::Data::scope),
-                  ftxui::text("::") | ftxui::color(Theme::Text::separator),
-                  ftxui::text(info.name) | ftxui::color(Theme::Data::name) | ftxui::bold,
+                  ftxui::text("📊 ") | ftxui::color(Theme::Data::icon()),
+                  ftxui::text(info.scope) | ftxui::color(Theme::Data::scope()),
+                  ftxui::text("::") | ftxui::color(Theme::Text::separator()),
+                  ftxui::text(info.name) | ftxui::color(Theme::Data::name()) | ftxui::bold,
                   ftxui::text(info.unit.empty() ? "" : fmt::format(" [{}]", info.unit))
-                    | ftxui::color(Theme::Data::unit),
+                    | ftxui::color(Theme::Data::unit()),
                 };
 
                 ftxui::Elements statsElements = {
                   ftxui::text("Current: ") | ftxui::bold,
-                  ftxui::text(formatMetricValue(latestVal, "")) | ftxui::color(Theme::Data::value),
+                  ftxui::text(formatMetricValue(latestVal, ""))
+                    | ftxui::color(Theme::Data::value()),
                   ftxui::text(" | Range: ") | ftxui::bold,
                   ftxui::text(formatMetricValue(dataMinVal, ""))
-                    | ftxui::color(Theme::Status::success),
-                  ftxui::text(" to ") | ftxui::color(Theme::Status::success),
+                    | ftxui::color(Theme::Status::success()),
+                  ftxui::text(" to ") | ftxui::color(Theme::Status::success()),
                   ftxui::text(formatMetricValue(dataMaxVal, ""))
-                    | ftxui::color(Theme::Status::success),
+                    | ftxui::color(Theme::Status::success()),
                   ftxui::text(" | Y-Axis: ") | ftxui::bold,
-                  ftxui::text(formatMetricValue(yMin, "")) | ftxui::color(Theme::Data::value),
-                  ftxui::text(" to ") | ftxui::color(Theme::Data::value),
-                  ftxui::text(formatMetricValue(yMax, "")) | ftxui::color(Theme::Data::value),
+                  ftxui::text(formatMetricValue(yMin, "")) | ftxui::color(Theme::Data::value()),
+                  ftxui::text(" to ") | ftxui::color(Theme::Data::value()),
+                  ftxui::text(formatMetricValue(yMax, "")) | ftxui::color(Theme::Data::value()),
                   ftxui::text(" | Visible: ") | ftxui::bold,
                   ftxui::text(fmt::format("{}/{}", visibleStatsSize, values.size()))
-                    | ftxui::color(Theme::Data::count),
+                    | ftxui::color(Theme::Data::count()),
                 };
 
                 ftxui::Elements allStatsElements
@@ -1542,12 +1543,12 @@ namespace uc_log { namespace FTXUIGui {
             auto clearButton = ftxui::Button(
               "🗑️ Clear Data",
               std::forward<ClearCallback>(clearCallback),
-              createButtonStyle(Theme::Button::Background::danger, Theme::Button::textOnDark));
+              createButtonStyle(Theme::Button::Background::danger(), Theme::Button::textOnDark()));
 
             auto headerRenderer = ftxui::Renderer([]() {
                 ftxui::Elements headerElements
                   = {ftxui::text("📈 Live Metric Plot") | ftxui::bold
-                       | ftxui::color(Theme::Header::primary) | ftxui::center,
+                       | ftxui::color(Theme::Header::primary()) | ftxui::center,
                      ftxui::separator()};
                 return ftxui::vbox(headerElements);
             });
@@ -1562,7 +1563,7 @@ namespace uc_log { namespace FTXUIGui {
             ftxui::Components clearComponents
               = {clearButton,
                  ftxui::Renderer(
-                   []() { return ftxui::text(" | ") | ftxui::color(Theme::Text::separator); }),
+                   []() { return ftxui::text(" | ") | ftxui::color(Theme::Text::separator()); }),
                  ftxui::Renderer([]() { return ftxui::filler(); })};
 
             ftxui::Components allComponents = {ftxui::Container::Horizontal(clearComponents),
