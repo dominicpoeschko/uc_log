@@ -2,12 +2,13 @@
 
 #include "remote_fmt/catalog_helpers.hpp"
 #include "remote_fmt/parser.hpp"
-#include "uc_log/Gui.hpp"
+#include "uc_log/FTXUIGui.hpp"
 #include "uc_log/JLinkRttReader.hpp"
 #include "uc_log/LogLevel.hpp"
 #include "uc_log/TimeDelayedQueue.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 #include "uc_log/detail/TcpSender.hpp"
+#include "uc_log/metric_utils.hpp"
 
 #include <CLI/CLI.hpp>
 #include <algorithm>
@@ -18,6 +19,7 @@
 #include <fmt/chrono.h>
 #include <fmt/color.h>
 #include <fmt/format.h>
+#include <regex>
 
 static std::pair<std::uint32_t,
                  std::string>
@@ -61,10 +63,9 @@ int main(int    argc,
     std::string   host{};
     std::string   logDir{};
     std::string   buildCommand{};
-    std::string   guiType{uc_log::Gui::getTypes().front()};
     std::uint16_t port{};
 
-    app.add_option("--trace_port", port, "tcp for trace")->required();
+    app.add_option("--metrics_port", port, "tcp for metrics")->required();
     app.add_option("--speed", speed, "swd speed")->required();
     app.add_option("--device", device, "mpu device")->required();
     app.add_option("--channels", channels, "rtt channels")->required();
@@ -78,9 +79,6 @@ int main(int    argc,
       ->required()
       ->check(CLI::ExistingDirectory);
     app.add_option("--host", host, "jlink host");
-    app.add_option("--gui_type", guiType, "the gui to use")
-      ->capture_default_str()
-      ->check(CLI::IsMember(uc_log::Gui::getTypes()));
 
     CLI11_PARSE(app, argc, argv)
 
@@ -92,8 +90,8 @@ int main(int    argc,
         return 1;
     }
 
-    uc_log::Gui gui{guiType};
-    auto        logFilePrinter = [&gui, &logFile](std::chrono::system_clock::time_point recv_time,
+    uc_log::FTXUIGui::Gui gui{};
+    auto logFilePrinter = [&gui, &logFile](std::chrono::system_clock::time_point recv_time,
                                            uc_log::detail::LogEntry const&       e) {
         if(logFile) {
             std::stringstream quotedMsg;
@@ -120,16 +118,22 @@ int main(int    argc,
             gui.errorMessage("error writing logFile");
         }
     };
-
     TCPSender tcpSender{port, [&gui](auto msg) { gui.errorMessage(msg); }};
 
-    auto tcpPrinter
-      = [&tcpSender](std::chrono::system_clock::time_point, uc_log::detail::LogEntry const& e) {
-            bool const isTrace = e.logLevel == uc_log::LogLevel::trace;
-            if(isTrace) {
-                tcpSender.send(fmt::format("/*{:%Q},{}*/\n", e.ucTime.time, e.logMsg));
-            }
-        };
+    auto tcpPrinter = [&tcpSender](std::chrono::system_clock::time_point recv_time,
+                                   uc_log::detail::LogEntry const&       e) {
+        auto const metrics = uc_log::extractMetrics(recv_time, e);
+        for(auto const& metric : metrics) {
+            tcpSender.send(
+              fmt::format("/*{{\"name\":\"{}\",\"scope\":\"{}\",\"unit\":\"{}\",\"time\":{:%Q},"
+                          "\"value\":{}}}*/\n",
+                          metric.first.name,
+                          metric.first.scope,
+                          metric.first.unit,
+                          metric.second.uc_time.time,
+                          metric.second.value));
+        }
+    };
     auto printer
       = [&tcpPrinter, &logFilePrinter, &gui](std::chrono::system_clock::time_point recv_time,
                                              uc_log::detail::LogEntry const&       e) {

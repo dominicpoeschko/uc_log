@@ -1,6 +1,7 @@
-#include "uc_log/Gui.hpp"
+#include "uc_log/FTXUIGui.hpp"
 
 #include <chrono>
+#include <functional>
 #include <random>
 #include <string_view>
 #include <thread>
@@ -100,10 +101,21 @@ static void updateStatus(Status& status) {
     }
 }
 
-int main(int    argc,
-         char** argv) {
-    (void)argv;
-    uc_log::Gui gui{argc == 1 ? "ftxui" : "simple"};
+int main() {
+    std::array<std::pair<std::tuple<std::string, std::string, std::string>,
+                         std::function<double(std::chrono::duration<double>)>>,
+               3>
+      metricFunctions{
+        {
+         {{"foo", "sin", "V"},
+           [](std::chrono::duration<double> t) { return std::sin(t.count()); }},
+         {{"bar", "tan", "A"},
+           [](std::chrono::duration<double> t) { return std::tan(t.count()); }},
+         {{"foo", "line", "W"}, [](std::chrono::duration<double> t) { return 0.5 * t.count(); }},
+         }
+    };
+
+    uc_log::FTXUIGui::Gui gui{};
 
     Reader reader;
 
@@ -129,6 +141,19 @@ int main(int    argc,
             }
             e.ucTime.time += addTime;
             gui.add(std::chrono::system_clock::now(), e);
+
+            {
+                std::string originalMessage = e.logMsg;
+                for(auto const& [meta, metricFunction] : metricFunctions) {
+                    e.logMsg = std::format("{} @METRIC({}::{}[{}]={})",
+                                           originalMessage,
+                                           std::get<0>(meta),
+                                           std::get<1>(meta),
+                                           std::get<2>(meta),
+                                           metricFunction(e.ucTime.time));
+                    gui.add(std::chrono::system_clock::now(), e);
+                }
+            }
 
             std::vector<std::string> localMessages;
             {

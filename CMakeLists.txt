@@ -119,9 +119,8 @@ function(target_add_uc_log_rtt_jlink targetname)
         CHANNELS
         MAP_FILE
         PREFIX
-        TRACE_PORT
-        HEX_FILE
-        GUI_TYPE)
+        METRICS_PORT
+        HEX_FILE)
     set(multiValueArgs)
 
     cmake_parse_arguments(PARSE_ARGV 1 PARSED_ARGS "${options}" "${oneValueArgs}" "${multiValueArgs}")
@@ -162,14 +161,10 @@ function(target_add_uc_log_rtt_jlink targetname)
         set(PARSED_ARGS_PREFIX "log_")
     endif()
 
-    if(NOT PARSED_ARGS_TRACE_PORT)
-        set(PARSED_ARGS_TRACE_PORT 34565)
-    elseif(${PARSED_ARGS_TRACE_PORT} LESS 1024 OR PARSED_ARGS_TRACE_PORT GREATER 65535)
-        message(WARNING "TRACE_PORT ${PARSED_ARGS_TRACE_PORT} may be out of valid range (1024-65535)")
-    endif()
-
-    if(NOT PARSED_ARGS_GUI_TYPE)
-        set(PARSED_ARGS_GUI_TYPE "ftxui")
+    if(NOT PARSED_ARGS_METRICS_PORT)
+        set(PARSED_ARGS_METRICS_PORT 34565)
+    elseif(${PARSED_ARGS_METRICS_PORT} LESS 1024 OR PARSED_ARGS_METRICS_PORT GREATER 65535)
+        message(WARNING "METRICS_PORT ${PARSED_ARGS_METRICS_PORT} may be out of valid range (1024-65535)")
     endif()
 
     get_target_property(build_dir uc_log_printer BINARY_DIR)
@@ -195,8 +190,8 @@ function(target_add_uc_log_rtt_jlink targetname)
 
     set(command
         ${uc_log_printer_bin}
-        --trace_port
-        ${PARSED_ARGS_TRACE_PORT}
+        --metrics_port
+        ${PARSED_ARGS_METRICS_PORT}
         --device
         ${PARSED_ARGS_TARGET_MPU}
         --speed
@@ -212,9 +207,7 @@ function(target_add_uc_log_rtt_jlink targetname)
         --build_command
         "cmake --build . --target=${targetname}"
         --log_dir
-        ${CMAKE_CURRENT_BINARY_DIR}/rtt_log/${targetname}
-        --gui_type
-        ${PARSED_ARGS_GUI_TYPE})
+        ${CMAKE_CURRENT_BINARY_DIR}/rtt_log/${targetname})
 
     if(PARSED_ARGS_JLINK_IP AND NOT PARSED_ARGS_JLINK_IP STREQUAL "")
         list(APPEND command --host ${PARSED_ARGS_JLINK_IP})

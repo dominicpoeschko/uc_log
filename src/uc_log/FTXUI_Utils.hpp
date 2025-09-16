@@ -1,6 +1,8 @@
 #pragma once
 
 #include "uc_log/detail/LogEntry.hpp"
+#include "uc_log/metric_utils.hpp"
+#include "uc_log/theme.hpp"
 
 #ifdef __GNUC__
     #pragma GCC diagnostic push
@@ -960,5 +962,617 @@ namespace uc_log { namespace FTXUIGui {
         };
         return option;
     }
+
+    static std::string formatCount(std::size_t count) {
+        if(count >= 1000000000) {
+            return fmt::format("{:.1f}G", static_cast<double>(count) / 1000000000.0);
+        } else if(count >= 1000000) {
+            return fmt::format("{:.1f}M", static_cast<double>(count) / 1000000.0);
+        } else if(count >= 1000) {
+            return fmt::format("{:.1f}K", static_cast<double>(count) / 1000.0);
+        }
+        return fmt::format("{}", count);
+    }
+
+    enum class TimeUnit { Seconds, Minutes, Hours };
+
+    enum class TimeRangeMode { ShowAll, LastPeriod };
+
+    class MetricPlotWidget {
+    public:
+        struct Config {
+            bool   autoFitY     = true;
+            double yZoomLevel   = 1.0;
+            double yCenterValue = 0.0;
+
+            TimeRangeMode timeRangeMode   = TimeRangeMode::ShowAll;
+            int           timePeriodValue = 10;
+            TimeUnit      timePeriodUnit  = TimeUnit::Seconds;
+            bool          autoScroll      = true;
+
+            int minHeight = 6;
+        };
+
+    private:
+        Config                    config_;
+        std::optional<MetricInfo> selectedMetric_;
+
+        int         timeModeIndex_      = 0;
+        int         timeUnitIndex_      = 0;
+        std::string timePeriodValueStr_ = "1";
+
+        static std::chrono::seconds timeUnitToSeconds(int      value,
+                                                      TimeUnit unit) {
+            switch(unit) {
+            case TimeUnit::Seconds: return std::chrono::seconds(value);
+            case TimeUnit::Minutes: return std::chrono::seconds(value * 60);
+            case TimeUnit::Hours:   return std::chrono::seconds(value * 3600);
+            }
+            return std::chrono::seconds(value);
+        }
+
+        static std::string timeUnitToString(TimeUnit unit,
+                                            bool     plural = true) {
+            switch(unit) {
+            case TimeUnit::Seconds: return plural ? "seconds" : "second";
+            case TimeUnit::Minutes: return plural ? "minutes" : "minute";
+            case TimeUnit::Hours:   return plural ? "hours" : "hour";
+            }
+            return "seconds";
+        }
+
+        static TimeUnit suggestTimeUnit(std::chrono::seconds totalSpan) {
+            auto secs = totalSpan.count();
+            if(secs <= 300) {
+                return TimeUnit::Seconds;
+            }
+            if(secs <= 7200) {
+                return TimeUnit::Minutes;
+            }
+            return TimeUnit::Hours;
+        }
+
+        std::chrono::seconds analyzeDataTimeSpan(std::vector<MetricEntry> const& values) const {
+            if(values.empty()) {
+                return std::chrono::seconds(0);
+            }
+            auto oldest = values.front().recv_time;
+            auto newest = values.back().recv_time;
+            return std::chrono::duration_cast<std::chrono::seconds>(newest - oldest);
+        }
+
+        std::string formatMetricValue(double             value,
+                                      std::string const& unit) const {
+            auto absValue = std::abs(value);
+
+            if(absValue == 0.0) {
+                return unit.empty() ? "0" : fmt::format("0{}", unit);
+            }
+
+            if(absValue >= 1e9) {
+                return unit.empty() ? fmt::format("{:.2f}G", value / 1e9)
+                                    : fmt::format("{:.2f}G{}", value / 1e9, unit);
+            } else if(absValue >= 1e6) {
+                return unit.empty() ? fmt::format("{:.2f}M", value / 1e6)
+                                    : fmt::format("{:.2f}M{}", value / 1e6, unit);
+            } else if(absValue >= 1e3) {
+                return unit.empty() ? fmt::format("{:.2f}K", value / 1e3)
+                                    : fmt::format("{:.2f}K{}", value / 1e3, unit);
+            } else if(absValue >= 1.0) {
+                return unit.empty() ? fmt::format("{:.2f}", value)
+                                    : fmt::format("{:.2f}{}", value, unit);
+            } else if(absValue >= 1e-3) {
+                return unit.empty() ? fmt::format("{:.2f}m", value * 1e3)
+                                    : fmt::format("{:.2f}m{}", value * 1e3, unit);
+            } else if(absValue >= 1e-6) {
+                return unit.empty() ? fmt::format("{:.2f}µ", value * 1e6)
+                                    : fmt::format("{:.2f}µ{}", value * 1e6, unit);
+            } else {
+                return unit.empty() ? fmt::format("{:.2e}", value)
+                                    : fmt::format("{:.2e}{}", value, unit);
+            }
+        }
+
+        std::string formatTimeLabel(std::chrono::system_clock::time_point current_time,
+                                    std::chrono::system_clock::time_point reference_time) const {
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(reference_time
+                                                                                  - current_time);
+
+            if(duration.count() >= 0) {
+                return "now";
+            }
+
+            auto absDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+              current_time - reference_time);
+            auto absSeconds = std::chrono::duration_cast<std::chrono::seconds>(absDuration).count();
+
+            if(absSeconds < 60) {
+                return fmt::format("-{}s", absSeconds);
+            } else if(absSeconds < 3600) {
+                auto minutes = absSeconds / 60;
+                return fmt::format("-{}m", minutes);
+            } else if(absSeconds < 86400) {
+                auto hours   = absSeconds / 3600;
+                auto minutes = (absSeconds % 3600) / 60;
+                return fmt::format("-{}h{}m", hours, minutes);
+            } else {
+                auto days  = absSeconds / 86400;
+                auto hours = (absSeconds % 86400) / 3600;
+                return fmt::format("-{}d{}h", days, hours);
+            }
+        }
+
+        std::vector<std::string> generateYAxisLabels(double             minVal,
+                                                     double             maxVal,
+                                                     int                height,
+                                                     std::string const& unit) const {
+            std::vector<std::string> labels;
+
+            if(height < 3) {
+                return labels;
+            }
+
+            double range = maxVal - minVal;
+            if(range == 0.0) {
+                labels.push_back(formatMetricValue(minVal, unit));
+                return labels;
+            }
+
+            int numTicks = std::min(5, height / 2);
+            if(numTicks < 2) {
+                numTicks = 2;
+            }
+
+            for(int i = 0; i < numTicks; ++i) {
+                double value = maxVal - (static_cast<double>(i) * range / (numTicks - 1));
+                labels.push_back(formatMetricValue(value, unit));
+            }
+
+            return labels;
+        }
+
+        std::vector<std::string> generateXAxisLabels(std::vector<MetricEntry> const& values,
+                                                     std::size_t                     startIdx,
+                                                     std::size_t visibleDataSize) const {
+            std::vector<std::string> labels;
+
+            if(values.empty() || visibleDataSize < 2 || startIdx >= values.size()) {
+                return labels;
+            }
+
+            auto currentTime = std::chrono::system_clock::now();
+
+            int numTicks = std::min(4, static_cast<int>(visibleDataSize) / 8);
+            if(numTicks < 2) {
+                numTicks = 2;
+            }
+
+            for(int i = 0; i < numTicks; ++i) {
+                std::size_t dataIdx;
+                if(i == numTicks - 1) {
+                    dataIdx = startIdx + visibleDataSize - 1;
+                } else {
+                    dataIdx = startIdx
+                            + (static_cast<std::size_t>(i) * (visibleDataSize - 1))
+                                / static_cast<std::size_t>(numTicks - 1);
+                }
+
+                if(dataIdx < values.size()) {
+                    auto timeLabel = formatTimeLabel(currentTime, values[dataIdx].recv_time);
+                    labels.push_back(timeLabel);
+                }
+            }
+
+            return labels;
+        }
+
+        std::pair<double,
+                  double>
+        calculateYAxisRange(double dataMin,
+                            double dataMax) const {
+            if(config_.autoFitY) {
+                if(dataMin == dataMax) {
+                    double center = dataMin;
+                    double span   = std::max(1.0, std::abs(center) * 0.1);
+                    return {center - span, center + span};
+                }
+
+                double dataRange = dataMax - dataMin;
+                double padding   = dataRange * 0.05;
+                return {dataMin - padding, dataMax + padding};
+            } else {
+                double baseRange;
+                double center;
+
+                if(dataMin == dataMax) {
+                    baseRange = std::max(1.0, std::abs(dataMin) * 0.2);
+                    center    = config_.yCenterValue != 0.0 ? config_.yCenterValue : dataMin;
+                } else {
+                    baseRange = (dataMax - dataMin) / config_.yZoomLevel;
+                    center    = config_.yCenterValue != 0.0 ? config_.yCenterValue
+                                                            : (dataMin + dataMax) / 2.0;
+                }
+
+                double halfRange = baseRange / 2.0;
+                return {center - halfRange, center + halfRange};
+            }
+        }
+
+        std::pair<std::size_t,
+                  std::size_t>
+        calculateXAxisDataRange(std::vector<MetricEntry> const& values) const {
+            if(values.empty()) {
+                return {0, 0};
+            }
+
+            std::size_t dataSize = values.size();
+            std::size_t startIdx = 0;
+            std::size_t endIdx   = dataSize;
+
+            switch(config_.timeRangeMode) {
+            case TimeRangeMode::ShowAll:
+                startIdx = 0;
+                endIdx   = dataSize;
+                break;
+
+            case TimeRangeMode::LastPeriod:
+                {
+                    auto timeWindow
+                      = timeUnitToSeconds(config_.timePeriodValue, config_.timePeriodUnit);
+                    auto cutoffTime = std::chrono::system_clock::now() - timeWindow;
+
+                    for(std::size_t i = 0; i < dataSize; ++i) {
+                        if(values[i].recv_time >= cutoffTime) {
+                            startIdx = i;
+                            break;
+                        }
+                    }
+                    endIdx = dataSize;
+                    break;
+                }
+            }
+
+            return {startIdx, endIdx};
+        }
+
+    public:
+        MetricPlotWidget()
+          : timeModeIndex_(static_cast<int>(config_.timeRangeMode))
+          , timeUnitIndex_(static_cast<int>(config_.timePeriodUnit))
+          , timePeriodValueStr_(std::to_string(config_.timePeriodValue)) {}
+
+        void setSelectedMetric(std::optional<MetricInfo> metric) {
+            selectedMetric_ = std::move(metric);
+        }
+
+        void syncUIState() {
+            timeModeIndex_      = static_cast<int>(config_.timeRangeMode);
+            timeUnitIndex_      = static_cast<int>(config_.timePeriodUnit);
+            timePeriodValueStr_ = std::to_string(config_.timePeriodValue);
+        }
+
+        std::optional<MetricInfo> const& getSelectedMetric() const { return selectedMetric_; }
+
+        [[nodiscard]] ftxui::Component createControlsComponent() {
+            return createControlsWithData([]() { return std::vector<MetricEntry>{}; });
+        }
+
+        template<typename MetricDataProvider>
+        [[nodiscard]] ftxui::Component createControlsComponent(MetricDataProvider&& dataProvider) {
+            return createControlsWithData(std::forward<MetricDataProvider>(dataProvider));
+        }
+
+    private:
+        template<typename MetricDataProvider>
+        ftxui::Component
+        createControlsWithData([[maybe_unused]] MetricDataProvider&& dataProvider) {
+            syncUIState();
+            auto yAutoFitCheckbox = ftxui::Checkbox("🔧 Auto-fit", &config_.autoFitY);
+
+            auto yZoomOutBtn = ftxui::Button(
+              "🔍➖",
+              [this]() { config_.yZoomLevel = std::max(0.1, config_.yZoomLevel / 1.5); },
+              createButtonStyle(Theme::Button::Background::settings, Theme::Button::text));
+
+            auto yZoomInBtn = ftxui::Button(
+              "🔍➕",
+              [this]() { config_.yZoomLevel = std::min(10.0, config_.yZoomLevel * 1.5); },
+              createButtonStyle(Theme::Button::Background::settings, Theme::Button::text));
+
+            std::vector<std::string> timeRangeModeOptions = {"📈 Show All", "⏰ Last Period"};
+            auto timeModeToggle = ftxui::Toggle(timeRangeModeOptions, &timeModeIndex_);
+            timeModeToggle      = ftxui::CatchEvent(timeModeToggle, [this](ftxui::Event) {
+                config_.timeRangeMode = static_cast<TimeRangeMode>(timeModeIndex_);
+                return false;
+            });
+
+            auto timePeriodInput = ftxui::Input(&timePeriodValueStr_, "Enter number...");
+            timePeriodInput      = ftxui::CatchEvent(timePeriodInput, [this](ftxui::Event) {
+                try {
+                    int value = std::stoi(timePeriodValueStr_);
+                    if(value > 0 && value <= 999) {
+                        config_.timePeriodValue = value;
+                    }
+                } catch(std::exception const&) {
+                }
+                return false;
+            });
+
+            std::vector<std::string> timeUnitOptions = {"sec", "min", "hr"};
+            auto timeUnitToggle = ftxui::Toggle(timeUnitOptions, &timeUnitIndex_);
+            timeUnitToggle      = ftxui::CatchEvent(timeUnitToggle, [this](ftxui::Event) {
+                config_.timePeriodUnit = static_cast<TimeUnit>(timeUnitIndex_);
+                return false;
+            });
+
+            auto yAxisRow = ftxui::Container::Horizontal({
+              ftxui::Renderer(
+                []() { return ftxui::text("Y-Axis:") | ftxui::color(Theme::Header::primary); }),
+              yAutoFitCheckbox,
+              ftxui::Maybe(yZoomOutBtn, [this]() { return !config_.autoFitY; }),
+              ftxui::Maybe(yZoomInBtn, [this]() { return !config_.autoFitY; }),
+            });
+
+            auto xAxisRow = ftxui::Container::Horizontal({
+              ftxui::Renderer(
+                []() { return ftxui::text("X-Axis:") | ftxui::color(Theme::Header::primary); }),
+              timeModeToggle,
+              ftxui::Maybe(ftxui::Container::Horizontal({
+                             ftxui::Renderer([]() { return ftxui::separator(); }),
+                             ftxui::Renderer([]() {
+                                 return ftxui::text("Show last:")
+                                      | ftxui::color(Theme::Text::normal);
+                             }),
+                             timePeriodInput | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 6),
+                             timeUnitToggle,
+                           }),
+                           [this]() { return config_.timeRangeMode == TimeRangeMode::LastPeriod; }),
+            });
+
+            ftxui::Components allControls = {
+              yAxisRow,
+              xAxisRow,
+            };
+
+            return ftxui::Container::Vertical(allControls);
+        }
+
+    public:
+        template<typename MetricDataProvider>
+        ftxui::Component createGraphComponent(MetricDataProvider&& dataProvider) {
+            return ftxui::Renderer([this,
+                                    dataProvider = std::forward<MetricDataProvider>(
+                                      dataProvider)]() mutable -> ftxui::Element {
+                if(!selectedMetric_) {
+                    ftxui::Elements noSelectionElements
+                      = {ftxui::text("No metric selected") | ftxui::color(Theme::Status::warning)
+                           | ftxui::center,
+                         ftxui::text("Select a metric from the overview tab")
+                           | ftxui::color(Theme::Text::metadata) | ftxui::center};
+                    return ftxui::vbox(noSelectionElements);
+                }
+
+                auto metricData = dataProvider(*selectedMetric_);
+                if(!metricData || (*metricData)->empty()) {
+                    ftxui::Elements noDataElements
+                      = {ftxui::text("No data available") | ftxui::color(Theme::Status::error)
+                           | ftxui::center,
+                         ftxui::text("Waiting for metric data...")
+                           | ftxui::color(Theme::Text::metadata) | ftxui::center};
+                    return ftxui::vbox(noDataElements);
+                }
+
+                auto const& values = **metricData;
+                auto const& info   = *selectedMetric_;
+
+                auto [xStartIdx, xEndIdx]   = calculateXAxisDataRange(values);
+                std::size_t visibleDataSize = xEndIdx - xStartIdx;
+
+                if(visibleDataSize == 0) {
+                    ftxui::Elements noRangeElements
+                      = {ftxui::text("No data in time range") | ftxui::color(Theme::Status::warning)
+                           | ftxui::center,
+                         ftxui::text("Adjust X-axis controls") | ftxui::color(Theme::Text::metadata)
+                           | ftxui::center};
+                    return ftxui::vbox(noRangeElements);
+                }
+
+                double dataMinVal = values[xStartIdx].value;
+                double dataMaxVal = values[xStartIdx].value;
+                for(std::size_t i = xStartIdx; i < xEndIdx; ++i) {
+                    dataMinVal = std::min(dataMinVal, values[i].value);
+                    dataMaxVal = std::max(dataMaxVal, values[i].value);
+                }
+
+                auto [yMin, yMax] = calculateYAxisRange(dataMinVal, dataMaxVal);
+
+                auto graphFunc = [values, xStartIdx, xEndIdx, visibleDataSize, yMin, yMax](
+                                   int width,
+                                   int height) -> std::vector<int> {
+                    std::vector<int> output(static_cast<std::size_t>(width), height / 2);
+
+                    if(visibleDataSize == 0 || width <= 0) {
+                        return output;
+                    }
+
+                    double yRange = yMax - yMin;
+                    if(yRange == 0.0) {
+                        yRange = 1.0;
+                    }
+
+                    for(int x = 0; x < width; ++x) {
+                        std::size_t dataIdx;
+                        if(visibleDataSize == 1) {
+                            dataIdx = xStartIdx;
+                        } else {
+                            dataIdx = xStartIdx
+                                    + (static_cast<std::size_t>(x) * (visibleDataSize - 1))
+                                        / static_cast<std::size_t>(width - 1);
+                        }
+
+                        if(dataIdx < xEndIdx) {
+                            double normalizedValue = (values[dataIdx].value - yMin) / yRange;
+                            normalizedValue        = std::clamp(normalizedValue, 0.0, 1.0);
+                            int yPos = static_cast<int>(normalizedValue * (height - 1));
+                            output[static_cast<std::size_t>(x)] = std::clamp(yPos, 0, height - 1);
+                        }
+                    }
+
+                    return output;
+                };
+
+                auto graph = ftxui::graph(graphFunc) | ftxui::color(Theme::Header::accent);
+
+                if(values.size() < 2) {
+                    return graph;
+                }
+
+                auto yLabels = generateYAxisLabels(yMin, yMax, config_.minHeight, info.unit);
+                auto xLabels = generateXAxisLabels(values, xStartIdx, visibleDataSize);
+
+                ftxui::Elements yLabelElements;
+                for(std::size_t i = 0; i < yLabels.size(); ++i) {
+                    yLabelElements.push_back(ftxui::text(yLabels[i])
+                                             | ftxui::color(Theme::Text::metadata));
+                    if(i < yLabels.size() - 1) {
+                        yLabelElements.push_back(ftxui::filler());
+                    }
+                }
+
+                ftxui::Elements xLabelElements;
+                for(auto const& label : xLabels) {
+                    xLabelElements.push_back(ftxui::text(label)
+                                             | ftxui::color(Theme::Text::metadata));
+                }
+
+                auto yAxisColumn = ftxui::vbox(yLabelElements)
+                                 | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 8) | ftxui::align_right;
+
+                ftxui::Elements spacedXLabels;
+                spacedXLabels.push_back(ftxui::text("")
+                                        | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 8));
+                for(std::size_t i = 0; i < xLabelElements.size(); ++i) {
+                    spacedXLabels.push_back(xLabelElements[i]);
+                    if(i < xLabelElements.size() - 1) {
+                        spacedXLabels.push_back(ftxui::filler());
+                    }
+                }
+                auto xAxisRow = ftxui::hbox(spacedXLabels);
+
+                ftxui::Elements graphRowElements = {yAxisColumn, graph | ftxui::flex};
+                ftxui::Elements graphElements
+                  = {ftxui::hbox(graphRowElements) | ftxui::flex,
+                     xAxisRow | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 1)};
+                return ftxui::vbox(graphElements);
+            });
+        }
+
+        template<typename MetricDataProvider>
+        ftxui::Component createStatsComponent(MetricDataProvider&& dataProvider) {
+            return ftxui::Renderer([this,
+                                    dataProvider = std::forward<MetricDataProvider>(
+                                      dataProvider)]() mutable -> ftxui::Element {
+                if(!selectedMetric_) {
+                    return ftxui::text("");
+                }
+
+                auto metricData = dataProvider(*selectedMetric_);
+                if(!metricData || (*metricData)->empty()) {
+                    return ftxui::text("");
+                }
+
+                auto const& values = **metricData;
+                auto const& info   = *selectedMetric_;
+
+                auto [statsStartIdx, statsEndIdx] = calculateXAxisDataRange(values);
+                std::size_t visibleStatsSize      = statsEndIdx - statsStartIdx;
+
+                if(visibleStatsSize == 0) {
+                    return ftxui::text("");
+                }
+
+                double dataMinVal = values[statsStartIdx].value;
+                double dataMaxVal = values[statsStartIdx].value;
+                double latestVal  = values[statsEndIdx - 1].value;
+
+                for(std::size_t i = statsStartIdx; i < statsEndIdx; ++i) {
+                    dataMinVal = std::min(dataMinVal, values[i].value);
+                    dataMaxVal = std::max(dataMaxVal, values[i].value);
+                }
+
+                auto [yMin, yMax] = calculateYAxisRange(dataMinVal, dataMaxVal);
+
+                ftxui::Elements titleElements = {
+                  ftxui::text("📊 ") | ftxui::color(Theme::Data::icon),
+                  ftxui::text(info.scope) | ftxui::color(Theme::Data::scope),
+                  ftxui::text("::") | ftxui::color(Theme::Text::separator),
+                  ftxui::text(info.name) | ftxui::color(Theme::Data::name) | ftxui::bold,
+                  ftxui::text(info.unit.empty() ? "" : fmt::format(" [{}]", info.unit))
+                    | ftxui::color(Theme::Data::unit),
+                };
+
+                ftxui::Elements statsElements = {
+                  ftxui::text("Current: ") | ftxui::bold,
+                  ftxui::text(formatMetricValue(latestVal, "")) | ftxui::color(Theme::Data::value),
+                  ftxui::text(" | Range: ") | ftxui::bold,
+                  ftxui::text(formatMetricValue(dataMinVal, ""))
+                    | ftxui::color(Theme::Status::success),
+                  ftxui::text(" to ") | ftxui::color(Theme::Status::success),
+                  ftxui::text(formatMetricValue(dataMaxVal, ""))
+                    | ftxui::color(Theme::Status::success),
+                  ftxui::text(" | Y-Axis: ") | ftxui::bold,
+                  ftxui::text(formatMetricValue(yMin, "")) | ftxui::color(Theme::Data::value),
+                  ftxui::text(" to ") | ftxui::color(Theme::Data::value),
+                  ftxui::text(formatMetricValue(yMax, "")) | ftxui::color(Theme::Data::value),
+                  ftxui::text(" | Visible: ") | ftxui::bold,
+                  ftxui::text(fmt::format("{}/{}", visibleStatsSize, values.size()))
+                    | ftxui::color(Theme::Data::count),
+                };
+
+                ftxui::Elements allStatsElements
+                  = {ftxui::separator(), ftxui::hbox(titleElements), ftxui::hbox(statsElements)};
+                return ftxui::vbox(allStatsElements);
+            });
+        }
+
+        template<typename MetricDataProvider,
+                 typename ClearCallback>
+        ftxui::Component createComponent(MetricDataProvider&& dataProvider,
+                                         ClearCallback&&      clearCallback) {
+            auto clearButton = ftxui::Button(
+              "🗑️ Clear Data",
+              std::forward<ClearCallback>(clearCallback),
+              createButtonStyle(Theme::Button::Background::danger, Theme::Button::textOnDark));
+
+            auto headerRenderer = ftxui::Renderer([]() {
+                ftxui::Elements headerElements
+                  = {ftxui::text("📈 Live Metric Plot") | ftxui::bold
+                       | ftxui::color(Theme::Header::primary) | ftxui::center,
+                     ftxui::separator()};
+                return ftxui::vbox(headerElements);
+            });
+
+            auto controls = createControlsComponent();
+            auto graph    = createGraphComponent(dataProvider);
+            auto stats    = createStatsComponent(dataProvider);
+
+            ftxui::Components mainContentComponents = {headerRenderer, graph | ftxui::flex, stats};
+            auto              mainContent = ftxui::Container::Vertical(mainContentComponents);
+
+            ftxui::Components clearComponents
+              = {clearButton,
+                 ftxui::Renderer(
+                   []() { return ftxui::text(" | ") | ftxui::color(Theme::Text::separator); }),
+                 ftxui::Renderer([]() { return ftxui::filler(); })};
+
+            ftxui::Components allComponents = {ftxui::Container::Horizontal(clearComponents),
+                                               ftxui::Renderer([]() { return ftxui::separator(); }),
+                                               controls,
+                                               ftxui::Renderer([]() { return ftxui::separator(); }),
+                                               mainContent | ftxui::flex};
+
+            return ftxui::Container::Vertical(allComponents);
+        }
+    };
 
 }}   // namespace uc_log::FTXUIGui

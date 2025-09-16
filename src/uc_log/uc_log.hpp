@@ -3,6 +3,7 @@
 #include "ComBackend.hpp"
 #include "LogClock.hpp"
 #include "LogLevel.hpp"
+#include "metric.hpp"
 #include "remote_fmt/remote_fmt.hpp"
 #include "rtt/rtt.hpp"
 
@@ -38,7 +39,8 @@ namespace uc_log { namespace detail {
              typename... Args>
     constexpr void log(sc::StringConstant<chars...> fmt,
                        Args&&... args) {
-        remote_fmt::Printer<ComBackend>::staticPrint(fmt, std::forward<Args>(args)...);
+        remote_fmt::Printer<ComBackend>::staticPrint(injectMetricFmtString(fmt, args...),
+                                                     std::forward<Args>(args)...);
     }
 
 }}   // namespace uc_log::detail
