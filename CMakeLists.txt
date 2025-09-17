@@ -221,7 +221,34 @@ function(target_add_uc_log_rtt_jlink targetname)
         DEPENDS ${targetname} uc_log_printer ${uc_log_printer_bin})
 
     target_generate_string_constants(${targetname})
+    target_generate_ssproj(${targetname})
 
     add_dependencies(${targetname} uc_log_printer)
 
+endfunction()
+
+function(target_generate_ssproj targetname)
+    get_target_property(bin_dir ${targetname} BINARY_DIR)
+
+    find_package(
+        Python3
+        COMPONENTS Interpreter
+        REQUIRED)
+    set(command ${Python3_EXECUTABLE} ${uc_log_dir}/tools/generate_ssproj.py --input
+                ${bin_dir}/${targetname}_string_constants.json --output ${bin_dir}/${targetname}.ssproj)
+
+    add_custom_command(
+        TARGET ${targetname}
+        POST_BUILD
+        COMMAND ${command}
+        BYPRODUCTS ${bin_dir}/${targetname}.ssproj)
+
+    set_property(
+        TARGET ${targetname}
+        APPEND
+        PROPERTY LINK_DEPENDS ${uc_log_dir}/tools/generate_ssproj.py)
+    set_property(
+        TARGET ${targetname}
+        APPEND
+        PROPERTY ADDITIONAL_CLEAN_FILES ${bin_dir}/${targetname}.ssproj)
 endfunction()

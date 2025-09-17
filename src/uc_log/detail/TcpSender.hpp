@@ -104,12 +104,15 @@ struct TCPSender {
         void doSend() {
             sending = true;
 
+            auto message = std::move(messages.front());
+            messages.erase(messages.begin());
+
             boost::asio::async_write(
               socket,
-              boost::asio::buffer(messages.front(), messages.front().size()),
-              [self = shared_from_this()](boost::system::error_code ec, std::size_t) {
+              boost::asio::buffer(message.data(), message.size()),
+              [self            = shared_from_this(),
+               capturedMessage = std::move(message)](boost::system::error_code ec, std::size_t) {
                   if(!ec) {
-                      self->messages.erase(self->messages.begin());
                       self->write_rdy();
                   } else if(ec != boost::asio::error::eof) {
                       self->errorMessagef(fmt::format("client send error {}", ec.message()));

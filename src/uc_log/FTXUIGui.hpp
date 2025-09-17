@@ -105,7 +105,7 @@ namespace uc_log { namespace FTXUIGui {
         };
 
         struct MessageEntry {
-            enum class Level { Fatal, Error, Status };
+            enum class Level { Fatal, Error, Status, ToolError, ToolStatus };
 
             Level                                 level;
             std::chrono::system_clock::time_point time;
@@ -147,6 +147,11 @@ namespace uc_log { namespace FTXUIGui {
         bool showLocation{true};
         bool showChannel{true};
         bool showLogLevel{true};
+        bool showMetricString{false};
+
+        std::size_t lastMetricCount{0};
+        bool        hasLastSelectedInfo{false};
+        MetricInfo  lastSelectedInfo;
 
         std::vector<MessageEntry> statusMessages;
 
@@ -391,6 +396,39 @@ namespace uc_log { namespace FTXUIGui {
             }
         }
 
+        std::string processLogMessage(std::string const& originalMsg) const {
+            if(showMetricString) {
+                return originalMsg;
+            }
+
+            std::string processedMsg = originalMsg;
+            std::size_t pos          = 0;
+
+            while((pos = processedMsg.find("@METRIC(", pos)) != std::string::npos) {
+                std::size_t start_pos = pos;
+                pos += 8;
+
+                std::size_t end_pos = processedMsg.find(')', pos);
+                if(end_pos == std::string::npos) {
+                    break;
+                }
+
+                std::string_view metric_content
+                  = std::string_view{processedMsg}.substr(pos, end_pos - pos);
+
+                std::size_t equals_pos = metric_content.find('=');
+                if(equals_pos != std::string_view::npos) {
+                    std::string value{metric_content.substr(equals_pos + 1)};
+                    processedMsg.replace(start_pos, end_pos - start_pos + 1, value);
+                    pos = start_pos + value.length();
+                } else {
+                    pos = end_pos + 1;
+                }
+            }
+
+            return processedMsg;
+        }
+
         auto defaultRender(GuiLogEntry const& e) {
             ftxui::Elements elements;
             elements.reserve(12);
@@ -418,7 +456,7 @@ namespace uc_log { namespace FTXUIGui {
                 elements.push_back(ftxui::text("│ ") | ftxui::color(Theme::Text::separator()));
             }
 
-            elements.push_back(ansiColoredTextToFtxui(e.logEntry.logMsg));
+            elements.push_back(ansiColoredTextToFtxui(processLogMessage(e.logEntry.logMsg)));
 
             auto scrollableContent = ftxui::hbox(elements) | ftxui::flex;
 
@@ -437,10 +475,8 @@ namespace uc_log { namespace FTXUIGui {
                   | ftxui::color(Theme::Text::metadata()));
             }
 
-            ftxui::Element metadataElement = nullptr;
-            if(!metadata.empty()) {
-                metadataElement = ftxui::hbox(metadata);
-            }
+            ftxui::Element metadataElement
+              = metadata.empty() ? ftxui::text("") : ftxui::hbox(metadata);
 
             return std::make_shared<ScrollableWithMetadata>(std::move(scrollableContent),
                                                             std::move(metadataElement));
@@ -456,9 +492,11 @@ namespace uc_log { namespace FTXUIGui {
             elements.push_back(ftxui::text(" | ") | ftxui::color(Theme::Text::normal()));
 
             auto messageColor
-              = e.level == MessageEntry::Level::Fatal ? ftxui::color(Theme::Message::fatal())
-              : e.level == MessageEntry::Level::Error ? ftxui::color(Theme::Message::error())
-                                                      : ftxui::color(Theme::Message::status());
+              = e.level == MessageEntry::Level::Fatal     ? ftxui::color(Theme::Message::fatal())
+              : e.level == MessageEntry::Level::Error     ? ftxui::color(Theme::Message::error())
+              : e.level == MessageEntry::Level::Status    ? ftxui::color(ftxui::Color::White)
+              : e.level == MessageEntry::Level::ToolError ? ftxui::color(ftxui::Color::RedLight)
+                                                          : ftxui::color(ftxui::Color::Cyan);
 
             elements.push_back(ftxui::text(e.message) | messageColor | ftxui::flex);
 
@@ -467,11 +505,9 @@ namespace uc_log { namespace FTXUIGui {
 
         void updateFilteredLogEntries() {
             filteredLogEntries.clear();
-            for(auto& entry : allLogEntries) {
-                if(currentFilter(*entry)) {
-                    filteredLogEntries.push_back(entry);
-                }
-            }
+            std::ranges::copy_if(allLogEntries,
+                                 std::back_inserter(filteredLogEntries),
+                                 [&](auto const& v) { return currentFilter(*v); });
         }
 
         auto createFilter(FilterState const& filterState) {
@@ -678,11 +714,12 @@ namespace uc_log { namespace FTXUIGui {
             auto dynamicMetricsList
               = metricsContainer
               | ftxui::Renderer([this, metricsContainer](ftxui::Element) mutable {
-                    static std::size_t               lastMetricCount = 0;
-                    static std::optional<MetricInfo> lastSelectedInfo;
-
-                    bool needsRebuild = (metricEntries.size() != lastMetricCount)
-                                     || (metricPlotWidget.getSelectedMetric() != lastSelectedInfo);
+                    auto currentSelected = metricPlotWidget.getSelectedMetric();
+                    bool needsRebuild    = (metricEntries.size() != lastMetricCount)
+                                     || (!hasLastSelectedInfo && currentSelected.has_value())
+                                     || (hasLastSelectedInfo && !currentSelected.has_value())
+                                     || (hasLastSelectedInfo && currentSelected.has_value()
+                                         && *currentSelected != lastSelectedInfo);
 
                     if(needsRebuild) {
                         metricsContainer->DetachAllChildren();
@@ -749,8 +786,13 @@ namespace uc_log { namespace FTXUIGui {
                             }
                         }
 
-                        lastMetricCount  = metricEntries.size();
-                        lastSelectedInfo = metricPlotWidget.getSelectedMetric();
+                        lastMetricCount = metricEntries.size();
+                        if(currentSelected.has_value()) {
+                            hasLastSelectedInfo = true;
+                            lastSelectedInfo    = *currentSelected;
+                        } else {
+                            hasLastSelectedInfo = false;
+                        }
                     }
 
                     return metricsContainer->Render();
@@ -1063,6 +1105,7 @@ namespace uc_log { namespace FTXUIGui {
                   showLocation     = true;
                   showChannel      = true;
                   showLogLevel     = true;
+                  showMetricString = false;
               },
               createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
 
@@ -1077,12 +1120,14 @@ namespace uc_log { namespace FTXUIGui {
             return ftxui::Container::Vertical(
               {ftxui::Container::Horizontal({resetButton | ftxui::flex, clearButton | ftxui::flex}),
                ftxui::Renderer([]() { return ftxui::separator(); }),
-               ftxui::Container::Vertical({ftxui::Checkbox("⏰ System Time", &showSysTime),
-                                           ftxui::Checkbox("🔍 Function Names", &showFunctionName),
-                                           ftxui::Checkbox("🕐 Target Time", &showUcTime),
-                                           ftxui::Checkbox("📍 Source Location", &showLocation),
-                                           ftxui::Checkbox("📡 Log Channel", &showChannel),
-                                           ftxui::Checkbox("📊 Log Level", &showLogLevel)})
+               ftxui::Container::Vertical(
+                 {ftxui::Checkbox("⏰ System Time", &showSysTime),
+                  ftxui::Checkbox("🔍 Function Names", &showFunctionName),
+                  ftxui::Checkbox("🕐 Target Time", &showUcTime),
+                  ftxui::Checkbox("📍 Source Location", &showLocation),
+                  ftxui::Checkbox("📡 Log Channel", &showChannel),
+                  ftxui::Checkbox("📊 Log Level", &showLogLevel),
+                  ftxui::Checkbox("📊 Show Metric Strings", &showMetricString)})
                  | ftxui::Renderer([](ftxui::Element inner) {
                        return ftxui::vbox({ftxui::text("🎨 Display Settings") | ftxui::bold
                                              | ftxui::color(Theme::Header::accent())
@@ -1125,13 +1170,14 @@ namespace uc_log { namespace FTXUIGui {
 
                    ftxui::hbox(
                      {ftxui::text("Overflows: ") | ftxui::bold,
-                      ftxui::text(fmt::format("{}", rttStatus.hostOverflowCount))
+                      ftxui::text(FTXUIGui::formatNumber(
+                        static_cast<std::uint32_t>(rttStatus.hostOverflowCount)))
                         | ftxui::color(rttStatus.hostOverflowCount == 0 ? Theme::Status::success()
                                                                         : Theme::Status::error())
                         | ftxui::bold}),
 
                    ftxui::hbox({ftxui::text("Read: ") | ftxui::bold,
-                                ftxui::text(fmt::format("{} bytes", rttStatus.numBytesRead))
+                                ftxui::text(FTXUIGui::formatBytes(rttStatus.numBytesRead))
                                   | ftxui::color(Theme::Status::info())}),
 
                    ftxui::hbox(
@@ -1220,6 +1266,7 @@ namespace uc_log { namespace FTXUIGui {
                 bool const filterActive = activeFilterState != FilterState{};
                 bool const buildRunning = (buildStatus == BuildStatus::Running);
                 bool const buildSuccess = (buildStatus == BuildStatus::Success);
+                bool const isFlashing   = rttReader.isFlashing();
 
                 return ftxui::hbox(
                   {ftxui::text("🔗 " + std::string(rttStatus.isRunning != 0 ? "●" : "○"))
@@ -1245,20 +1292,36 @@ namespace uc_log { namespace FTXUIGui {
                                                            : Theme::Text::normal()))),
                    ftxui::separator(),
 
-                   ftxui::text(fmt::format("LOGS {}/{}",
-                                           FTXUIGui::formatCount(logCount),
-                                           FTXUIGui::formatCount(totalCount)))
+                   ftxui::text(isFlashing ? (rttStatus.isRunning == 0 ? "⚡ ●" : "⚡ ●") : "⚡ ●")
+                     | ftxui::color(isFlashing
+                                      ? (rttStatus.isRunning == 0 ? Theme::Status::error()
+                                                                  : Theme::Status::warning())
+                                      : Theme::Status::success())
+                     | ftxui::bold,
+                   ftxui::separator(),
+
+                   ftxui::text(
+                     fmt::format("LOGS {}/{}",
+                                 FTXUIGui::formatNumber(static_cast<std::uint32_t>(logCount)),
+                                 FTXUIGui::formatNumber(static_cast<std::uint32_t>(totalCount))))
                      | ftxui::color(Theme::Status::info()),
                    ftxui::separator(),
 
                    ftxui::text(
-                     fmt::format("DATA {}B", FTXUIGui::formatCount(rttStatus.numBytesRead)))
+                     fmt::format("DATA {}", FTXUIGui::formatBytes(rttStatus.numBytesRead)))
                      | ftxui::color(Theme::Status::warning()),
                    ftxui::separator(),
 
-                   ftxui::text(fmt::format("OVFL {}", rttStatus.hostOverflowCount))
+                   ftxui::text(fmt::format("OVFL {}",
+                                           FTXUIGui::formatNumber(static_cast<std::uint32_t>(
+                                             rttStatus.hostOverflowCount))))
                      | ftxui::color(rttStatus.hostOverflowCount == 0 ? Theme::Status::success()
                                                                      : Theme::Status::error()),
+                   totalCount >= GUI_Constants::MaxLogEntries ? ftxui::separator()
+                                                              : ftxui::text(""),
+                   totalCount >= GUI_Constants::MaxLogEntries
+                     ? ftxui::text("⚠️ MEM") | ftxui::color(ftxui::Color::Red) | ftxui::bold
+                     : ftxui::text(""),
                    ftxui::separator(),
                    ftxui::filler()});
             });
@@ -1342,6 +1405,26 @@ namespace uc_log { namespace FTXUIGui {
         void errorMessage(std::string_view msg) {
             std::lock_guard<std::mutex> lock{mutex};
             statusMessages.emplace_back(MessageEntry::Level::Error,
+                                        std::chrono::system_clock::now(),
+                                        std::string{msg});
+            if(screenPointer) {
+                screenPointer->PostEvent(ftxui::Event::Custom);
+            }
+        }
+
+        void toolStatusMessage(std::string_view msg) {
+            std::lock_guard<std::mutex> lock{mutex};
+            statusMessages.emplace_back(MessageEntry::Level::ToolStatus,
+                                        std::chrono::system_clock::now(),
+                                        std::string{msg});
+            if(screenPointer) {
+                screenPointer->PostEvent(ftxui::Event::Custom);
+            }
+        }
+
+        void toolErrorMessage(std::string_view msg) {
+            std::lock_guard<std::mutex> lock{mutex};
+            statusMessages.emplace_back(MessageEntry::Level::ToolError,
                                         std::chrono::system_clock::now(),
                                         std::string{msg});
             if(screenPointer) {

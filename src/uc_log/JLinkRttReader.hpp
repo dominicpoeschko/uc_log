@@ -83,30 +83,34 @@ private:
         };
 
         while(!stoken.stop_requested()) {
-            messageCallback("start jlink");
+            toolMessageCallback("start jlink");
             try {
                 jlinkResetFlag = false;
                 JLink jlink    = [&]() {
                     if(host.empty()) {
-                        return JLink{device, speed, messageCallback, errorMessageCallback};
+                        return JLink{device, speed, toolMessageCallback, toolErrorMessageCallback};
                     }
-                    return JLink{device, speed, host, messageCallback, errorMessageCallback};
+                    return JLink{device,
+                                 speed,
+                                 host,
+                                 toolMessageCallback,
+                                 toolErrorMessageCallback};
                 }();
                 bool restart = false;
 
                 if(flashFlag) {
-                    messageCallback("flashing target");
+                    toolMessageCallback("flashing target");
                     jlink.flash(hexFileNameCallback());
-                    messageCallback("flashing target succeeded");
+                    toolMessageCallback("flashing target succeeded");
                     flashFlag       = false;
                     targetResetFlag = true;
                     restart         = true;
                 }
                 if(targetResetFlag) {
-                    messageCallback("resetting target");
+                    toolMessageCallback("resetting target");
                     jlink.resetTarget();
                     targetResetFlag = false;
-                    messageCallback("resetting target succeeded");
+                    toolMessageCallback("resetting target succeeded");
                     restart = true;
                 }
 
@@ -145,11 +149,11 @@ private:
                     std::this_thread::sleep_for(std::chrono::milliseconds{1});
                 }
             } catch(std::exception const& e) {
-                errorMessageCallback(fmt::format("caught {}", e.what()));
+                toolErrorMessageCallback(fmt::format("caught {}", e.what()));
                 std::this_thread::sleep_for(std::chrono::milliseconds{1000});
             }
             setStatusNotRunning();
-            messageCallback("stopped jlink");
+            toolMessageCallback("stopped jlink");
         }
     }
 
@@ -164,6 +168,8 @@ private:
     std::function<void(std::size_t, std::string_view)>                  entryPrintCallback;
     std::function<void(std::string_view)>                               messageCallback;
     std::function<void(std::string_view)>                               errorMessageCallback;
+    std::function<void(std::string_view)>                               toolMessageCallback;
+    std::function<void(std::string_view)>                               toolErrorMessageCallback;
 
     std::atomic<JLink::Status> status{};
     std::atomic<bool>          targetResetFlag{};
@@ -177,17 +183,21 @@ public:
              typename HexFileNameF,
              typename CatalogMapF,
              typename MessageF,
-             typename ErrorMessageF>
-    JLinkRttReader(std::string     host_,
-                   std::string     device_,
-                   std::uint32_t   speed_,
-                   std::uint32_t   numChannels_,
-                   BlockAddressF&& blockAddressf,
-                   HexFileNameF&&  hexFileNamef,
-                   CatalogMapF&&   catalogMapf,
-                   EntryPrintF&&   entryPrintf,
-                   MessageF&&      messagef,
-                   ErrorMessageF&& errorMessagef)
+             typename ErrorMessageF,
+             typename ToolMessageF,
+             typename ToolErrorMessageF>
+    JLinkRttReader(std::string         host_,
+                   std::string         device_,
+                   std::uint32_t       speed_,
+                   std::uint32_t       numChannels_,
+                   BlockAddressF&&     blockAddressf,
+                   HexFileNameF&&      hexFileNamef,
+                   CatalogMapF&&       catalogMapf,
+                   EntryPrintF&&       entryPrintf,
+                   MessageF&&          messagef,
+                   ErrorMessageF&&     errorMessagef,
+                   ToolMessageF&&      toolMessagef,
+                   ToolErrorMessageF&& toolErrorMessagef)
       : host{std::move(host_)}
       , device{std::move(device_)}
       , speed{speed_}
@@ -198,13 +208,17 @@ public:
       , entryPrintCallback{std::forward<EntryPrintF>(entryPrintf)}
       , messageCallback{std::forward<MessageF>(messagef)}
       , errorMessageCallback{std::forward<ErrorMessageF>(errorMessagef)}
+      , toolMessageCallback{std::forward<ToolMessageF>(toolMessagef)}
+      , toolErrorMessageCallback{std::forward<ToolErrorMessageF>(toolErrorMessagef)}
       , thread{[this](std::stop_token stoken) { run(stoken); }} {}
 
-    JLink::Status getStatus() { return status; }
+    JLink::Status getStatus() const { return status; }
 
     void resetJLink() { jlinkResetFlag = true; }
 
     void resetTarget() { targetResetFlag = true; }
 
     void flash() { flashFlag = true; }
+
+    bool isFlashing() const { return flashFlag; }
 };

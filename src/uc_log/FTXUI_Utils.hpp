@@ -145,7 +145,7 @@ namespace uc_log { namespace FTXUIGui {
                 if(event == ftxui::Event::Home) {
                     (hoveredEntryIndex) = 0;
                 }
-                if(event == ftxui::Event::End) {
+                if(event == ftxui::Event::End && size() > 0) {
                     (hoveredEntryIndex) = size() - 1;
                 }
                 if(event == ftxui::Event::Tab && size()) {
@@ -155,7 +155,9 @@ namespace uc_log { namespace FTXUIGui {
                     hoveredEntryIndex = (hoveredEntryIndex + size() - 1) % size();
                 }
 
-                hoveredEntryIndex = util::clamp(hoveredEntryIndex, 0, size() - 1);
+                if(size() > 0) {
+                    hoveredEntryIndex = util::clamp(hoveredEntryIndex, 0, size() - 1);
+                }
 
                 if(hoveredEntryIndex != previousHoveredIndex) {
                     focused_entry() = hoveredEntryIndex;
@@ -217,7 +219,9 @@ namespace uc_log { namespace FTXUIGui {
                 (hoveredEntryIndex)++;
             }
 
-            hoveredEntryIndex = util::clamp(hoveredEntryIndex, 0, size() - 1);
+            if(size() > 0) {
+                hoveredEntryIndex = util::clamp(hoveredEntryIndex, 0, size() - 1);
+            }
 
             if(hoveredEntryIndex != previousHoveredIndex) {
                 on_change();
@@ -228,9 +232,15 @@ namespace uc_log { namespace FTXUIGui {
 
         void Clamp() {
             boxes_.resize(static_cast<std::size_t>(size()));
-            selected()        = util::clamp(selected(), 0, size() - 1);
-            focused_entry()   = util::clamp(focused_entry(), 0, size() - 1);
-            hoveredEntryIndex = util::clamp(hoveredEntryIndex, 0, size() - 1);
+            if(size() > 0) {
+                selected()        = util::clamp(selected(), 0, size() - 1);
+                focused_entry()   = util::clamp(focused_entry(), 0, size() - 1);
+                hoveredEntryIndex = util::clamp(hoveredEntryIndex, 0, size() - 1);
+            } else {
+                selected()        = 0;
+                focused_entry()   = 0;
+                hoveredEntryIndex = 0;
+            }
         }
 
         bool Focusable() const final { return entries.size(); }
@@ -670,11 +680,7 @@ namespace uc_log { namespace FTXUIGui {
         std::size_t size() const override { return container.size(); }
 
         std::string operator[](std::size_t i) const override {
-            auto it = container.begin();
-            while(i != 0) {
-                --i;
-                ++it;
-            }
+            auto const it = std::next(container.begin(), static_cast<int>(i));
 
             auto const& [sourceLocation, count] = *it;
             auto const& [fileName, lineNumber]  = sourceLocation;
@@ -690,11 +696,7 @@ namespace uc_log { namespace FTXUIGui {
         std::size_t size() const override { return container.size(); }
 
         std::string operator[](std::size_t i) const override {
-            auto it = container.begin();
-            while(i != 0) {
-                --i;
-                ++it;
-            }
+            auto const it                      = std::next(container.begin(), static_cast<int>(i));
             auto const& [fileName, lineNumber] = *it;
             if(lineNumber == 0) {
                 return fmt::format("{}:all", fileName);
@@ -963,17 +965,6 @@ namespace uc_log { namespace FTXUIGui {
         return option;
     }
 
-    static std::string formatCount(std::size_t count) {
-        if(count >= 1000000000) {
-            return fmt::format("{:.1f}G", static_cast<double>(count) / 1000000000.0);
-        } else if(count >= 1000000) {
-            return fmt::format("{:.1f}M", static_cast<double>(count) / 1000000.0);
-        } else if(count >= 1000) {
-            return fmt::format("{:.1f}K", static_cast<double>(count) / 1000.0);
-        }
-        return fmt::format("{}", count);
-    }
-
     enum class TimeUnit { Seconds, Minutes, Hours };
 
     enum class TimeRangeMode { ShowAll, LastPeriod };
@@ -1171,7 +1162,9 @@ namespace uc_log { namespace FTXUIGui {
         calculateYAxisRange(double dataMin,
                             double dataMax) const {
             if(config_.autoFitY) {
-                if(dataMin == dataMax) {
+                if(std::abs(dataMin - dataMax) < std::numeric_limits<double>::epsilon()
+                                                   * std::max(std::abs(dataMin), std::abs(dataMax)))
+                {
                     double center = dataMin;
                     double span   = std::max(1.0, std::abs(center) * 0.1);
                     return {center - span, center + span};
@@ -1184,7 +1177,9 @@ namespace uc_log { namespace FTXUIGui {
                 double baseRange;
                 double center;
 
-                if(dataMin == dataMax) {
+                if(std::abs(dataMin - dataMax) < std::numeric_limits<double>::epsilon()
+                                                   * std::max(std::abs(dataMin), std::abs(dataMax)))
+                {
                     baseRange = std::max(1.0, std::abs(dataMin) * 0.2);
                     center    = config_.yCenterValue != 0.0 ? config_.yCenterValue : dataMin;
                 } else {
@@ -1341,7 +1336,7 @@ namespace uc_log { namespace FTXUIGui {
         template<typename MetricDataProvider>
         ftxui::Component createGraphComponent(MetricDataProvider&& dataProvider) {
             return ftxui::Renderer([this,
-                                    dataProvider = std::forward<MetricDataProvider>(
+                                    capturedDataProvider = std::forward<MetricDataProvider>(
                                       dataProvider)]() mutable -> ftxui::Element {
                 if(!selectedMetric_) {
                     ftxui::Elements noSelectionElements
@@ -1352,7 +1347,7 @@ namespace uc_log { namespace FTXUIGui {
                     return ftxui::vbox(noSelectionElements);
                 }
 
-                auto metricData = dataProvider(*selectedMetric_);
+                auto metricData = capturedDataProvider(*selectedMetric_);
                 if(!metricData || (*metricData)->empty()) {
                     ftxui::Elements noDataElements
                       = {ftxui::text("No data available") | ftxui::color(Theme::Status::error())
@@ -1470,13 +1465,13 @@ namespace uc_log { namespace FTXUIGui {
         template<typename MetricDataProvider>
         ftxui::Component createStatsComponent(MetricDataProvider&& dataProvider) {
             return ftxui::Renderer([this,
-                                    dataProvider = std::forward<MetricDataProvider>(
+                                    capturedDataProvider = std::forward<MetricDataProvider>(
                                       dataProvider)]() mutable -> ftxui::Element {
                 if(!selectedMetric_) {
                     return ftxui::text("");
                 }
 
-                auto metricData = dataProvider(*selectedMetric_);
+                auto metricData = capturedDataProvider(*selectedMetric_);
                 if(!metricData || (*metricData)->empty()) {
                     return ftxui::text("");
                 }
@@ -1560,13 +1555,7 @@ namespace uc_log { namespace FTXUIGui {
             ftxui::Components mainContentComponents = {headerRenderer, graph | ftxui::flex, stats};
             auto              mainContent = ftxui::Container::Vertical(mainContentComponents);
 
-            ftxui::Components clearComponents
-              = {clearButton,
-                 ftxui::Renderer(
-                   []() { return ftxui::text(" | ") | ftxui::color(Theme::Text::separator()); }),
-                 ftxui::Renderer([]() { return ftxui::filler(); })};
-
-            ftxui::Components allComponents = {ftxui::Container::Horizontal(clearComponents),
+            ftxui::Components allComponents = {clearButton,
                                                ftxui::Renderer([]() { return ftxui::separator(); }),
                                                controls,
                                                ftxui::Renderer([]() { return ftxui::separator(); }),
@@ -1575,5 +1564,28 @@ namespace uc_log { namespace FTXUIGui {
             return ftxui::Container::Vertical(allComponents);
         }
     };
+
+    static std::string formatNumber(std::uint32_t num) {
+        if(num >= 1000000) {
+            return fmt::format("{}M", num / 1000000);
+        }
+        if(num >= 1000) {
+            return fmt::format("{}K", num / 1000);
+        }
+        return std::to_string(num);
+    }
+
+    static std::string formatBytes(std::uint32_t bytes) {
+        if(bytes >= 1073741824) {
+            return fmt::format("{:.1f}GB", bytes / 1073741824.0);
+        }
+        if(bytes >= 1048576) {
+            return fmt::format("{:.1f}MB", bytes / 1048576.0);
+        }
+        if(bytes >= 1024) {
+            return fmt::format("{:.1f}KB", bytes / 1024.0);
+        }
+        return fmt::format("{}B", bytes);
+    }
 
 }}   // namespace uc_log::FTXUIGui

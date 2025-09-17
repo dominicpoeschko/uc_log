@@ -125,12 +125,12 @@ int main(int    argc,
         auto const metrics = uc_log::extractMetrics(recv_time, e);
         for(auto const& metric : metrics) {
             tcpSender.send(
-              fmt::format("/*{{\"name\":\"{}\",\"scope\":\"{}\",\"unit\":\"{}\",\"time\":{:%Q},"
+              fmt::format("/*{{\"name\":\"{}\",\"scope\":\"{}\",\"unit\":\"{}\",\"time\":{},"
                           "\"value\":{}}}*/\n",
                           metric.first.name,
                           metric.first.scope,
                           metric.first.unit,
-                          metric.second.uc_time.time,
+                          std::chrono::duration<double>(metric.second.uc_time.time).count(),
                           metric.second.value));
         }
     };
@@ -171,7 +171,9 @@ int main(int    argc,
                                  q.append(uc_log::detail::LogEntry{channel, msg});
                              },
                              [&gui](std::string_view msg) { gui.statusMessage(msg); },
-                             [&gui](std::string_view msg) { gui.errorMessage(msg); }};
+                             [&gui](std::string_view msg) { gui.errorMessage(msg); },
+                             [&gui](std::string_view msg) { gui.toolStatusMessage(msg); },
+                             [&gui](std::string_view msg) { gui.toolErrorMessage(msg); }};
 
     return gui.run(rttReader, buildCommand);
 }
