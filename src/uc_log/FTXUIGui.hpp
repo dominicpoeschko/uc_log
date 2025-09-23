@@ -63,6 +63,7 @@
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -99,7 +100,8 @@ namespace uc_log { namespace FTXUIGui {
         struct FilterState {
             std::set<uc_log::LogLevel> enabledLogLevels;
             std::set<std::size_t>      enabledChannels;
-            std::set<SourceLocation>   enabledLocations;
+            std::set<SourceLocation>   includedLocations;
+            std::set<SourceLocation>   excludedLocations;
 
             bool operator==(FilterState const&) const = default;
         };
@@ -453,7 +455,7 @@ namespace uc_log { namespace FTXUIGui {
 
             if(showLogLevel) {
                 elements.push_back(toElement(e.logEntry.logLevel));
-                elements.push_back(ftxui::text("│ ") | ftxui::color(Theme::Text::separator()));
+                elements.push_back(ftxui::text("| ") | ftxui::color(Theme::Text::separator()));
             }
 
             elements.push_back(ansiColoredTextToFtxui(processLogMessage(e.logEntry.logMsg)));
@@ -522,19 +524,33 @@ namespace uc_log { namespace FTXUIGui {
                         return false;
                     }
                 }
-                if(!filterState.enabledLocations.empty()) {
-                    if(!filterState.enabledLocations.contains(
-                         SourceLocation{entry.logEntry.fileName, entry.logEntry.line}))
-                    {
-                        if(!filterState.enabledLocations.contains(
-                             SourceLocation{entry.logEntry.fileName, 0}))
-                        {
-                            return false;
-                        }
-                    }
+
+                SourceLocation entryLocation{entry.logEntry.fileName, entry.logEntry.line};
+                SourceLocation entryFile{entry.logEntry.fileName, 0};
+
+                bool hasExclusions = !filterState.excludedLocations.empty();
+                bool hasInclusions = !filterState.includedLocations.empty();
+
+                if(hasExclusions && filterState.excludedLocations.contains(entryLocation)) {
+                    return false;
                 }
 
-                return true;
+                if(hasInclusions && filterState.includedLocations.contains(entryLocation)) {
+                    return true;
+                }
+
+                if(hasExclusions && filterState.excludedLocations.contains(entryFile)) {
+                    return false;
+                }
+
+                if(hasExclusions) {
+                    return true;
+                } else if(hasInclusions) {
+                    return filterState.includedLocations.contains(entryLocation)
+                        || filterState.includedLocations.contains(entryFile);
+                } else {
+                    return true;
+                }
             };
         }
 
@@ -913,9 +929,16 @@ namespace uc_log { namespace FTXUIGui {
         }
 
         ftxui::Component getLocationFilterComponent() {
-            auto addEntry = [this](SourceLocation const& sc) {
-                if(!editedFilterState.enabledLocations.contains(sc)) {
-                    editedFilterState.enabledLocations.insert(sc);
+            auto addIncludeEntry = [this](SourceLocation const& sc) {
+                if(!editedFilterState.includedLocations.contains(sc)) {
+                    editedFilterState.includedLocations.insert(sc);
+                    updateCurrentFilter();
+                }
+            };
+
+            auto addExcludeEntry = [this](SourceLocation const& sc) {
+                if(!editedFilterState.excludedLocations.contains(sc)) {
+                    editedFilterState.excludedLocations.insert(sc);
                     updateCurrentFilter();
                 }
             };
@@ -949,15 +972,29 @@ namespace uc_log { namespace FTXUIGui {
                                             | ftxui::flex);
             manualInputComponents.push_back(ftxui::Maybe(
               ftxui::Button(
-                "+ Add",
-                [this, addEntry, stringToSourceLocation]() {
+                "🟢 Include",
+                [this, addIncludeEntry, stringToSourceLocation]() {
                     auto sc = stringToSourceLocation(locationFilterInput);
                     if(sc) {
-                        addEntry(*sc);
+                        addIncludeEntry(*sc);
                         locationFilterInput.clear();
                     }
                 },
                 createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text())),
+              [this, stringToSourceLocation]() {
+                  return stringToSourceLocation(locationFilterInput).has_value();
+              }));
+            manualInputComponents.push_back(ftxui::Maybe(
+              ftxui::Button(
+                "🔴 Exclude",
+                [this, addExcludeEntry, stringToSourceLocation]() {
+                    auto sc = stringToSourceLocation(locationFilterInput);
+                    if(sc) {
+                        addExcludeEntry(*sc);
+                        locationFilterInput.clear();
+                    }
+                },
+                createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text())),
               [this, stringToSourceLocation]() {
                   return stringToSourceLocation(locationFilterInput).has_value();
               }));
@@ -974,28 +1011,60 @@ namespace uc_log { namespace FTXUIGui {
               = std::make_unique<SourceLocationAdapter>(allSourceLocations);
             dropdownOptions.radiobox.selected  = &selectedLocationIndex;
             dropdownOptions.radiobox.on_change = [this]() {
-                auto it = allSourceLocations.begin();
-                auto i  = selectedLocationIndex;
-                while(i != 0) {
-                    --i;
-                    ++it;
-                }
+                auto it = std::next(allSourceLocations.begin(), selectedLocationIndex);
                 selectedSourceLocation = it->first;
+            };
+
+            dropdownOptions.radiobox.transform
+              = [this](ftxui::EntryState const& s) -> ftxui::Element {
+                auto           it       = std::next(allSourceLocations.begin(), s.index);
+                SourceLocation location = it->first;
+
+                bool isIncluded = editedFilterState.includedLocations.contains(location);
+                bool isExcluded = editedFilterState.excludedLocations.contains(location);
+
+                auto element = ftxui::text(s.label);
+
+                if(s.active) {
+                    element |= ftxui::bold;
+                }
+                if(s.focused) {
+                    element |= ftxui::inverted;
+                }
+
+                if(isIncluded) {
+                    element = ftxui::hbox(
+                      {ftxui::text("🟢 ") | ftxui::color(Theme::Status::success()), element});
+                } else if(isExcluded) {
+                    element = ftxui::hbox(
+                      {ftxui::text("🔴 ") | ftxui::color(Theme::Status::error()), element});
+                } else {
+                    element = ftxui::hbox(
+                      {ftxui::text("⚪ ") | ftxui::color(Theme::Status::inactive()), element});
+                }
+
+                return element;
             };
 
             dropdownComponents.push_back(ftxui::Dropdown(dropdownOptions));
             dropdownComponents.push_back(ftxui::Maybe(
               ftxui::Button(
-                "+ Add",
-                [addEntry, this]() { addEntry(selectedSourceLocation); },
+                "🟢 Include",
+                [addIncludeEntry, this]() { addIncludeEntry(selectedSourceLocation); },
                 createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text())),
+              [this]() { return !selectedSourceLocation.first.empty(); }));
+            dropdownComponents.push_back(ftxui::Maybe(
+              ftxui::Button(
+                "🔴 Exclude",
+                [addExcludeEntry, this]() { addExcludeEntry(selectedSourceLocation); },
+                createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text())),
               [this]() { return !selectedSourceLocation.first.empty(); }));
 
             auto dropdownComponent = ftxui::Container::Horizontal(dropdownComponents);
 
             std::vector<ftxui::Component> inputSectionComponents;
             inputSectionComponents.push_back(ftxui::Renderer([] {
-                return ftxui::text("📍 Add Location Filter") | ftxui::bold
+                return ftxui::text("📍 Location Filters") | ftxui::bold
                      | ftxui::color(Theme::Header::accent()) | ftxui::center;
             }));
             inputSectionComponents.push_back(manualInputComponent);
@@ -1004,42 +1073,97 @@ namespace uc_log { namespace FTXUIGui {
             auto inputComponent
               = ftxui::Container::Vertical(inputSectionComponents) | ftxui::border;
 
-            std::vector<ftxui::Component> location_components{};
+            auto includedContainer = ftxui::Container::Vertical({});
+            auto includedContainerWithBorder
+              = includedContainer
+              | ftxui::Renderer([this,
+                                 includedContainer](ftxui::Element) mutable -> ftxui::Element {
+                    includedContainer->DetachAllChildren();
 
-            location_components.push_back(ftxui::Renderer([this]() {
-                return ftxui::text(fmt::format("📂 Active Filters ({})",
-                                               editedFilterState.enabledLocations.size()))
-                     | ftxui::bold | ftxui::color(Theme::Status::info());
-            }));
+                    includedContainer->Add(ftxui::Renderer([this]() {
+                        return ftxui::text(fmt::format("✅ Included Locations ({})",
+                                                       editedFilterState.includedLocations.size()))
+                             | ftxui::bold | ftxui::color(Theme::Status::success());
+                    }));
 
-            RadioboxOption radioboxOption = RadioboxOption::Simple();
+                    if(editedFilterState.includedLocations.empty()) {
+                        includedContainer->Add(ftxui::Renderer([]() {
+                            return ftxui::text("(none)") | ftxui::color(Theme::Status::inactive())
+                                 | ftxui::center;
+                        }));
+                    } else {
+                        for(auto const& location : editedFilterState.includedLocations) {
+                            std::string locationStr = location.first;
+                            if(location.second != 0) {
+                                locationStr += ":" + std::to_string(location.second);
+                            } else {
+                                locationStr += ":*";
+                            }
 
-            radioboxOption.transform = [](ftxui::EntryState const& s) {
-                auto t = ftxui::text(s.label);
-                if(s.active) {
-                    t |= ftxui::bold;
-                }
-                if(s.focused) {
-                    t |= ftxui::inverted;
-                }
-                return ftxui::hbox({ftxui::text("❌ ") | ftxui::color(Theme::UI::remove()), t});
-            };
+                            auto removeButton = ftxui::Button(
+                              "🟢 " + locationStr + " ❌",
+                              [this, location]() {
+                                  editedFilterState.includedLocations.erase(location);
+                                  updateCurrentFilter();
+                              },
+                              createButtonStyle(Theme::Button::Background::build(),
+                                                Theme::Button::text()));
 
-            radioboxOption.entries
-              = std::make_unique<EnabledLocationAdapter>(editedFilterState.enabledLocations);
-            radioboxOption.on_click = [this](int i) {
-                auto it = editedFilterState.enabledLocations.begin();
-                while(i != 0) {
-                    --i;
-                    ++it;
-                }
-                editedFilterState.enabledLocations.erase(it);
-            };
+                            includedContainer->Add(removeButton);
+                        }
+                    }
 
-            location_components.push_back(Radiobox(radioboxOption) | ftxui::frame | ftxui::border
-                                          | ftxui::center);
+                    return includedContainer->Render();
+                })
+              | ftxui::border;
+
+            auto excludedContainer = ftxui::Container::Vertical({});
+            auto excludedContainerWithBorder
+              = excludedContainer
+              | ftxui::Renderer([this,
+                                 excludedContainer](ftxui::Element) mutable -> ftxui::Element {
+                    excludedContainer->DetachAllChildren();
+
+                    excludedContainer->Add(ftxui::Renderer([this]() {
+                        return ftxui::text(fmt::format("❌ Excluded Locations ({})",
+                                                       editedFilterState.excludedLocations.size()))
+                             | ftxui::bold | ftxui::color(Theme::Status::error());
+                    }));
+
+                    if(editedFilterState.excludedLocations.empty()) {
+                        excludedContainer->Add(ftxui::Renderer([]() {
+                            return ftxui::text("(none)") | ftxui::color(Theme::Status::inactive())
+                                 | ftxui::center;
+                        }));
+                    } else {
+                        for(auto const& location : editedFilterState.excludedLocations) {
+                            std::string locationStr = location.first;
+                            if(location.second != 0) {
+                                locationStr += ":" + std::to_string(location.second);
+                            } else {
+                                locationStr += ":*";
+                            }
+
+                            auto removeButton = ftxui::Button(
+                              "🔴 " + locationStr + " ❌",
+                              [this, location]() {
+                                  editedFilterState.excludedLocations.erase(location);
+                                  updateCurrentFilter();
+                              },
+                              createButtonStyle(Theme::Button::Background::build(),
+                                                Theme::Button::text()));
+
+                            excludedContainer->Add(removeButton);
+                        }
+                    }
+
+                    return excludedContainer->Render();
+                })
+              | ftxui::border;
+
             auto locationsContainer
-              = ftxui::Container::Vertical(location_components) | ftxui::border;
+              = ftxui::Container::Horizontal({includedContainerWithBorder | ftxui::flex,
+                                              excludedContainerWithBorder | ftxui::flex});
 
             std::vector<ftxui::Component> finalComponents;
             finalComponents.push_back(inputComponent);
@@ -1292,7 +1416,8 @@ namespace uc_log { namespace FTXUIGui {
                                                            : Theme::Text::normal()))),
                    ftxui::separator(),
 
-                   ftxui::text(isFlashing ? (rttStatus.isRunning == 0 ? "⚡ ●" : "⚡ ●") : "⚡ ●")
+                   ftxui::text(
+                     "⚡ " + std::string(isFlashing ? (rttStatus.isRunning == 0 ? "○" : "●") : "●"))
                      | ftxui::color(isFlashing
                                       ? (rttStatus.isRunning == 0 ? Theme::Status::error()
                                                                   : Theme::Status::warning())
@@ -1320,7 +1445,7 @@ namespace uc_log { namespace FTXUIGui {
                    totalCount >= GUI_Constants::MaxLogEntries ? ftxui::separator()
                                                               : ftxui::text(""),
                    totalCount >= GUI_Constants::MaxLogEntries
-                     ? ftxui::text("⚠️ MEM") | ftxui::color(ftxui::Color::Red) | ftxui::bold
+                     ? ftxui::text("🚨 MEM") | ftxui::color(ftxui::Color::Red) | ftxui::bold
                      : ftxui::text(""),
                    ftxui::separator(),
                    ftxui::filler()});

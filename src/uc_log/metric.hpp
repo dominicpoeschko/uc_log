@@ -14,7 +14,10 @@ template<typename ValueType,
          sc::StringConstant Unit_,
          sc::StringConstant Scope_>
 struct Metric : metric_tag {
-    ValueType const&      value;
+    ValueType const& value;
+
+    Metric(ValueType const& value_) : value{value_} {}
+
     static constexpr auto Name  = Name_;
     static constexpr auto Unit  = Unit_;
     static constexpr auto Scope = Scope_;
@@ -23,9 +26,9 @@ struct Metric : metric_tag {
 template<sc::StringConstant Name,
          sc::StringConstant Unit  = sc::StringConstant<>{},
          sc::StringConstant Scope = sc::StringConstant<>{}>
-constexpr auto metric(auto const& value_) {
-    using ValueType = std::remove_cvref_t<decltype(value_)>;
-    return Metric<ValueType, Name, Unit, Scope>{.value = value_};
+constexpr auto metric(auto const& value) {
+    using ValueType = std::remove_cvref_t<decltype(value)>;
+    return Metric<ValueType, Name, Unit, Scope>{value};
 }
 
 namespace detail {

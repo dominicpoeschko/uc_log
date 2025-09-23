@@ -22,7 +22,7 @@ struct Reader {
     Status     status;
 
     Status getStatus() {
-        std::lock_guard lock{statusMutex};
+        std::lock_guard<std::mutex> lock{statusMutex};
         return status;
     }
 
@@ -31,7 +31,7 @@ struct Reader {
             msg("Reset debugger");
         }
         {
-            std::lock_guard lock{statusMutex};
+            std::lock_guard<std::mutex> lock{statusMutex};
             status.hostOverflowCount = 0;
             status.isRunning         = true;
         }
@@ -45,7 +45,7 @@ struct Reader {
             msg("Reset target");
         }
         {
-            std::lock_guard lock{statusMutex};
+            std::lock_guard<std::mutex> lock{statusMutex};
             status.numBytesTransferred = 0;
             status.numBytesRead        = 0;
         }
@@ -60,6 +60,8 @@ struct Reader {
             msg("Flash target done");
         }
     }
+
+    bool isFlashing() const { return false; }
 
     std::function<void(std::string const&)> msg;
 };
@@ -123,7 +125,7 @@ int main() {
     std::mutex               msgMutex;
 
     reader.msg = [&](std::string const& msg) {
-        std::lock_guard lock{msgMutex};
+        std::lock_guard<std::mutex> lock{msgMutex};
         messages.push_back(msg);
     };
 
@@ -136,7 +138,7 @@ int main() {
         while(!stoken.stop_requested()) {
             updateMessage(e, gen);
             {
-                std::lock_guard lock{reader.statusMutex};
+                std::lock_guard<std::mutex> lock{reader.statusMutex};
                 updateStatus(reader.status);
             }
             e.ucTime.time += addTime;
@@ -157,7 +159,7 @@ int main() {
 
             std::vector<std::string> localMessages;
             {
-                std::lock_guard lock{msgMutex};
+                std::lock_guard<std::mutex> lock{msgMutex};
                 localMessages = messages;
                 messages.clear();
             }
