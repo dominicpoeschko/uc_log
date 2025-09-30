@@ -21,15 +21,16 @@
 #include <fmt/format.h>
 #include <regex>
 
-static std::pair<std::uint32_t,
-                 std::string>
+namespace {
+std::pair<std::uint32_t,
+          std::string>
 parseMapFileForControlBlockAddress(std::string const& mapFile) {
     try {
         std::ifstream file(mapFile);
         std::string   line;
         while(std::getline(file, line)) {
             constexpr std::string_view needle{"::rttControlBlock"};
-            if(std::search(line.begin(), line.end(), needle.begin(), needle.end()) != line.end()) {
+            if(!std::ranges::search(line, needle).empty()) {
                 return {static_cast<std::uint32_t>(std::stoull(line, nullptr, 16)), {}};
             }
         }
@@ -39,16 +40,17 @@ parseMapFileForControlBlockAddress(std::string const& mapFile) {
     return {0, "error can't find rtt control block address"};
 }
 
-static std::string to_iso8601_UTC_string(std::chrono::system_clock::time_point const& value) {
+std::string to_iso8601_UTC_string(std::chrono::system_clock::time_point const& value) {
     //1970-01-01T00:00:00.000Z
-    auto const t{std::chrono::system_clock::to_time_t(value)};
-    auto const utc     = fmt::gmtime(t);
+    auto const time{std::chrono::system_clock::to_time_t(value)};
+    auto const utc     = fmt::gmtime(time);
     auto const seconds = std::chrono::duration_cast<std::chrono::seconds>(
       value - std::chrono::time_point_cast<std::chrono::minutes>(value));
     auto const milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
       value - std::chrono::time_point_cast<std::chrono::seconds>(value));
     return fmt::format("{:%FT%H:%M}:{:02}.{:03}Z", utc, seconds.count(), milliseconds.count());
 }
+}   // namespace
 
 int main(int    argc,
          char** argv) {
@@ -92,28 +94,28 @@ int main(int    argc,
 
     uc_log::FTXUIGui::Gui gui{};
     auto logFilePrinter = [&gui, &logFile](std::chrono::system_clock::time_point recv_time,
-                                           uc_log::detail::LogEntry const&       e) {
+                                           uc_log::detail::LogEntry const&       entry) {
         if(logFile) {
             std::stringstream quotedMsg;
-            quotedMsg << std::quoted(e.logMsg, '"', '"');
+            quotedMsg << std::quoted(entry.logMsg, '"', '"');
 
             std::stringstream quotedFilename;
-            quotedFilename << std::quoted(e.fileName, '"', '"');
+            quotedFilename << std::quoted(entry.fileName, '"', '"');
 
             std::stringstream quotedFunctionName;
-            quotedFunctionName << std::quoted(e.functionName, '"', '"');
+            quotedFunctionName << std::quoted(entry.functionName, '"', '"');
 
-            auto const s = fmt::format("{},{},{},{},{},{:#},{},{}\n",
-                                       to_iso8601_UTC_string(recv_time),
-                                       e.channel.channel,
-                                       quotedFilename.str(),
-                                       quotedFunctionName.str(),
-                                       e.line,
-                                       e.logLevel,
-                                       e.ucTime.time,
-                                       quotedMsg.str());
+            auto const csvLine = fmt::format("{},{},{},{},{},{:#},{},{}\n",
+                                             to_iso8601_UTC_string(recv_time),
+                                             entry.channel.channel,
+                                             quotedFilename.str(),
+                                             quotedFunctionName.str(),
+                                             entry.line,
+                                             entry.logLevel,
+                                             entry.ucTime.time,
+                                             quotedMsg.str());
 
-            logFile << s;
+            logFile << csvLine;
         } else {
             gui.errorMessage("error writing logFile");
         }
@@ -121,8 +123,8 @@ int main(int    argc,
     TCPSender tcpSender{port, [&gui](auto msg) { gui.errorMessage(msg); }};
 
     auto tcpPrinter = [&tcpSender](std::chrono::system_clock::time_point recv_time,
-                                   uc_log::detail::LogEntry const&       e) {
-        auto const metrics = uc_log::extractMetrics(recv_time, e);
+                                   uc_log::detail::LogEntry const&       entry) {
+        auto const metrics = uc_log::extractMetrics(recv_time, entry);
         for(auto const& metric : metrics) {
             tcpSender.send(
               fmt::format("/*{{\"name\":\"{}\",\"scope\":\"{}\",\"unit\":\"{}\",\"time\":{},"
@@ -136,14 +138,14 @@ int main(int    argc,
     };
     auto printer
       = [&tcpPrinter, &logFilePrinter, &gui](std::chrono::system_clock::time_point recv_time,
-                                             uc_log::detail::LogEntry const&       e) {
-            tcpPrinter(recv_time, e);
-            logFilePrinter(recv_time, e);
-            gui.add(recv_time, e);
+                                             uc_log::detail::LogEntry const&       entry) {
+            tcpPrinter(recv_time, entry);
+            logFilePrinter(recv_time, entry);
+            gui.add(recv_time, entry);
         };
     TimeDelayedQueue<uc_log::detail::LogEntry,
-                     decltype([](auto const& e) { return e.entry.ucTime; })>
-      q{printer};
+                     decltype([](auto const& entry) { return entry.entry.ucTime; })>
+      queue{printer};
 
     JLinkRttReader rttReader{host,
                              device,
@@ -167,8 +169,8 @@ int main(int    argc,
                                  gui.fatalError(result.second);
                                  return decltype(result.first){};
                              },
-                             [&q](std::size_t channel, std::string_view msg) {
-                                 q.append(uc_log::detail::LogEntry{channel, msg});
+                             [&queue](std::size_t channel, std::string_view msg) {
+                                 queue.append(uc_log::detail::LogEntry{channel, msg});
                              },
                              [&gui](std::string_view msg) { gui.statusMessage(msg); },
                              [&gui](std::string_view msg) { gui.errorMessage(msg); },

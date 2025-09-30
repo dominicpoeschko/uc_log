@@ -67,9 +67,9 @@ struct TCPSender {
         void send(std::span<std::byte const> data) {
             std::vector<std::byte> vec;
             vec.resize(data.size());
-            std::copy(data.begin(), data.end(), vec.begin());
+            std::ranges::copy(data, vec.begin());
 
-            std::lock_guard<std::mutex> lock{mutex};
+            std::lock_guard<std::mutex> const lock{mutex};
 
             messages.push_back(std::move(vec));
             if(!sending) {
@@ -84,17 +84,18 @@ struct TCPSender {
 
             socket.async_read_some(
               boost::asio::buffer(recvData.data(), 1024),
-              [self = shared_from_this()](boost::system::error_code ec, std::size_t) {
-                  if(!ec) {
+              [self = shared_from_this()](boost::system::error_code error_code, std::size_t) {
+                  if(!error_code) {
                       self->async_read_some();
-                  } else if(ec != boost::asio::error::eof) {
-                      self->errorMessagef(fmt::format("client recv error {}", ec.message()));
+                  } else if(error_code != boost::asio::error::eof) {
+                      self->errorMessagef(
+                        fmt::format("client recv error {}", error_code.message()));
                   }
               });
         }
 
         void write_rdy() {
-            std::lock_guard<std::mutex> lock{mutex};
+            std::lock_guard<std::mutex> const lock{mutex};
             sending = false;
             if(!messages.empty()) {
                 doSend();
@@ -111,11 +112,12 @@ struct TCPSender {
               socket,
               boost::asio::buffer(message.data(), message.size()),
               [self            = shared_from_this(),
-               capturedMessage = std::move(message)](boost::system::error_code ec, std::size_t) {
-                  if(!ec) {
+               capturedMessage = message](boost::system::error_code error_code, std::size_t) {
+                  if(!error_code) {
                       self->write_rdy();
-                  } else if(ec != boost::asio::error::eof) {
-                      self->errorMessagef(fmt::format("client send error {}", ec.message()));
+                  } else if(error_code != boost::asio::error::eof) {
+                      self->errorMessagef(
+                        fmt::format("client send error {}", error_code.message()));
                   }
               });
         }
@@ -138,12 +140,12 @@ struct TCPSender {
     }
 
     void send(std::string_view msg) {
-        std::lock_guard<std::mutex> lock{mutex};
-        for(auto& c : clients) {
+        std::lock_guard<std::mutex> const lock{mutex};
+        for(auto& client : clients) {
             try {
-                auto sp = c.lock();
-                if(sp) {
-                    sp->send(std::as_bytes(std::span{msg}));
+                auto session = client.lock();
+                if(session) {
+                    session->send(std::as_bytes(std::span{msg}));
                 }
             } catch(std::exception const& e) {
                 errorMessagef(fmt::format("caught: {}", e.what()));
@@ -154,13 +156,12 @@ struct TCPSender {
 
 private:
     void clean() {
-        clients.erase(std::remove_if(clients.begin(),
-                                     clients.end(),
-                                     [](auto& client) { return client.use_count() == 0; }),
-                      clients.end());
+        auto ret
+          = std::ranges::remove_if(clients, [](auto& client) { return client.use_count() == 0; });
+        clients.erase(ret.begin(), ret.end());
     }
 
-    void runner(std::stop_token stoken) {
+    void runner(std::stop_token const& stoken) {
         while(!stoken.stop_requested()) {
             ioc.run_for(std::chrono::milliseconds{250});
         }
@@ -168,13 +169,13 @@ private:
 
     void async_accept_one() {
         acceptor.async_accept(
-          [this](boost::system::error_code ec, boost::asio::ip::tcp::socket socket) {
-              if(!ec) {
-                  auto sp = std::make_shared<Session>(std::move(socket), errorMessagef);
-                  clients.push_back(sp);
-                  sp->run();
+          [this](boost::system::error_code error_code, boost::asio::ip::tcp::socket socket) {
+              if(!error_code) {
+                  auto session = std::make_shared<Session>(std::move(socket), errorMessagef);
+                  clients.push_back(session);
+                  session->run();
               } else {
-                  errorMessagef(fmt::format("asio error {}", ec.message()));
+                  errorMessagef(fmt::format("asio error {}", error_code.message()));
               }
               async_accept_one();
           });

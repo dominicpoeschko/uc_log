@@ -32,20 +32,20 @@ extractMetrics(std::chrono::system_clock::time_point recv_time,
                uc_log::detail::LogEntry const&       logEntry) {
     std::vector<std::pair<MetricInfo, MetricEntry>> metrics;
 
-    std::string_view msg{logEntry.logMsg};
-    std::size_t      pos = 0;
+    std::string_view const msg{logEntry.logMsg};
+    std::size_t            pos = 0;
 
     while((pos = msg.find("@METRIC(", pos)) != std::string_view::npos) {
         pos += 8;
 
-        std::size_t end_pos = msg.find(')', pos);
+        std::size_t const end_pos = msg.find(')', pos);
         if(end_pos == std::string_view::npos) {
             break;
         }
 
-        std::string_view metric_content = msg.substr(pos, end_pos - pos);
+        std::string_view const metric_content = msg.substr(pos, end_pos - pos);
 
-        std::size_t scope_end = metric_content.find("::");
+        std::size_t const scope_end = metric_content.find("::");
         if(scope_end == std::string_view::npos) {
             pos = end_pos + 1;
             continue;
@@ -56,23 +56,23 @@ extractMetrics(std::chrono::system_clock::time_point recv_time,
             scope = logEntry.fileName + ":" + std::to_string(logEntry.line);
         }
 
-        std::string_view remainder = metric_content.substr(scope_end + 2);
+        std::string_view const remainder = metric_content.substr(scope_end + 2);
 
-        std::size_t equals_pos = remainder.find('=');
+        std::size_t const equals_pos = remainder.find('=');
         if(equals_pos == std::string_view::npos) {
             pos = end_pos + 1;
             continue;
         }
 
-        std::string_view name_and_unit = remainder.substr(0, equals_pos);
-        std::string_view value_str     = remainder.substr(equals_pos + 1);
+        std::string_view const name_and_unit = remainder.substr(0, equals_pos);
+        std::string_view const value_str     = remainder.substr(equals_pos + 1);
 
         std::string name;
         std::string unit;
 
-        std::size_t bracket_start = name_and_unit.find('[');
+        std::size_t const bracket_start = name_and_unit.find('[');
         if(bracket_start != std::string_view::npos) {
-            std::size_t bracket_end = name_and_unit.find(']', bracket_start);
+            std::size_t const bracket_end = name_and_unit.find(']', bracket_start);
             if(bracket_end != std::string_view::npos) {
                 name = std::string{name_and_unit.substr(0, bracket_start)};
                 unit = std::string{
@@ -85,15 +85,13 @@ extractMetrics(std::chrono::system_clock::time_point recv_time,
         }
 
         try {
-            double value = std::stod(std::string{value_str});
+            double const value = std::stod(std::string{value_str});
 
-            metrics.push_back(std::pair<MetricInfo, MetricEntry>{
-              MetricInfo{.scope = scope, .name = name, .unit = unit},
-              MetricEntry{.recv_time = recv_time,
-                         .level     = logEntry.logLevel,
-                         .uc_time   = logEntry.ucTime,
-                         .value     = value}
-            });
+            metrics.emplace_back(MetricInfo{.scope = scope, .name = name, .unit = unit},
+                                 MetricEntry{.recv_time = recv_time,
+                                             .level     = logEntry.logLevel,
+                                             .uc_time   = logEntry.ucTime,
+                                             .value     = value});
         } catch(std::invalid_argument const&) {
         }
 

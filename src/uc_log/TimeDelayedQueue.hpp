@@ -25,7 +25,7 @@ private:
     std::mutex              m;
     std::jthread            thread{std::bind_front(&TimeDelayedQueue::run, this)};
 
-    void run(std::stop_token stoken) {
+    void run(std::stop_token const& stoken) {
         std::vector<QEntry> toHandle{};
         while(!stoken.stop_requested()) {
             {
@@ -35,14 +35,14 @@ private:
                 auto const deadline = Clock::now() - std::chrono::milliseconds{200};
                 auto const pos      = std::ranges::partition_point(
                   q,
-                  [&](auto const& et) { return deadline < et; },
-                  [](auto const& e) { return e.entryTime; });
+                  [&](auto const& entryTime) { return deadline < entryTime; },
+                  [](auto const& entry) { return entry.entryTime; });
                 toHandle.insert(toHandle.begin(), pos, q.end());
                 q.erase(pos, q.end());
             }
 
-            for(auto const& e : std::views::reverse(toHandle)) {
-                f(e.sys_entryTime, e.entry);
+            for(auto const& entry : std::views::reverse(toHandle)) {
+                f(entry.sys_entryTime, entry.entry);
                 if(stoken.stop_requested()) {
                     return;
                 }
@@ -53,12 +53,12 @@ private:
 
 public:
     template<typename F>
-    explicit TimeDelayedQueue(F&& f_) : f{std::forward<F>(f_)} {}
+    explicit TimeDelayedQueue(F func) : f{std::move(func)} {}
 
     template<typename E>
     void append(E&& entry) {
         {
-            std::lock_guard<std::mutex> lock{m};
+            std::lock_guard<std::mutex> const lock{m};
             q.emplace_back(Clock::now(), std::chrono::system_clock::now(), std::forward<E>(entry));
         }
         cv.notify_one();

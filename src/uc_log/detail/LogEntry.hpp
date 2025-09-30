@@ -71,18 +71,20 @@ namespace uc_log { namespace detail {
                              std::uint64_t den)
               //TODO overflow...
               : time{std::chrono::duration_cast<std::chrono::nanoseconds>(
-                  std::chrono::duration<double>{(static_cast<double>(value) * num) / den})} {}
+                  std::chrono::duration<double>{
+                    (static_cast<double>(value) * static_cast<double>(num))
+                    / static_cast<double>(den)})} {}
 
             constexpr auto operator<=>(UcTime const&) const = default;
         };
 
         Channel          channel{};
-        UcTime           ucTime{};
-        std::string      fileName{};
+        UcTime           ucTime;
+        std::string      fileName;
         std::size_t      line{};
         uc_log::LogLevel logLevel{};
-        std::string      functionName{};
-        std::string      logMsg{};
+        std::string      functionName;
+        std::string      logMsg;
 
         template<typename Ratio>
         static constexpr auto makeLookUp(std::string_view suffix,
@@ -92,7 +94,7 @@ namespace uc_log { namespace detail {
                                    static_cast<std::uint64_t>(Ratio::type::den));
         }
 
-        static std::optional<UcTime> parseTimeStringStdDuration(std::string_view ts) {
+        static std::optional<UcTime> parseTimeStringStdDuration(std::string_view timeString) {
             static constexpr std::array durationLookup{
               makeLookUp("as", std::atto{}),
               makeLookUp("fs", std::femto{}),
@@ -116,16 +118,17 @@ namespace uc_log { namespace detail {
               makeLookUp("h", std::chrono::hours::period{}),
               makeLookUp("d", std::chrono::days::period{})};
 
-            std::uint64_t value;
-            auto const [ptr, ec] = std::from_chars(ts.begin(), ts.end(), value);
-            if(ec != std::errc{} || ptr == ts.end()) {
+            std::uint64_t value{};
+            auto const [ptr, ec] = std::from_chars(timeString.begin(), timeString.end(), value);
+            if(ec != std::errc{} || ptr == timeString.end()) {
                 return std::nullopt;
             }
 
-            ts = ts.substr(static_cast<std::size_t>(std::distance(ts.begin(), ptr)));
+            timeString
+              = timeString.substr(static_cast<std::size_t>(std::distance(timeString.begin(), ptr)));
 
             for(auto const& [prefix, num, den] : durationLookup) {
-                if(ts == prefix) {
+                if(timeString == prefix) {
                     return {
                       {value, num, den}
                     };
@@ -135,54 +138,57 @@ namespace uc_log { namespace detail {
             return std::nullopt;
         }
 
-        static std::optional<UcTime> parseTimeString(std::string_view ts) {
-            if(!ts.ends_with("]s")) {
-                return parseTimeStringStdDuration(ts);
+        static std::optional<UcTime> parseTimeString(std::string_view timeString) {
+            if(!timeString.ends_with("]s")) {
+                return parseTimeStringStdDuration(timeString);
             }
-            ts.remove_suffix(2);
+            timeString.remove_suffix(2);
 
-            std::uint64_t value;
+            std::uint64_t value{};
             {
-                auto const [ptr, ec] = std::from_chars(ts.begin(), ts.end(), value);
-                if(ec != std::errc{} || ptr == ts.end()) {
+                auto const [ptr, ec] = std::from_chars(timeString.begin(), timeString.end(), value);
+                if(ec != std::errc{} || ptr == timeString.end()) {
                     return std::nullopt;
                 }
-                ts.remove_prefix(static_cast<std::size_t>(std::distance(ts.begin(), ptr)));
+                timeString.remove_prefix(
+                  static_cast<std::size_t>(std::distance(timeString.begin(), ptr)));
             }
-            if(!ts.starts_with('[')) {
+            if(!timeString.starts_with('[')) {
                 return std::nullopt;
             }
-            ts.remove_prefix(1);
+            timeString.remove_prefix(1);
 
-            std::uint64_t num;
+            std::uint64_t num{};
             {
-                auto const [ptr, ec] = std::from_chars(ts.begin(), ts.end(), num);
+                auto const [ptr, ec] = std::from_chars(timeString.begin(), timeString.end(), num);
                 if(ec != std::errc{}) {
                     return std::nullopt;
                 }
-                ts.remove_prefix(static_cast<std::size_t>(std::distance(ts.begin(), ptr)));
+                timeString.remove_prefix(
+                  static_cast<std::size_t>(std::distance(timeString.begin(), ptr)));
             }
 
-            if(ts.empty()) {
+            if(timeString.empty()) {
                 return {
                   {value, num, 1}
                 };
             }
-            if(!ts.starts_with('/')) {
+            if(!timeString.starts_with('/')) {
                 return std::nullopt;
             }
-            ts.remove_prefix(1);
+            timeString.remove_prefix(1);
 
-            std::uint64_t den;
+            std::uint64_t den{};
             {
-                auto const [ptr, ec] = std::from_chars(ts.begin(), ts.end(), den);
+                auto const [ptr, ec] = std::from_chars(timeString.begin(), timeString.end(), den);
                 if(ec != std::errc{}) {
                     return std::nullopt;
                 }
-                ts.remove_prefix(static_cast<std::size_t>(std::distance(ts.begin(), ptr)));
+                timeString.remove_prefix(
+                  static_cast<std::size_t>(std::distance(timeString.begin(), ptr)));
             }
 
-            if(ts.empty()) {
+            if(timeString.empty()) {
                 return {
                   {value, num, den}
                 };
@@ -194,7 +200,7 @@ namespace uc_log { namespace detail {
         LogEntry(std::size_t      channel_,
                  std::string_view msg)
           : channel{channel_} {
-            auto const pos = msg.find("\"\"\")");
+            auto const pos = msg.find(R"("""))");
             if(pos == std::string_view::npos || !msg.starts_with("(")) {
                 logMsg = msg;
                 return;
@@ -202,7 +208,7 @@ namespace uc_log { namespace detail {
             logMsg          = msg.substr(pos + 4);
             auto contextMsg = msg.substr(1, pos - 1);
 
-            if(std::count(contextMsg.begin(), contextMsg.end(), ',') <= 3) {
+            if(std::ranges::count(contextMsg, ',') <= 3) {
                 return;
             }
 
@@ -228,7 +234,7 @@ namespace uc_log { namespace detail {
                 return;
             }
             contextMsg.remove_prefix(2);
-            std::uint16_t line_;
+            std::uint16_t line_{};
             {
                 auto const [ptr, ec] = std::from_chars(lineSv.begin(), lineSv.end(), line_);
                 if(ec != std::errc{} || ptr != lineSv.end()) {
@@ -242,7 +248,7 @@ namespace uc_log { namespace detail {
                 return;
             }
             contextMsg.remove_prefix(2);
-            std::uint8_t logLevel_;
+            std::uint8_t logLevel_{};
             {
                 auto const [ptr, ec]
                   = std::from_chars(logLevelSv.begin(), logLevelSv.end(), logLevel_);
@@ -258,7 +264,7 @@ namespace uc_log { namespace detail {
             }
 
             contextMsg.remove_prefix(timeSv.size());
-            if(!contextMsg.starts_with(", \"\"\"")) {
+            if(!contextMsg.starts_with(R"(, """)")) {
                 return;
             }
             contextMsg.remove_prefix(5);
@@ -287,7 +293,7 @@ struct fmt::formatter<uc_log::LogLevel> {
     }
 
     template<typename FormatContext>
-    auto format(uc_log::LogLevel const& l,
+    auto format(uc_log::LogLevel const& level,
                 FormatContext&          ctx) const {
         constexpr std::array<std::pair<fmt::text_style, std::string_view>, 6> LCS{
           {{fmt::fg(fmt::terminal_color::yellow), "trace"},
@@ -304,7 +310,7 @@ struct fmt::formatter<uc_log::LogLevel> {
                 return rhs.second.size() < lhs.second.size();
             })->second.size();
 
-        auto index = static_cast<std::size_t>(l);
+        auto index = static_cast<std::size_t>(level);
 
         if(index >= LCS.size()) {
             index = 0;
@@ -312,12 +318,11 @@ struct fmt::formatter<uc_log::LogLevel> {
 
         if(unformated) {
             return fmt::format_to(ctx.out(), "{}", LCS[index].second);
-        } else {
-            return fmt::format_to(ctx.out(),
-                                  "{:{}}",
-                                  fmt::styled(LCS[index].second, LCS[index].first),
-                                  MaxLength);
         }
+        return fmt::format_to(ctx.out(),
+                              "{:{}}",
+                              fmt::styled(LCS[index].second, LCS[index].first),
+                              MaxLength);
     }
 };
 
@@ -329,7 +334,7 @@ struct fmt::formatter<uc_log::detail::LogEntry::Channel> {
     }
 
     template<typename FormatContext>
-    auto format(uc_log::detail::LogEntry::Channel const& c,
+    auto format(uc_log::detail::LogEntry::Channel const& channel,
                 FormatContext&                           ctx) const {
         constexpr std::array<fmt::text_style, 6> Colors{
           {fmt::bg(fmt::terminal_color::green) | fmt::fg(fmt::terminal_color::black),
@@ -340,9 +345,10 @@ struct fmt::formatter<uc_log::detail::LogEntry::Channel> {
            fmt::fg(fmt::terminal_color::yellow)}
         };
 
-        return fmt::format_to(ctx.out(),
-                              "{}",
-                              fmt::styled(c.channel, Colors[c.channel % Colors.size()]));
+        return fmt::format_to(
+          ctx.out(),
+          "{}",
+          fmt::styled(channel.channel, Colors[channel.channel % Colors.size()]));
     }
 };
 
@@ -354,20 +360,20 @@ struct fmt::formatter<uc_log::detail::LogEntry::UcTime> {
     }
 
     template<typename FormatContext>
-    auto format(uc_log::detail::LogEntry::UcTime const& t,
+    auto format(uc_log::detail::LogEntry::UcTime const& time,
                 FormatContext&                          ctx) const {
-        auto const days  = std::chrono::duration_cast<std::chrono::days>(t.time);
-        auto const hours = std::chrono::duration_cast<std::chrono::hours>(t.time - days);
+        auto const days  = std::chrono::duration_cast<std::chrono::days>(time.time);
+        auto const hours = std::chrono::duration_cast<std::chrono::hours>(time.time - days);
         auto const minutes
-          = std::chrono::duration_cast<std::chrono::minutes>(t.time - (days + hours));
+          = std::chrono::duration_cast<std::chrono::minutes>(time.time - (days + hours));
         auto const seconds
-          = std::chrono::duration_cast<std::chrono::seconds>(t.time - (days + hours + minutes));
+          = std::chrono::duration_cast<std::chrono::seconds>(time.time - (days + hours + minutes));
         auto const milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
-          t.time - (days + hours + minutes + seconds));
+          time.time - (days + hours + minutes + seconds));
         auto const microseconds = std::chrono::duration_cast<std::chrono::microseconds>(
-          t.time - (days + hours + minutes + seconds + milliseconds));
+          time.time - (days + hours + minutes + seconds + milliseconds));
         auto const nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
-          t.time - (days + hours + minutes + seconds + milliseconds + microseconds));
+          time.time - (days + hours + minutes + seconds + milliseconds + microseconds));
 
         if(days != std::chrono::days{}) {
             fmt::format_to(ctx.out(), "{:%Q} ", days);
@@ -384,19 +390,19 @@ struct fmt::formatter<uc_log::detail::LogEntry::UcTime> {
     }
 };
 
-static inline std::size_t stringSizeWithoutColor(std::string_view s) {
-    std::size_t const size = s.size();
+static inline std::size_t stringSizeWithoutColor(std::string_view str) {
+    std::size_t const size = str.size();
     std::size_t       escapeSize{};
-    auto              pos = s.find('\033');
+    auto              pos = str.find('\033');
     while(pos != std::string_view::npos) {
-        s.remove_prefix(pos);
-        auto pos2 = s.find('m');
+        str.remove_prefix(pos);
+        auto pos2 = str.find('m');
         if(pos2 == std::string::npos) {
             break;
         }
-        s.remove_prefix(pos2);
+        str.remove_prefix(pos2);
         escapeSize += pos2 + 1;
-        pos = s.find('\033');
+        pos = str.find('\033');
     }
 
     return size - escapeSize;
@@ -409,28 +415,28 @@ struct fmt::formatter<uc_log::detail::LogEntry> {
 
     template<typename ParseContext>
     constexpr auto parse(ParseContext& ctx) {
-        auto it = ctx.begin();
-        if(it == ctx.end() || *it == '}') {
+        auto iter = ctx.begin();
+        if(iter == ctx.end() || *iter == '}') {
             return ctx.begin();
         }
-        if(*it != '<') {
+        if(*iter != '<') {
             return ctx.begin();
         }
-        std::advance(it, 1);
-        auto const result = std::from_chars(it, ctx.end(), width);
+        std::advance(iter, 1);
+        auto const result = std::from_chars(iter, ctx.end(), width);
         if(result.ec != std::errc{}) {
             return ctx.begin();
         }
-        it = result.ptr;
-        if(*it != '}') {
-            if(*it == '#') {
-                std::advance(it, 1);
+        iter = result.ptr;
+        if(*iter != '}') {
+            if(*iter == '#') {
+                std::advance(iter, 1);
                 alternate = true;
             } else {
                 ctx.begin();
             }
         }
-        return it;
+        return iter;
     }
 
     template<typename FormatContext>

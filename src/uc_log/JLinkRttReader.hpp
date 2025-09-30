@@ -17,9 +17,8 @@ private:
     static constexpr std::size_t RttBufferChunkSize = 32768;
     static constexpr auto        RttTimeout         = std::chrono::milliseconds{100};
 
-private:
     struct Channel {
-        std::vector<std::byte> buffer{};
+        std::vector<std::byte> buffer;
         Clock::time_point      lastValidRead{Clock::now()};
 
         void read(JLink&        jlink,
@@ -44,7 +43,7 @@ private:
             bool gotMessage{};
             if(!buffer.empty()) {
                 while(!stoken.stop_requested()) {
-                    auto const [os, subrange, unparsed_bytes]
+                    auto const [output_stream, subrange, unparsed_bytes]
                       = remote_fmt::parse(buffer, stringConstantsMap, errorMessagef);
                     buffer.erase(buffer.begin(),
                                  std::next(buffer.begin(),
@@ -56,10 +55,10 @@ private:
                                                   unparsed_bytes,
                                                   unparsed_bytes == 1 ? "" : "s"));
                     }
-                    if(os) {
+                    if(output_stream) {
                         lastValidRead = Clock::now();
                         gotMessage    = true;
-                        printF(channel, *os);
+                        printF(channel, *output_stream);
                         continue;
                     }
                     break;
@@ -127,11 +126,11 @@ private:
                 while(!stoken.stop_requested() && !jlinkResetFlag && !targetResetFlag && !flashFlag
                       && !(Clock::now() > lastMessage + std::chrono::seconds{5}))
                 {
-                    for(std::size_t id{}; auto& channel : channels) {
+                    for(std::size_t channelId{}; auto& channel : channels) {
                         if(channel.run(stoken,
                                        jlink,
                                        entryPrintCallback,
-                                       static_cast<std::uint32_t>(id++),
+                                       static_cast<std::uint32_t>(channelId++),
                                        stringConstantsMap,
                                        errorMessageCallback))
                         {
@@ -139,8 +138,8 @@ private:
                         }
                     }
                     jlink.checkConnected();
-                    JLink::Status local_status = jlink.readStatus();
-                    status                     = local_status;
+                    JLink::Status const local_status = jlink.readStatus();
+                    status                           = local_status;
                     if(local_status.isRunning == 0
                        || local_status.numUpBuffers != static_cast<int>(numChannels))
                     {
@@ -171,10 +170,10 @@ private:
     std::function<void(std::string_view)>                               toolMessageCallback;
     std::function<void(std::string_view)>                               toolErrorMessageCallback;
 
-    std::atomic<JLink::Status> status{};
-    std::atomic<bool>          targetResetFlag{};
-    std::atomic<bool>          jlinkResetFlag{};
-    std::atomic<bool>          flashFlag{};
+    std::atomic<JLink::Status> status;
+    std::atomic<bool>          targetResetFlag;
+    std::atomic<bool>          jlinkResetFlag;
+    std::atomic<bool>          flashFlag;
     std::jthread               thread;
 
 public:
@@ -210,7 +209,7 @@ public:
       , errorMessageCallback{std::forward<ErrorMessageF>(errorMessagef)}
       , toolMessageCallback{std::forward<ToolMessageF>(toolMessagef)}
       , toolErrorMessageCallback{std::forward<ToolErrorMessageF>(toolErrorMessagef)}
-      , thread{[this](std::stop_token stoken) { run(stoken); }} {}
+      , thread{[this](std::stop_token stoken) { run(std::move(stoken)); }} {}
 
     JLink::Status getStatus() const { return status; }
 
