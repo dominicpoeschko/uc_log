@@ -20,6 +20,7 @@ private:
     struct Channel {
         std::vector<std::byte> buffer;
         Clock::time_point      lastValidRead{Clock::now()};
+        Clock::time_point      lastHaltDetected{};
 
         void read(JLink&        jlink,
                   std::uint32_t channel) {
@@ -63,7 +64,13 @@ private:
                     }
                     break;
                 }
-                if(Clock::now() > lastValidRead + RttTimeout && !buffer.empty()) {
+                if(jlink.isHalted()) {
+                    lastHaltDetected = Clock::now();
+                }
+                if((Clock::now() > lastValidRead + RttTimeout)
+                   && (Clock::now() > lastHaltDetected + std::chrono::seconds{60})
+                   && !buffer.empty())
+                {
                     buffer.erase(buffer.begin());
                     errorMessagef(fmt::format("channel {} timeout removed 1 byte", channel));
                 }
