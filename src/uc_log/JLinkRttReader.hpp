@@ -121,10 +121,12 @@ private:
                 jlink.startRtt(numChannels, blockAddressCallback());
                 std::vector<Channel> channels{};
                 channels.resize(numChannels);
-                auto lastMessage = Clock::now();
+                auto lastMessage      = Clock::now();
+                auto lastHaltDetected = Clock::time_point{};
 
                 while(!stoken.stop_requested() && !jlinkResetFlag && !targetResetFlag && !flashFlag
-                      && !(Clock::now() > lastMessage + std::chrono::seconds{5}))
+                      && !((Clock::now() > lastMessage + std::chrono::seconds{5})
+                           && (Clock::now() > lastHaltDetected + std::chrono::seconds{60})))
                 {
                     for(std::size_t channelId{}; auto& channel : channels) {
                         if(channel.run(stoken,
@@ -138,6 +140,9 @@ private:
                         }
                     }
                     jlink.checkConnected();
+                    if(jlink.isHalted()) {
+                        lastHaltDetected = Clock::now();
+                    }
                     JLink::Status const local_status = jlink.readStatus();
                     status                           = local_status;
                     if(local_status.isRunning == 0
