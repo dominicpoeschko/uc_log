@@ -238,6 +238,7 @@ namespace uc_log { namespace FTXUIGui {
 
             auto const scriptPath = boost::process::environment::find_executable("script");
             if(!scriptPath.empty()) {
+                buildArguments.emplace_back("-e");
                 buildArguments.emplace_back("-q");
                 buildArguments.emplace_back("-c");
 
