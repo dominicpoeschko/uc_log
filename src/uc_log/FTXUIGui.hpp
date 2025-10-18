@@ -159,6 +159,7 @@ namespace uc_log { namespace FTXUIGui {
 
         std::vector<BuildEntry> buildOutput;
         BuildStatus             buildStatus = BuildStatus::Idle;
+        std::atomic<bool>       flashAfterBuild{false};
 
         std::vector<std::string> originalBuildArguments;
         boost::filesystem::path  originalBuildExecutablePath;
@@ -177,6 +178,7 @@ namespace uc_log { namespace FTXUIGui {
 
         std::unique_ptr<boost::asio::io_context> buildIoContext;
         std::jthread                             buildThread;
+        std::atomic<bool>                        triggerFlashNow{false};
 
         void addBuildOutput(std::string const& line,
                             bool               fromTool,
@@ -385,12 +387,20 @@ namespace uc_log { namespace FTXUIGui {
                               = (processExitCode == 0) ? BuildStatus::Success : BuildStatus::Failed;
                         }
 
+                        if(processExitCode == 0 && flashAfterBuild.exchange(false)) {
+                            addBuildOutput("⚡ Build succeeded, triggering flash...", false, false);
+                            triggerFlashNow = true;
+                        }
+
                     } catch(std::exception const& e) {
                         {
                             std::lock_guard<std::mutex> const lock{mutex};
                             buildStatus = BuildStatus::Failed;
                         }
 
+                        if(flashAfterBuild.exchange(false)) {
+                            addBuildOutput("❌ Build failed, flash cancelled", false, true);
+                        }
                         addBuildOutput(fmt::format("❌ Build error: {}", e.what()), false, true);
                     }
 
@@ -400,6 +410,14 @@ namespace uc_log { namespace FTXUIGui {
                 buildStatus = BuildStatus::Failed;
                 addBuildOutputGui(fmt::format("❌ Build error: {}", e.what()), true);
             }
+        }
+
+        void executeBuildAndFlash() {
+            if(buildStatus == BuildStatus::Running || buildThread.joinable()) {
+                return;
+            }
+            flashAfterBuild = true;
+            executeBuild();
         }
 
         std::string processLogMessage(std::string const& originalMsg) const {
@@ -690,6 +708,11 @@ namespace uc_log { namespace FTXUIGui {
               [this]() { executeBuild(); },
               createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
 
+            auto buildAndFlashButton = ftxui::Button(
+              "🔨⚡ Build & Flash [shift+F]",
+              [this]() { executeBuildAndFlash(); },
+              createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
+
             auto outputScroller
               = Scroller([&]() -> std::vector<BuildEntry> const& { return buildOutput; },
                          [&](auto const& entry) { return renderBuildEntry(entry); });
@@ -711,7 +734,10 @@ namespace uc_log { namespace FTXUIGui {
 
             return ftxui::Container::Vertical(
               {ftxui::Container::Horizontal(
-                 {buildButton | ftxui::flex, stopButton | ftxui::flex, clearButton | ftxui::flex}),
+                 {buildButton | ftxui::flex,
+                  buildAndFlashButton | ftxui::flex,
+                  stopButton | ftxui::flex,
+                  clearButton | ftxui::flex}),
                ftxui::Renderer([]() { return ftxui::separator(); }),
                statusDisplay | ftxui::flex});
         }
@@ -1609,6 +1635,10 @@ namespace uc_log { namespace FTXUIGui {
                             executeBuild();
                             return true;
                         }
+                        if(event == ftxui::Event::Character('F')) {
+                            executeBuildAndFlash();
+                            return true;
+                        }
                         if(event == ftxui::Event::Character('q')) {
                             screenPointer->Exit();
                             return true;
@@ -1633,6 +1663,9 @@ namespace uc_log { namespace FTXUIGui {
                         buildThread.join();
                     }
                     callJoin = false;
+                }
+                if(triggerFlashNow.exchange(false)) {
+                    rttReader.flash();
                 }
             }
             {
