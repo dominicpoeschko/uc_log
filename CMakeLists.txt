@@ -210,7 +210,16 @@ function(target_add_uc_log_rtt_jlink targetname)
         ${CMAKE_CURRENT_BINARY_DIR}/rtt_log/${targetname})
 
     if(PARSED_ARGS_JLINK_IP AND NOT PARSED_ARGS_JLINK_IP STREQUAL "")
-        list(APPEND command --host ${PARSED_ARGS_JLINK_IP})
+        set(_val "${PARSED_ARGS_JLINK_IP}")
+        # Expand $ENV{VAR} if that's what the string is
+        if(_val MATCHES "^\\$ENV\\{([^}]+)\\}$")
+            set(_env_name "${CMAKE_MATCH_1}")
+            set(JLINK_IP_EXPANDED "$ENV{${_env_name}}")
+        else()
+            set(JLINK_IP_EXPANDED "${_val}")
+        endif()
+
+        list(APPEND command --host ${JLINK_IP_EXPANDED})
     endif()
 
     add_custom_target(
