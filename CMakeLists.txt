@@ -43,7 +43,7 @@ if(NOT CMAKE_CROSSCOMPILING)
 
     find_package(Threads REQUIRED)
 
-    set(Boost_Components system filesystem process)
+    set(Boost_Components filesystem process)
 
     set(BOOST_INCLUDE_LIBRARIES ${Boost_Components})
     find_or_fetch_package(
