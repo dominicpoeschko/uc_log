@@ -168,9 +168,10 @@ namespace uc_log { namespace FTXUIGui {
         boost::filesystem::path  buildExecutablePath;
         std::vector<std::string> buildEnvironment;
 
-        int            selectedLocationIndex{};
-        SourceLocation selectedSourceLocation;
-        std::string    locationFilterInput;
+        int              selectedLocationIndex{};
+        SourceLocation   selectedSourceLocation;
+        std::string      locationFilterInput;
+        ftxui::Component manualLocationInput;
 
         int selectedTab{};
 
@@ -1005,8 +1006,8 @@ namespace uc_log { namespace FTXUIGui {
                 return ftxui::text("📝 Manual:") | ftxui::bold
                      | ftxui::color(Theme::Header::accent());
             }));
-            manualInputComponents.push_back(ftxui::Input(&locationFilterInput, "filename:line")
-                                            | ftxui::flex);
+            manualLocationInput = ftxui::Input(&locationFilterInput, "filename:line") | ftxui::flex;
+            manualInputComponents.push_back(manualLocationInput);
             manualInputComponents.push_back(ftxui::Maybe(
               ftxui::Button(
                 "🟢 Include",
@@ -1298,6 +1299,39 @@ namespace uc_log { namespace FTXUIGui {
                    })});
         }
 
+        ftxui::Component getHelpComponent() {
+            return ftxui::Renderer([]() {
+                return ftxui::vbox(
+                  {ftxui::text("❓ Help - Keyboard Shortcuts") | ftxui::bold
+                     | ftxui::color(Theme::Header::primary()) | ftxui::center,
+                   ftxui::separator(),
+                   ftxui::text(""),
+                   ftxui::text("📑 Tab Navigation") | ftxui::bold
+                     | ftxui::color(Theme::Header::accent()),
+                   ftxui::text("  1       - Logs tab"),
+                   ftxui::text("  2       - Build tab"),
+                   ftxui::text("  3       - Filter tab"),
+                   ftxui::text("  4       - Display tab"),
+                   ftxui::text("  5       - Debug tab"),
+                   ftxui::text("  6       - Metrics tab"),
+                   ftxui::text("  7       - Status tab"),
+                   ftxui::text("  8       - Help tab"),
+                   ftxui::text(""),
+                   ftxui::text("🔧 Actions") | ftxui::bold | ftxui::color(Theme::Header::accent()),
+                   ftxui::text("  q       - Quit application"),
+                   ftxui::text("  r       - Reset target"),
+                   ftxui::text("  f       - Flash target"),
+                   ftxui::text("  b       - Start build"),
+                   ftxui::text("  Shift+F - Build and flash"),
+                   ftxui::text(""),
+                   ftxui::text("💡 Tips") | ftxui::bold | ftxui::color(Theme::Header::warning()),
+                   ftxui::text("  • Use Tab/Shift+Tab to navigate between UI elements"),
+                   ftxui::text("  • Use arrow keys to navigate lists and menus"),
+                   ftxui::text("  • Number keys work globally except when typing in text fields"),
+                   ftxui::text("")});
+            });
+        }
+
         template<typename Reader>
         ftxui::Component getDebuggerComponent(Reader& rttReader) {
             auto resetTargetBtn = ftxui::Button(
@@ -1520,12 +1554,13 @@ namespace uc_log { namespace FTXUIGui {
         ftxui::Component getTabComponent(Reader& rttReader) {
             auto tabs = generateTabsComponent({
               {   "📄 Logs",                getLogComponent()},
+              {  "🔨 Build",              getBuildComponent()},
               { "🔍 Filter",             getFilterComponent()},
               {"🎨 Display", getAppearanceSettingsComponent()},
               {  "🔧 Debug",  getDebuggerComponent(rttReader)},
-              {  "🔨 Build",              getBuildComponent()},
               {"📈 Metrics",             getMetricComponent()},
-              { "💬 Status",             getStatusComponent()}
+              { "💬 Status",             getStatusComponent()},
+              {   "❓ Help",               getHelpComponent()}
             });
 
             return ftxui::Container::Vertical({getStatusLineComponent(rttReader),
@@ -1620,10 +1655,48 @@ namespace uc_log { namespace FTXUIGui {
 
                 mainComponent
                   = ftxui::CatchEvent(getTabComponent(rttReader), [&](ftxui::Event const& event) {
-                        if(selectedTab == 1 && event.is_character()) {
+                        // Only block hotkeys when actively typing in the manual location input field
+                        if(manualLocationInput && manualLocationInput->Focused()
+                           && event.is_character())
+                        {
                             return false;
                         }
 
+                        // Number keys for tab switching
+                        if(event == ftxui::Event::Character('1')) {
+                            selectedTab = 0;   // Logs
+                            return true;
+                        }
+                        if(event == ftxui::Event::Character('2')) {
+                            selectedTab = 1;   // Build
+                            return true;
+                        }
+                        if(event == ftxui::Event::Character('3')) {
+                            selectedTab = 2;   // Filter
+                            return true;
+                        }
+                        if(event == ftxui::Event::Character('4')) {
+                            selectedTab = 3;   // Display
+                            return true;
+                        }
+                        if(event == ftxui::Event::Character('5')) {
+                            selectedTab = 4;   // Debug
+                            return true;
+                        }
+                        if(event == ftxui::Event::Character('6')) {
+                            selectedTab = 5;   // Metrics
+                            return true;
+                        }
+                        if(event == ftxui::Event::Character('7')) {
+                            selectedTab = 6;   // Status
+                            return true;
+                        }
+                        if(event == ftxui::Event::Character('8')) {
+                            selectedTab = 7;   // Help
+                            return true;
+                        }
+
+                        // Action hotkeys
                         if(event == ftxui::Event::Character('r')) {
                             rttReader.resetTarget();
                             return true;
