@@ -27,31 +27,23 @@ struct Reader {
     }
 
     void resetJLink() {
-        if(msg) {
-            msg("Reset debugger");
-        }
+        if(msg) { msg("Reset debugger"); }
         {
             std::lock_guard<std::mutex> lock{statusMutex};
             status.hostOverflowCount = 0;
             status.isRunning         = true;
         }
-        if(msg) {
-            msg("Reset debugger done");
-        }
+        if(msg) { msg("Reset debugger done"); }
     }
 
     void resetTarget() {
-        if(msg) {
-            msg("Reset target");
-        }
+        if(msg) { msg("Reset target"); }
         {
             std::lock_guard<std::mutex> lock{statusMutex};
             status.numBytesTransferred = 0;
             status.numBytesRead        = 0;
         }
-        if(msg) {
-            msg("Reset target done");
-        }
+        if(msg) { msg("Reset target done"); }
     }
 
     void flash() {
@@ -98,9 +90,7 @@ static void updateStatus(Status& status) {
     status.numBytesTransferred += 10;
     status.numBytesRead += 10;
 
-    if(status.numBytesTransferred > 1000) {
-        status.isRunning = false;
-    }
+    if(status.numBytesTransferred > 1000) { status.isRunning = false; }
 }
 
 int main() {

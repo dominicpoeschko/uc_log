@@ -43,9 +43,7 @@ private:
 
             for(auto const& entry : std::views::reverse(toHandle)) {
                 f(entry.sys_entryTime, entry.entry);
-                if(stoken.stop_requested()) {
-                    return;
-                }
+                if(stoken.stop_requested()) { return; }
             }
             toHandle.clear();
         }

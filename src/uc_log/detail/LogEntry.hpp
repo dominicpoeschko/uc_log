@@ -120,9 +120,7 @@ namespace uc_log { namespace detail {
 
             std::uint64_t value{};
             auto const [ptr, ec] = std::from_chars(timeString.begin(), timeString.end(), value);
-            if(ec != std::errc{} || ptr == timeString.end()) {
-                return std::nullopt;
-            }
+            if(ec != std::errc{} || ptr == timeString.end()) { return std::nullopt; }
 
             timeString
               = timeString.substr(static_cast<std::size_t>(std::distance(timeString.begin(), ptr)));
@@ -139,31 +137,23 @@ namespace uc_log { namespace detail {
         }
 
         static std::optional<UcTime> parseTimeString(std::string_view timeString) {
-            if(!timeString.ends_with("]s")) {
-                return parseTimeStringStdDuration(timeString);
-            }
+            if(!timeString.ends_with("]s")) { return parseTimeStringStdDuration(timeString); }
             timeString.remove_suffix(2);
 
             std::uint64_t value{};
             {
                 auto const [ptr, ec] = std::from_chars(timeString.begin(), timeString.end(), value);
-                if(ec != std::errc{} || ptr == timeString.end()) {
-                    return std::nullopt;
-                }
+                if(ec != std::errc{} || ptr == timeString.end()) { return std::nullopt; }
                 timeString.remove_prefix(
                   static_cast<std::size_t>(std::distance(timeString.begin(), ptr)));
             }
-            if(!timeString.starts_with('[')) {
-                return std::nullopt;
-            }
+            if(!timeString.starts_with('[')) { return std::nullopt; }
             timeString.remove_prefix(1);
 
             std::uint64_t num{};
             {
                 auto const [ptr, ec] = std::from_chars(timeString.begin(), timeString.end(), num);
-                if(ec != std::errc{}) {
-                    return std::nullopt;
-                }
+                if(ec != std::errc{}) { return std::nullopt; }
                 timeString.remove_prefix(
                   static_cast<std::size_t>(std::distance(timeString.begin(), ptr)));
             }
@@ -173,17 +163,13 @@ namespace uc_log { namespace detail {
                   {value, num, 1}
                 };
             }
-            if(!timeString.starts_with('/')) {
-                return std::nullopt;
-            }
+            if(!timeString.starts_with('/')) { return std::nullopt; }
             timeString.remove_prefix(1);
 
             std::uint64_t den{};
             {
                 auto const [ptr, ec] = std::from_chars(timeString.begin(), timeString.end(), den);
-                if(ec != std::errc{}) {
-                    return std::nullopt;
-                }
+                if(ec != std::errc{}) { return std::nullopt; }
                 timeString.remove_prefix(
                   static_cast<std::size_t>(std::distance(timeString.begin(), ptr)));
             }
@@ -208,16 +194,12 @@ namespace uc_log { namespace detail {
             logMsg          = msg.substr(pos + 4);
             auto contextMsg = msg.substr(1, pos - 1);
 
-            if(std::ranges::count(contextMsg, ',') <= 3) {
-                return;
-            }
+            if(std::ranges::count(contextMsg, ',') <= 3) { return; }
 
             auto fileNameSv = contextMsg.substr(0, contextMsg.find_first_of(','));
             contextMsg.remove_prefix(fileNameSv.size());
 
-            if(!contextMsg.starts_with(", ")) {
-                return;
-            }
+            if(!contextMsg.starts_with(", ")) { return; }
             contextMsg.remove_prefix(2);
 
             if(2 > fileNameSv.size() || !fileNameSv.starts_with("\"")
@@ -230,43 +212,31 @@ namespace uc_log { namespace detail {
 
             auto const lineSv = contextMsg.substr(0, contextMsg.find_first_of(','));
             contextMsg.remove_prefix(lineSv.size());
-            if(!contextMsg.starts_with(", ")) {
-                return;
-            }
+            if(!contextMsg.starts_with(", ")) { return; }
             contextMsg.remove_prefix(2);
             std::uint16_t line_{};
             {
                 auto const [ptr, ec] = std::from_chars(lineSv.begin(), lineSv.end(), line_);
-                if(ec != std::errc{} || ptr != lineSv.end()) {
-                    return;
-                }
+                if(ec != std::errc{} || ptr != lineSv.end()) { return; }
             }
 
             auto const logLevelSv = contextMsg.substr(0, contextMsg.find_first_of(','));
             contextMsg.remove_prefix(logLevelSv.size());
-            if(!contextMsg.starts_with(", ")) {
-                return;
-            }
+            if(!contextMsg.starts_with(", ")) { return; }
             contextMsg.remove_prefix(2);
             std::uint8_t logLevel_{};
             {
                 auto const [ptr, ec]
                   = std::from_chars(logLevelSv.begin(), logLevelSv.end(), logLevel_);
-                if(ec != std::errc{} || ptr != logLevelSv.end()) {
-                    return;
-                }
+                if(ec != std::errc{} || ptr != logLevelSv.end()) { return; }
             }
 
             auto const timeSv  = contextMsg.substr(0, contextMsg.find_first_of(','));
             auto       oUcTime = parseTimeString(timeSv);
-            if(!oUcTime) {
-                return;
-            }
+            if(!oUcTime) { return; }
 
             contextMsg.remove_prefix(timeSv.size());
-            if(!contextMsg.starts_with(R"(, """)")) {
-                return;
-            }
+            if(!contextMsg.starts_with(R"(, """)")) { return; }
             contextMsg.remove_prefix(5);
             auto const functionNameSv = contextMsg;
 
@@ -312,13 +282,9 @@ struct fmt::formatter<uc_log::LogLevel> {
 
         auto index = static_cast<std::size_t>(level);
 
-        if(index >= LCS.size()) {
-            index = 0;
-        }
+        if(index >= LCS.size()) { index = 0; }
 
-        if(unformated) {
-            return fmt::format_to(ctx.out(), "{}", LCS[index].second);
-        }
+        if(unformated) { return fmt::format_to(ctx.out(), "{}", LCS[index].second); }
         return fmt::format_to(ctx.out(),
                               "{:{}}",
                               fmt::styled(LCS[index].second, LCS[index].first),
@@ -375,9 +341,7 @@ struct fmt::formatter<uc_log::detail::LogEntry::UcTime> {
         auto const nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
           time.time - (days + hours + minutes + seconds + milliseconds + microseconds));
 
-        if(days != std::chrono::days{}) {
-            fmt::format_to(ctx.out(), "{:%Q} ", days);
-        }
+        if(days != std::chrono::days{}) { fmt::format_to(ctx.out(), "{:%Q} ", days); }
 
         return fmt::format_to(ctx.out(),
                               "{:0>2%Q}:{:0>2%Q}:{:0>2%Q}.{:0>3%Q}.{:0>3%Q}.{:0>3%Q}",
@@ -397,9 +361,7 @@ static inline std::size_t stringSizeWithoutColor(std::string_view str) {
     while(pos != std::string_view::npos) {
         str.remove_prefix(pos);
         auto pos2 = str.find('m');
-        if(pos2 == std::string::npos) {
-            break;
-        }
+        if(pos2 == std::string::npos) { break; }
         str.remove_prefix(pos2);
         escapeSize += pos2 + 1;
         pos = str.find('\033');
@@ -416,17 +378,11 @@ struct fmt::formatter<uc_log::detail::LogEntry> {
     template<typename ParseContext>
     constexpr auto parse(ParseContext& ctx) {
         auto iter = ctx.begin();
-        if(iter == ctx.end() || *iter == '}') {
-            return ctx.begin();
-        }
-        if(*iter != '<') {
-            return ctx.begin();
-        }
+        if(iter == ctx.end() || *iter == '}') { return ctx.begin(); }
+        if(*iter != '<') { return ctx.begin(); }
         std::advance(iter, 1);
         auto const result = std::from_chars(iter, ctx.end(), width);
-        if(result.ec != std::errc{}) {
-            return ctx.begin();
-        }
+        if(result.ec != std::errc{}) { return ctx.begin(); }
         iter = result.ptr;
         if(*iter != '}') {
             if(*iter == '#') {

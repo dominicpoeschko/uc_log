@@ -78,9 +78,7 @@ namespace uc_log { namespace FTXUIGui {
         ~Gui() {
             if(buildThread.joinable()) {
                 buildThread.request_stop();
-                if(buildIoContext) {
-                    buildIoContext->stop();
-                }
+                if(buildIoContext) { buildIoContext->stop(); }
                 buildThread.join();
             }
         }
@@ -186,9 +184,7 @@ namespace uc_log { namespace FTXUIGui {
                             bool               isError) {
             std::lock_guard<std::mutex> const lock{mutex};
             buildOutput.emplace_back(std::chrono::system_clock::now(), line, fromTool, isError);
-            if(screenPointer != nullptr) {
-                screenPointer->PostEvent(ftxui::Event::Custom);
-            }
+            if(screenPointer != nullptr) { screenPointer->PostEvent(ftxui::Event::Custom); }
         }
 
         void addBuildOutputGui(std::string const& line,
@@ -219,9 +215,7 @@ namespace uc_log { namespace FTXUIGui {
                 }
             }
 
-            if(!currentArgument.empty()) {
-                originalBuildArguments.push_back(currentArgument);
-            }
+            if(!currentArgument.empty()) { originalBuildArguments.push_back(currentArgument); }
 
             if(originalBuildArguments.empty()) {
                 throw std::invalid_argument("empty build command");
@@ -274,9 +268,7 @@ namespace uc_log { namespace FTXUIGui {
 
         void cancelBuild() {
             try {
-                if(buildStatus != BuildStatus::Running || !buildIoContext) {
-                    return;
-                }
+                if(buildStatus != BuildStatus::Running || !buildIoContext) { return; }
 
                 if(buildThread.joinable()) {
                     buildThread.request_stop();
@@ -289,9 +281,7 @@ namespace uc_log { namespace FTXUIGui {
         }
 
         void executeBuild() {
-            if(buildStatus == BuildStatus::Running || buildThread.joinable()) {
-                return;
-            }
+            if(buildStatus == BuildStatus::Running || buildThread.joinable()) { return; }
 
             buildOutput.clear();
 
@@ -415,17 +405,13 @@ namespace uc_log { namespace FTXUIGui {
         }
 
         void executeBuildAndFlash() {
-            if(buildStatus == BuildStatus::Running || buildThread.joinable()) {
-                return;
-            }
+            if(buildStatus == BuildStatus::Running || buildThread.joinable()) { return; }
             flashAfterBuild = true;
             executeBuild();
         }
 
         std::string processLogMessage(std::string const& originalMsg) const {
-            if(showMetricString) {
-                return originalMsg;
-            }
+            if(showMetricString) { return originalMsg; }
 
             std::string processedMsg = originalMsg;
             std::size_t pos          = 0;
@@ -435,9 +421,7 @@ namespace uc_log { namespace FTXUIGui {
                 pos += 8;
 
                 std::size_t const end_pos = processedMsg.find(')', pos);
-                if(end_pos == std::string::npos) {
-                    break;
-                }
+                if(end_pos == std::string::npos) { break; }
 
                 std::string_view const metric_content
                   = std::string_view{processedMsg}.substr(pos, end_pos - pos);
@@ -493,9 +477,7 @@ namespace uc_log { namespace FTXUIGui {
             }
 
             if(showLocation) {
-                if(!metadata.empty()) {
-                    metadata.push_back(ftxui::text(" "));
-                }
+                if(!metadata.empty()) { metadata.push_back(ftxui::text(" ")); }
                 metadata.push_back(
                   ftxui::text(fmt::format("{}:{}", entry.logEntry.fileName, entry.logEntry.line))
                   | ftxui::color(Theme::Text::metadata()));
@@ -573,9 +555,7 @@ namespace uc_log { namespace FTXUIGui {
                     return false;
                 }
 
-                if(hasExclusions) {
-                    return true;
-                }
+                if(hasExclusions) { return true; }
                 if(hasInclusions) {
                     return filterState.includedLocations.contains(entryLocation)
                         || filterState.includedLocations.contains(entryFile);
@@ -585,9 +565,7 @@ namespace uc_log { namespace FTXUIGui {
         }
 
         void updateCurrentFilter() {
-            if(activeFilterState == editedFilterState) {
-                return;
-            }
+            if(activeFilterState == editedFilterState) { return; }
 
             activeFilterState = editedFilterState;
 
@@ -676,18 +654,14 @@ namespace uc_log { namespace FTXUIGui {
             auto dataProvider
               = [this](MetricInfo const& metric) -> std::optional<std::vector<MetricEntry> const*> {
                 auto iter = metricEntries.find(metric);
-                if(iter != metricEntries.end() && !iter->second.empty()) {
-                    return &iter->second;
-                }
+                if(iter != metricEntries.end() && !iter->second.empty()) { return &iter->second; }
                 return std::nullopt;
             };
 
             auto clearCallback = [this]() {
                 if(auto selectedMetric = metricPlotWidget.getSelectedMetric()) {
                     auto iter = metricEntries.find(*selectedMetric);
-                    if(iter != metricEntries.end()) {
-                        iter->second.clear();
-                    }
+                    if(iter != metricEntries.end()) { iter->second.clear(); }
                 }
             };
 
@@ -735,11 +709,10 @@ namespace uc_log { namespace FTXUIGui {
                 });
 
             return ftxui::Container::Vertical(
-              {ftxui::Container::Horizontal(
-                 {buildButton | ftxui::flex,
-                  buildAndFlashButton | ftxui::flex,
-                  stopButton | ftxui::flex,
-                  clearButton | ftxui::flex}),
+              {ftxui::Container::Horizontal({buildButton | ftxui::flex,
+                                             buildAndFlashButton | ftxui::flex,
+                                             stopButton | ftxui::flex,
+                                             clearButton | ftxui::flex}),
                ftxui::Renderer([]() { return ftxui::separator(); }),
                statusDisplay | ftxui::flex});
         }
@@ -985,9 +958,7 @@ namespace uc_log { namespace FTXUIGui {
               = [](std::string const& input) -> std::optional<SourceLocation> {
                 auto colonPosition = std::ranges::find(input, ':');
                 if(colonPosition == input.end()) {
-                    if(input.empty()) {
-                        return std::nullopt;
-                    }
+                    if(input.empty()) { return std::nullopt; }
                     return SourceLocation{input, 0};
                 }
                 std::size_t line{};
@@ -1063,12 +1034,8 @@ namespace uc_log { namespace FTXUIGui {
 
                 auto element = ftxui::text(state.label);
 
-                if(state.active) {
-                    element |= ftxui::bold;
-                }
-                if(state.focused) {
-                    element |= ftxui::inverted;
-                }
+                if(state.active) { element |= ftxui::bold; }
+                if(state.focused) { element |= ftxui::inverted; }
 
                 if(isIncluded) {
                     element = ftxui::hbox(
@@ -1480,29 +1447,19 @@ namespace uc_log { namespace FTXUIGui {
                                                ? "●"
                                                : "○"))
                      | ftxui::color([&]() {
-                           if(buildRunning) {
-                               return Theme::Status::warning();
-                           }
-                           if(buildSuccess) {
-                               return Theme::Status::success();
-                           }
-                           if(buildStatus == BuildStatus::Failed) {
-                               return Theme::Status::error();
-                           }
+                           if(buildRunning) { return Theme::Status::warning(); }
+                           if(buildSuccess) { return Theme::Status::success(); }
+                           if(buildStatus == BuildStatus::Failed) { return Theme::Status::error(); }
                            return Theme::Text::normal();
                        }()),
                    ftxui::separator(),
 
                    ftxui::text("⚡ " + std::string([&]() {
-                                   if(!isFlashing) {
-                                       return "●";
-                                   }
+                                   if(!isFlashing) { return "●"; }
                                    return (rttStatus.isRunning == 0) ? "○" : "●";
                                }()))
                      | ftxui::color([&]() {
-                           if(!isFlashing) {
-                               return Theme::Status::success();
-                           }
+                           if(!isFlashing) { return Theme::Status::success(); }
                            return (rttStatus.isRunning == 0) ? Theme::Status::error()
                                                              : Theme::Status::warning();
                        }())
@@ -1583,12 +1540,8 @@ namespace uc_log { namespace FTXUIGui {
                 auto logEntry = std::make_shared<GuiLogEntry const>(recv_time, entry);
                 allLogEntries.push_back(logEntry);
                 allSourceLocations[SourceLocation{entry.fileName, entry.line}]++;
-                if(currentFilter(*logEntry)) {
-                    filteredLogEntries.push_back(logEntry);
-                }
-                if(screenPointer != nullptr) {
-                    screenPointer->PostEvent(ftxui::Event::Custom);
-                }
+                if(currentFilter(*logEntry)) { filteredLogEntries.push_back(logEntry); }
+                if(screenPointer != nullptr) { screenPointer->PostEvent(ftxui::Event::Custom); }
             }
         }
 
@@ -1597,9 +1550,7 @@ namespace uc_log { namespace FTXUIGui {
             statusMessages.emplace_back(MessageEntry::Level::Fatal,
                                         std::chrono::system_clock::now(),
                                         std::string{msg});
-            if(screenPointer != nullptr) {
-                screenPointer->PostEvent(ftxui::Event::Custom);
-            }
+            if(screenPointer != nullptr) { screenPointer->PostEvent(ftxui::Event::Custom); }
         }
 
         void statusMessage(std::string_view msg) {
@@ -1607,9 +1558,7 @@ namespace uc_log { namespace FTXUIGui {
             statusMessages.emplace_back(MessageEntry::Level::Status,
                                         std::chrono::system_clock::now(),
                                         std::string{msg});
-            if(screenPointer != nullptr) {
-                screenPointer->PostEvent(ftxui::Event::Custom);
-            }
+            if(screenPointer != nullptr) { screenPointer->PostEvent(ftxui::Event::Custom); }
         }
 
         void errorMessage(std::string_view msg) {
@@ -1617,9 +1566,7 @@ namespace uc_log { namespace FTXUIGui {
             statusMessages.emplace_back(MessageEntry::Level::Error,
                                         std::chrono::system_clock::now(),
                                         std::string{msg});
-            if(screenPointer != nullptr) {
-                screenPointer->PostEvent(ftxui::Event::Custom);
-            }
+            if(screenPointer != nullptr) { screenPointer->PostEvent(ftxui::Event::Custom); }
         }
 
         void toolStatusMessage(std::string_view msg) {
@@ -1627,9 +1574,7 @@ namespace uc_log { namespace FTXUIGui {
             statusMessages.emplace_back(MessageEntry::Level::ToolStatus,
                                         std::chrono::system_clock::now(),
                                         std::string{msg});
-            if(screenPointer != nullptr) {
-                screenPointer->PostEvent(ftxui::Event::Custom);
-            }
+            if(screenPointer != nullptr) { screenPointer->PostEvent(ftxui::Event::Custom); }
         }
 
         void toolErrorMessage(std::string_view msg) {
@@ -1637,9 +1582,7 @@ namespace uc_log { namespace FTXUIGui {
             statusMessages.emplace_back(MessageEntry::Level::ToolError,
                                         std::chrono::system_clock::now(),
                                         std::string{msg});
-            if(screenPointer != nullptr) {
-                screenPointer->PostEvent(ftxui::Event::Custom);
-            }
+            if(screenPointer != nullptr) { screenPointer->PostEvent(ftxui::Event::Custom); }
         }
 
         template<typename Reader>
@@ -1727,20 +1670,14 @@ namespace uc_log { namespace FTXUIGui {
                 {
                     std::lock_guard<std::mutex> const lock{mutex};
                     loop.RunOnce();
-                    if(screenPointer == nullptr) {
-                        screenPointer = &screen;
-                    }
+                    if(screenPointer == nullptr) { screenPointer = &screen; }
                 }
                 std::this_thread::sleep_for(GUI_Constants::UpdateInterval);
                 if(callJoin) {
-                    if(buildThread.joinable()) {
-                        buildThread.join();
-                    }
+                    if(buildThread.joinable()) { buildThread.join(); }
                     callJoin = false;
                 }
-                if(triggerFlashNow.exchange(false)) {
-                    rttReader.flash();
-                }
+                if(triggerFlashNow.exchange(false)) { rttReader.flash(); }
             }
             {
                 std::lock_guard<std::mutex> const lock{mutex};

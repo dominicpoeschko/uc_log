@@ -52,24 +52,16 @@ namespace detail {
             std::array<char, total_size> result{};
             std::size_t                  pos = 0;
 
-            for(char c : prefix) {
-                result[pos++] = c;
-            }
+            for(char c : prefix) { result[pos++] = c; }
 
-            for(char c : scope) {
-                result[pos++] = c;
-            }
+            for(char c : scope) { result[pos++] = c; }
             result[pos++] = ':';
             result[pos++] = ':';
 
-            for(char c : name) {
-                result[pos++] = c;
-            }
+            for(char c : name) { result[pos++] = c; }
 
             result[pos++] = '[';
-            for(char c : unit) {
-                result[pos++] = c;
-            }
+            for(char c : unit) { result[pos++] = c; }
             result[pos++] = ']';
 
             result[pos++] = '=';
@@ -102,9 +94,7 @@ namespace detail {
                         ++i;
                     } else {
                         std::size_t close_pos = i + 1;
-                        while(close_pos < input.size() && input[close_pos] != '}') {
-                            ++close_pos;
-                        }
+                        while(close_pos < input.size() && input[close_pos] != '}') { ++close_pos; }
 
                         if(close_pos < input.size()) {
                             if(arg_index < metrics_mask.size() && metrics_mask[arg_index]) {

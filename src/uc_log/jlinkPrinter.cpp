@@ -153,9 +153,7 @@ int main(int    argc,
                              channels,
                              [&mapFile, &gui]() {
                                  auto result = parseMapFileForControlBlockAddress(mapFile);
-                                 if(result.second.empty()) {
-                                     return result.first;
-                                 }
+                                 if(result.second.empty()) { return result.first; }
                                  gui.fatalError(result.second);
                                  return decltype(result.first){};
                              },
@@ -163,9 +161,7 @@ int main(int    argc,
                              [&stringConstantsFile, &gui]() {
                                  auto result = remote_fmt::parseStringConstantsFromJsonFile(
                                    stringConstantsFile);
-                                 if(result.second.empty()) {
-                                     return result.first;
-                                 }
+                                 if(result.second.empty()) { return result.first; }
                                  gui.fatalError(result.second);
                                  return decltype(result.first){};
                              },

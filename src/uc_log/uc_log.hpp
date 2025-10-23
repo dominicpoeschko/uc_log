@@ -21,9 +21,7 @@ namespace uc_log { namespace detail {
 
         consteval auto basename(std::string_view f) {
             auto it = std::ranges::find(f, '/');
-            if(it == f.end()) {
-                return f;
-            }
+            if(it == f.end()) { return f; }
             return std::string_view{++it, f.end()};
         }
 

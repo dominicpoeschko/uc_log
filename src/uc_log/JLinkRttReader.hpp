@@ -64,9 +64,7 @@ private:
                     }
                     break;
                 }
-                if(jlink.isHalted()) {
-                    lastHaltDetected = Clock::now();
-                }
+                if(jlink.isHalted()) { lastHaltDetected = Clock::now(); }
                 if((Clock::now() > lastValidRead + RttTimeout)
                    && (Clock::now() > lastHaltDetected + std::chrono::seconds{60})
                    && !buffer.empty())
@@ -120,9 +118,7 @@ private:
                     restart = true;
                 }
 
-                if(restart) {
-                    continue;
-                }
+                if(restart) { continue; }
                 auto const stringConstantsMap = catalogMapCallback();
 
                 jlink.startRtt(numChannels, blockAddressCallback());
@@ -147,9 +143,7 @@ private:
                         }
                     }
                     jlink.checkConnected();
-                    if(jlink.isHalted()) {
-                        lastHaltDetected = Clock::now();
-                    }
+                    if(jlink.isHalted()) { lastHaltDetected = Clock::now(); }
                     JLink::Status const local_status = jlink.readStatus();
                     status                           = local_status;
                     if(local_status.isRunning == 0

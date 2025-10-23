@@ -72,9 +72,7 @@ struct TCPSender {
             std::lock_guard<std::mutex> const lock{mutex};
 
             messages.push_back(std::move(vec));
-            if(!sending) {
-                doSend();
-            }
+            if(!sending) { doSend(); }
         }
 
         void run() { async_read_some(); }
@@ -97,9 +95,7 @@ struct TCPSender {
         void write_rdy() {
             std::lock_guard<std::mutex> const lock{mutex};
             sending = false;
-            if(!messages.empty()) {
-                doSend();
-            }
+            if(!messages.empty()) { doSend(); }
         }
 
         void doSend() {
@@ -144,12 +140,8 @@ struct TCPSender {
         for(auto& client : clients) {
             try {
                 auto session = client.lock();
-                if(session) {
-                    session->send(std::as_bytes(std::span{msg}));
-                }
-            } catch(std::exception const& e) {
-                errorMessagef(fmt::format("caught: {}", e.what()));
-            }
+                if(session) { session->send(std::as_bytes(std::span{msg})); }
+            } catch(std::exception const& e) { errorMessagef(fmt::format("caught: {}", e.what())); }
         }
         clean();
     }
@@ -162,9 +154,7 @@ private:
     }
 
     void runner(std::stop_token const& stoken) {
-        while(!stoken.stop_requested()) {
-            ioc.run_for(std::chrono::milliseconds{250});
-        }
+        while(!stoken.stop_requested()) { ioc.run_for(std::chrono::milliseconds{250}); }
     }
 
     void async_accept_one() {

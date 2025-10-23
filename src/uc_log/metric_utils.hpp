@@ -39,9 +39,7 @@ extractMetrics(std::chrono::system_clock::time_point recv_time,
         pos += 8;
 
         std::size_t const end_pos = msg.find(')', pos);
-        if(end_pos == std::string_view::npos) {
-            break;
-        }
+        if(end_pos == std::string_view::npos) { break; }
 
         std::string_view const metric_content = msg.substr(pos, end_pos - pos);
 
@@ -52,9 +50,7 @@ extractMetrics(std::chrono::system_clock::time_point recv_time,
         }
 
         std::string scope{metric_content.substr(0, scope_end)};
-        if(scope.empty()) {
-            scope = logEntry.fileName + ":" + std::to_string(logEntry.line);
-        }
+        if(scope.empty()) { scope = logEntry.fileName + ":" + std::to_string(logEntry.line); }
 
         std::string_view const remainder = metric_content.substr(scope_end + 2);
 
@@ -92,8 +88,7 @@ extractMetrics(std::chrono::system_clock::time_point recv_time,
                                              .level     = logEntry.logLevel,
                                              .uc_time   = logEntry.ucTime,
                                              .value     = value});
-        } catch(std::invalid_argument const&) {
-        }
+        } catch(std::invalid_argument const&) {}
 
         pos = end_pos + 1;
     }
