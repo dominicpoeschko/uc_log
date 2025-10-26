@@ -55,6 +55,22 @@ struct Reader {
 
     bool isFlashing() const { return false; }
 
+    void continueTarget() {
+        if(msg) { msg("Continue target"); }
+    }
+
+    void haltTarget() {
+        if(msg) { msg("Halt target"); }
+    }
+
+    void clearAllBreakpointsTarget() {
+        if(msg) { msg("Clear all breakpoints"); }
+    }
+
+    void setResetType(std::uint8_t type) {
+        if(msg) { msg("Set reset type: " + std::to_string(static_cast<int>(type))); }
+    }
+
     std::function<void(std::string const&)> msg;
 };
 

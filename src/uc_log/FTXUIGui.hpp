@@ -175,6 +175,9 @@ namespace uc_log { namespace FTXUIGui {
 
         int selectedMetricTab{};
 
+        int                      selectedResetType;
+        std::vector<std::string> resetTypeOptions{"0 - Normal", "1 - Core", "2 - ResetPin"};
+
         std::unique_ptr<boost::asio::io_context> buildIoContext;
         std::jthread                             buildThread;
         std::atomic<bool>                        triggerFlashNow{false};
@@ -1316,6 +1319,39 @@ namespace uc_log { namespace FTXUIGui {
               [&rttReader]() { rttReader.flash(); },
               createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
 
+            auto goBtn = ftxui::Button(
+              "▶️ Go",
+              [&rttReader]() { rttReader.continueTarget(); },
+              createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
+
+            auto haltBtn = ftxui::Button(
+              "⏸️ Halt",
+              [&rttReader]() { rttReader.haltTarget(); },
+              createButtonStyle(Theme::Button::Background::danger(), Theme::Button::text()));
+
+            auto clearBreakpointsBtn = ftxui::Button(
+              "🚫 Clear Breakpoints",
+              [&rttReader]() { rttReader.clearAllBreakpointsTarget(); },
+              createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
+
+            auto resetTypeRadiobox = ftxui::Radiobox(&resetTypeOptions, &selectedResetType);
+
+            auto resetTypeSelector
+              = ftxui::Container::Vertical(
+                  {ftxui::Renderer([]() {
+                       return ftxui::text("🔧 Reset Type") | ftxui::bold
+                            | ftxui::color(Theme::Header::accent());
+                   }),
+                   resetTypeRadiobox,
+                   ftxui::Button(
+                     "✓ Apply Reset Type",
+                     [this, &rttReader]() {
+                         rttReader.setResetType(static_cast<std::uint8_t>(selectedResetType));
+                     },
+                     createButtonStyle(Theme::Button::Background::positive(),
+                                       Theme::Button::text()))})
+              | ftxui::border;
+
             auto statusDisplay = ftxui::Renderer([&rttReader]() {
                 auto const rttStatus = rttReader.getStatus();
 
@@ -1353,6 +1389,11 @@ namespace uc_log { namespace FTXUIGui {
               {ftxui::Container::Horizontal({resetTargetBtn | ftxui::flex,
                                              resetDebuggerBtn | ftxui::flex,
                                              flashBtn | ftxui::flex}),
+               ftxui::Renderer([]() { return ftxui::separator(); }),
+               ftxui::Container::Horizontal(
+                 {goBtn | ftxui::flex, haltBtn | ftxui::flex, clearBreakpointsBtn | ftxui::flex}),
+               ftxui::Renderer([]() { return ftxui::separator(); }),
+               resetTypeSelector,
                ftxui::Renderer([]() { return ftxui::separator(); }),
                statusDisplay});
         }

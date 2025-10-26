@@ -100,6 +100,7 @@ private:
                                  toolMessageCallback,
                                  toolErrorMessageCallback};
                 }();
+                jlink.setResetType(pendingResetType.load(std::memory_order_relaxed));
                 bool restart = false;
 
                 if(flashFlag) {
@@ -152,6 +153,21 @@ private:
                         throw std::runtime_error("lost connection");
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                    if(targetContinueFlag) {
+                        targetContinueFlag = false;
+                        jlink.go();
+                    }
+                    if(targetHaltFlag) {
+                        targetHaltFlag = false;
+                        jlink.halt();
+                    }
+                    if(targetClearBreakPointsFlag) {
+                        targetClearBreakPointsFlag = false;
+                        jlink.clearAllBreakpoints();
+                    }
+                    if(hasResetTypeChange.exchange(false, std::memory_order_acquire)) {
+                        jlink.setResetType(pendingResetType.load(std::memory_order_relaxed));
+                    }
                 }
             } catch(std::exception const& e) {
                 toolErrorMessageCallback(fmt::format("caught {}", e.what()));
@@ -178,8 +194,13 @@ private:
 
     std::atomic<JLink::Status> status;
     std::atomic<bool>          targetResetFlag;
+    std::atomic<bool>          targetContinueFlag;
+    std::atomic<bool>          targetHaltFlag;
+    std::atomic<bool>          targetClearBreakPointsFlag;
     std::atomic<bool>          jlinkResetFlag;
     std::atomic<bool>          flashFlag;
+    std::atomic<std::uint8_t>  pendingResetType;
+    std::atomic<bool>          hasResetTypeChange;
     std::jthread               thread;
 
 public:
@@ -222,6 +243,17 @@ public:
     void resetJLink() { jlinkResetFlag = true; }
 
     void resetTarget() { targetResetFlag = true; }
+
+    void haltTarget() { targetHaltFlag = true; }
+
+    void continueTarget() { targetContinueFlag = true; }
+
+    void clearAllBreakpointsTarget() { targetClearBreakPointsFlag = true; }
+
+    void setResetType(std::uint8_t type) {
+        pendingResetType.store(type, std::memory_order_relaxed);
+        hasResetTypeChange.store(true, std::memory_order_release);
+    }
 
     void flash() { flashFlag = true; }
 
