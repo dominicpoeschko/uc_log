@@ -148,6 +148,7 @@ namespace uc_log { namespace FTXUIGui {
         bool showChannel{true};
         bool showLogLevel{true};
         bool showMetricString{false};
+        bool showTypenameString{false};
 
         std::size_t lastMetricCount{0};
         bool        hasLastSelectedInfo{false};
@@ -414,28 +415,51 @@ namespace uc_log { namespace FTXUIGui {
         }
 
         std::string processLogMessage(std::string const& originalMsg) const {
-            if(showMetricString) { return originalMsg; }
-
             std::string processedMsg = originalMsg;
             std::size_t pos          = 0;
 
-            while((pos = processedMsg.find("@METRIC(", pos)) != std::string::npos) {
+            // Process @METRIC(...) markers
+            if(!showMetricString) {
+                pos = 0;
+                while((pos = processedMsg.find("@METRIC(", pos)) != std::string::npos) {
+                    std::size_t const start_pos = pos;
+                    pos += 8;
+
+                    std::size_t const end_pos = processedMsg.find(')', pos);
+                    if(end_pos == std::string::npos) { break; }
+
+                    std::string_view const metric_content
+                      = std::string_view{processedMsg}.substr(pos, end_pos - pos);
+
+                    std::size_t const equals_pos = metric_content.find('=');
+                    if(equals_pos != std::string_view::npos) {
+                        std::string const value{metric_content.substr(equals_pos + 1)};
+                        processedMsg.replace(start_pos, end_pos - start_pos + 1, value);
+                        pos = start_pos + value.length();
+                    } else {
+                        pos = end_pos + 1;
+                    }
+                }
+            }
+
+            // Process @TYPENAME(...) markers
+            pos = 0;
+            while((pos = processedMsg.find("@TYPENAME(", pos)) != std::string::npos) {
                 std::size_t const start_pos = pos;
-                pos += 8;
+                pos += 10;
 
                 std::size_t const end_pos = processedMsg.find(')', pos);
                 if(end_pos == std::string::npos) { break; }
 
-                std::string_view const metric_content
-                  = std::string_view{processedMsg}.substr(pos, end_pos - pos);
-
-                std::size_t const equals_pos = metric_content.find('=');
-                if(equals_pos != std::string_view::npos) {
-                    std::string const value{metric_content.substr(equals_pos + 1)};
-                    processedMsg.replace(start_pos, end_pos - start_pos + 1, value);
-                    pos = start_pos + value.length();
+                if(showTypenameString) {
+                    // Show the typename content
+                    std::string const typename_content{processedMsg.substr(pos, end_pos - pos)};
+                    processedMsg.replace(start_pos, end_pos - start_pos + 1, typename_content);
+                    pos = start_pos + typename_content.length();
                 } else {
-                    pos = end_pos + 1;
+                    // Hide the entire @TYPENAME(...) marker
+                    processedMsg.erase(start_pos, end_pos - start_pos + 1);
+                    pos = start_pos;
                 }
             }
 
@@ -1231,13 +1255,14 @@ namespace uc_log { namespace FTXUIGui {
             auto resetButton = ftxui::Button(
               "🔄 Reset to Defaults",
               [this]() {
-                  showSysTime      = true;
-                  showFunctionName = false;
-                  showUcTime       = true;
-                  showLocation     = true;
-                  showChannel      = true;
-                  showLogLevel     = true;
-                  showMetricString = false;
+                  showSysTime        = true;
+                  showFunctionName   = false;
+                  showUcTime         = true;
+                  showLocation       = true;
+                  showChannel        = true;
+                  showLogLevel       = true;
+                  showMetricString   = false;
+                  showTypenameString = false;
               },
               createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
 
@@ -1259,7 +1284,8 @@ namespace uc_log { namespace FTXUIGui {
                   ftxui::Checkbox("📍 Source Location", &showLocation),
                   ftxui::Checkbox("📡 Log Channel", &showChannel),
                   ftxui::Checkbox("📊 Log Level", &showLogLevel),
-                  ftxui::Checkbox("📊 Show Metric Strings", &showMetricString)})
+                  ftxui::Checkbox("📊 Show Metric Strings", &showMetricString),
+                  ftxui::Checkbox("🔤 Show Typenames", &showTypenameString)})
                  | ftxui::Renderer([](ftxui::Element inner) {
                        return ftxui::vbox({ftxui::text("🎨 Display Settings") | ftxui::bold
                                              | ftxui::color(Theme::Header::accent())
