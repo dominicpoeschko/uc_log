@@ -1724,7 +1724,10 @@ namespace uc_log { namespace FTXUIGui {
                     allLogEntries.push_back(logEntry);
 
                     // Check filter once on first line
-                    if(i == 0) { groupPassesFilter = currentFilter(*logEntry); }
+                    if(i == 0) {
+                        groupPassesFilter = currentFilter(*logEntry);
+                        if(groupPassesFilter) { ++filteredOriginalLogCount; }
+                    }
 
                     if(groupPassesFilter) { filteredLogEntries.push_back(logEntry); }
                 }
