@@ -337,8 +337,7 @@ namespace uc_log { namespace FTXUIGui {
                     auto oldStencil = screen.stencil;
 
                     // Calculate where content should be clipped (before metadata and indicator)
-                    int const indicatorWidth = 2;   // Space for "→ "
-                    int const contentMaxX    = box_.x_max - overlayWidth_ - indicatorWidth;
+                    int const contentMaxX    = box_.x_max - overlayWidth_;
                     int const availableWidth = contentMaxX - box_.x_min;
 
                     // Apply stencil to clip content
@@ -347,7 +346,7 @@ namespace uc_log { namespace FTXUIGui {
                     screen.stencil = oldStencil;
 
                     // Position for the truncation indicator
-                    int const indicatorX = contentMaxX;
+                    int const indicatorX = contentMaxX - 1;
 
                     // Calculate spacer height to map y coordinates to line indices
                     int const spacerHeight
@@ -376,6 +375,25 @@ namespace uc_log { namespace FTXUIGui {
                                 screen.PixelAt(indicatorX, y).character        = "→";
                                 screen.PixelAt(indicatorX, y).foreground_color = ftxui::Color::Red;
                             }
+                        }
+                    }
+
+                    // Draw pipe separator at fixed position before metadata column (only on log lines)
+                    int const separatorX = box_.x_max - overlayWidth_;
+                    for(int y = box_.y_min; y <= box_.y_max; ++y) {
+                        // Only draw separator on actual log lines, not spacers or empty area
+                        int const relativeY = y - box_.y_min;
+                        if(relativeY < spacerHeight) {
+                            continue;   // Skip hiddenBefore spacer
+                        }
+
+                        int const lineIndex = relativeY - spacerHeight;
+                        if(lineIndex >= 0 && lineIndex < static_cast<int>(lineContentWidths_.size())
+                           && y >= 0 && y < screen.dimy() && separatorX >= 0
+                           && separatorX < screen.dimx())
+                        {
+                            screen.PixelAt(separatorX, y).character        = "|";
+                            screen.PixelAt(separatorX, y).foreground_color = ftxui::Color::GrayDark;
                         }
                     }
 

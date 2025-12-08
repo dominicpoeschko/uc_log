@@ -568,7 +568,7 @@ namespace uc_log { namespace FTXUIGui {
                 }
 
                 if(showLocation) {
-                    if(!metadata.empty()) { metadata.push_back(ftxui::text(" ")); }
+                    if(showFunctionName) { metadata.push_back(ftxui::text(" ")); }
                     metadata.push_back(
                       ftxui::text(
                         fmt::format("{}:{}", entry.logEntry.fileName, entry.logEntry.line))
