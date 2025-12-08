@@ -90,9 +90,18 @@ namespace uc_log { namespace FTXUIGui {
         Gui& operator=(Gui&&) = delete;
 
     private:
+        enum class LineType : std::uint8_t {
+            SingleLine,   // Complete log on one line
+            First,        // First line of multiline log
+            Middle,       // Middle continuation line
+            Last          // Last line of multiline log
+        };
+
         struct GuiLogEntry {
             std::chrono::system_clock::time_point recv_time;
             uc_log::detail::LogEntry              logEntry;
+            LineType                              lineType{LineType::SingleLine};
+            std::size_t                           multilineGroupId{0};
         };
 
         struct FilterState {
@@ -126,6 +135,10 @@ namespace uc_log { namespace FTXUIGui {
         std::mutex mutex;
 
         std::atomic<bool> callJoin{false};
+        std::size_t       nextMultilineGroupId{0};
+
+        std::size_t originalLogCount{0};           // Total original logs received
+        std::size_t filteredOriginalLogCount{0};   // Original logs passing filter
 
         ftxui::ScreenInteractive* screenPointer = nullptr;
 
@@ -194,6 +207,40 @@ namespace uc_log { namespace FTXUIGui {
         void addBuildOutputGui(std::string const& line,
                                bool               isError) {
             buildOutput.emplace_back(std::chrono::system_clock::now(), line, false, isError);
+        }
+
+        static std::vector<std::string> splitIntoLines(std::string_view msg) {
+            while(!msg.empty() && msg.back() == '\n') { msg.remove_suffix(1); }
+
+            if(msg.empty()) { return {""}; }
+
+            auto splitView = msg | std::views::split('\n') | std::views::transform([](auto&& rng) {
+                                 return std::string(rng.begin(), rng.end());
+                             });
+
+            return std::vector<std::string>(splitView.begin(), splitView.end());
+        }
+
+        std::size_t calculatePrefixWidth() const {
+            std::size_t width = 0;
+
+            if(showSysTime) {
+                width += 13;   // "HH:MM:SS.mmm "
+            }
+
+            if(showChannel) {
+                width += 2;   // "C "
+            }
+
+            if(showUcTime) {
+                width += 21;   // "00:00:00.000.000.000 "
+            }
+
+            if(showLogLevel) {
+                width += 7;   // "level| "
+            }
+
+            return width;
         }
 
         void initializeBuildCommand(std::string const& buildCommandStr) {
@@ -470,48 +517,70 @@ namespace uc_log { namespace FTXUIGui {
             ftxui::Elements elements;
             elements.reserve(12);
 
-            if(showSysTime) {
-                elements.push_back(
-                  ftxui::text(detail::to_time_string_with_milliseconds(entry.recv_time))
-                  | ftxui::color(Theme::Text::timestamp()));
-                elements.push_back(ftxui::text(" "));
+            bool const showPrefix
+              = (entry.lineType == LineType::SingleLine || entry.lineType == LineType::First);
+
+            if(showPrefix) {
+                // Show full prefix for first/single lines
+                if(showSysTime) {
+                    elements.push_back(
+                      ftxui::text(detail::to_time_string_with_milliseconds(entry.recv_time))
+                      | ftxui::color(Theme::Text::timestamp()));
+                    elements.push_back(ftxui::text(" "));
+                }
+
+                if(showChannel) {
+                    elements.push_back(toElement(entry.logEntry.channel));
+                    elements.push_back(ftxui::text(" "));
+                }
+
+                if(showUcTime) {
+                    elements.push_back(ftxui::text(fmt::format("{}", entry.logEntry.ucTime))
+                                       | ftxui::color(Theme::Text::ucTime()));
+                    elements.push_back(ftxui::text(" "));
+                }
+
+                if(showLogLevel) {
+                    elements.push_back(toElement(entry.logEntry.logLevel));
+                    elements.push_back(ftxui::text("| ") | ftxui::color(Theme::Text::separator()));
+                }
+            } else {
+                // Indent continuation lines to align with message column
+                std::size_t const indentWidth = calculatePrefixWidth();
+                elements.push_back(ftxui::text(std::string(indentWidth, ' ')));
             }
 
-            if(showChannel) {
-                elements.push_back(toElement(entry.logEntry.channel));
-                elements.push_back(ftxui::text(" "));
-            }
-
-            if(showUcTime) {
-                elements.push_back(ftxui::text(fmt::format("{}", entry.logEntry.ucTime))
-                                   | ftxui::color(Theme::Text::ucTime()));
-                elements.push_back(ftxui::text(" "));
-            }
-
-            if(showLogLevel) {
-                elements.push_back(toElement(entry.logEntry.logLevel));
-                elements.push_back(ftxui::text("| ") | ftxui::color(Theme::Text::separator()));
-            }
-
-            elements.push_back(ansiColoredTextToFtxui(processLogMessage(entry.logEntry.logMsg)));
+            // Message is always shown (already processed in add())
+            elements.push_back(ansiColoredTextToFtxui(entry.logEntry.logMsg));
 
             auto scrollableContent = ftxui::hbox(elements) | ftxui::flex;
 
-            ftxui::Elements metadata;
-            if(showFunctionName) {
-                metadata.push_back(ftxui::text(entry.logEntry.functionName)
-                                   | ftxui::color(Theme::Text::functionName()));
-            }
+            // Metadata: only show on single/last lines
+            bool const showMetadata
+              = (entry.lineType == LineType::SingleLine || entry.lineType == LineType::Last);
 
-            if(showLocation) {
-                if(!metadata.empty()) { metadata.push_back(ftxui::text(" ")); }
-                metadata.push_back(
-                  ftxui::text(fmt::format("{}:{}", entry.logEntry.fileName, entry.logEntry.line))
-                  | ftxui::color(Theme::Text::metadata()));
-            }
+            ftxui::Element metadataElement;
+            if(showMetadata) {
+                ftxui::Elements metadata;
+                if(showFunctionName) {
+                    metadata.push_back(ftxui::text(entry.logEntry.functionName)
+                                       | ftxui::color(Theme::Text::functionName()));
+                }
 
-            ftxui::Element metadataElement
-              = metadata.empty() ? ftxui::text("") : ftxui::hbox(metadata);
+                if(showLocation) {
+                    if(!metadata.empty()) { metadata.push_back(ftxui::text(" ")); }
+                    metadata.push_back(
+                      ftxui::text(
+                        fmt::format("{}:{}", entry.logEntry.fileName, entry.logEntry.line))
+                      | ftxui::color(Theme::Text::metadata()));
+                }
+                // Add filler to push content to the right and ensure consistent width
+                metadata.insert(metadata.begin(), ftxui::filler());
+                metadataElement = ftxui::hbox(metadata);
+            } else {
+                // For continuation lines, use filler to match the same behavior
+                metadataElement = ftxui::hbox({ftxui::filler()});
+            }
 
             return std::make_shared<ScrollableWithMetadata>(std::move(scrollableContent),
                                                             std::move(metadataElement));
@@ -546,9 +615,15 @@ namespace uc_log { namespace FTXUIGui {
 
         void updateFilteredLogEntries() {
             filteredLogEntries.clear();
+            std::set<std::size_t> uniqueGroupIds{};
             std::ranges::copy_if(allLogEntries,
                                  std::back_inserter(filteredLogEntries),
-                                 [&](auto const& value) { return currentFilter(*value); });
+                                 [&](auto const& value) {
+                                     bool const active = currentFilter(*value);
+                                     if(active) { uniqueGroupIds.insert(value->multilineGroupId); }
+                                     return active;
+                                 });
+            filteredOriginalLogCount = uniqueGroupIds.size();
         }
 
         auto createFilter(FilterState const& filterState) {
@@ -1271,6 +1346,8 @@ namespace uc_log { namespace FTXUIGui {
               [this]() {
                   allLogEntries.clear();
                   filteredLogEntries.clear();
+                  originalLogCount         = 0;
+                  filteredOriginalLogCount = 0;
               },
               createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
 
@@ -1490,8 +1567,8 @@ namespace uc_log { namespace FTXUIGui {
 
             auto statusRenderer = ftxui::Renderer([&rttReader, this]() {
                 auto const rttStatus    = rttReader.getStatus();
-                auto const logCount     = filteredLogEntries.size();
-                auto const totalCount   = allLogEntries.size();
+                auto const logCount     = filteredOriginalLogCount;
+                auto const totalCount   = originalLogCount;
                 bool const filterActive = activeFilterState != FilterState{};
                 bool const buildRunning = (buildStatus == BuildStatus::Running);
                 bool const buildSuccess = (buildStatus == BuildStatus::Success);
@@ -1596,20 +1673,64 @@ namespace uc_log { namespace FTXUIGui {
     public:
         void add(std::chrono::system_clock::time_point recv_time,
                  uc_log::detail::LogEntry const&       entry) {
-            {
-                std::lock_guard<std::mutex> const lock{mutex};
-                auto const metrics = uc_log::extractMetrics(recv_time, entry);
+            std::lock_guard<std::mutex> const lock{mutex};
 
-                for(auto const& metric : metrics) {
-                    metricEntries[metric.first].push_back(metric.second);
-                }
+            ++originalLogCount;
 
-                auto logEntry = std::make_shared<GuiLogEntry const>(recv_time, entry);
-                allLogEntries.push_back(logEntry);
-                allSourceLocations[SourceLocation{entry.fileName, entry.line}]++;
-                if(currentFilter(*logEntry)) { filteredLogEntries.push_back(logEntry); }
-                if(screenPointer != nullptr) { screenPointer->PostEvent(ftxui::Event::Custom); }
+            auto const metrics = uc_log::extractMetrics(recv_time, entry);
+            for(auto const& metric : metrics) {
+                metricEntries[metric.first].push_back(metric.second);
             }
+
+            std::string const processedMsg = processLogMessage(entry.logMsg);
+            std::size_t const newlineCount
+              = static_cast<std::size_t>(std::ranges::count(processedMsg, '\n'));
+            std::size_t const groupId = ++nextMultilineGroupId;
+
+            allSourceLocations[SourceLocation{entry.fileName, entry.line}]++;
+
+            if(newlineCount == 0) {
+                uc_log::detail::LogEntry processedEntry = entry;
+                processedEntry.logMsg                   = processedMsg;
+
+                auto logEntry = std::make_shared<GuiLogEntry const>(
+                  GuiLogEntry{recv_time, processedEntry, LineType::SingleLine, groupId});
+
+                allLogEntries.push_back(logEntry);
+                if(currentFilter(*logEntry)) {
+                    filteredLogEntries.push_back(logEntry);
+                    ++filteredOriginalLogCount;
+                }
+            } else {
+                auto const lines = splitIntoLines(processedMsg);
+
+                // Check filter on first line entry
+                bool groupPassesFilter = false;
+
+                auto const lastIndex = static_cast<std::ptrdiff_t>(lines.size() - 1);
+                for(auto [i, line] : std::views::enumerate(lines)) {
+                    auto const lineType = [&]() -> LineType {
+                        if(i == 0) { return LineType::First; }
+                        if(i == lastIndex) { return LineType::Last; }
+                        return LineType::Middle;
+                    }();
+
+                    auto lineEntry   = entry;
+                    lineEntry.logMsg = line;
+
+                    auto const logEntry = std::make_shared<GuiLogEntry const>(
+                      GuiLogEntry{recv_time, lineEntry, lineType, groupId});
+
+                    allLogEntries.push_back(logEntry);
+
+                    // Check filter once on first line
+                    if(i == 0) { groupPassesFilter = currentFilter(*logEntry); }
+
+                    if(groupPassesFilter) { filteredLogEntries.push_back(logEntry); }
+                }
+            }
+
+            if(screenPointer != nullptr) { screenPointer->PostEvent(ftxui::Event::Custom); }
         }
 
         void fatalError(std::string_view msg) {

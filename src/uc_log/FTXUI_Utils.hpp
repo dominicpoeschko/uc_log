@@ -324,9 +324,39 @@ namespace uc_log { namespace FTXUIGui {
                 void Render(ftxui::Screen& screen) override {
                     auto oldStencil = screen.stencil;
 
-                    screen.stencil.x_max -= overlayWidth_;
+                    // Calculate where content should be clipped (before metadata and indicator)
+                    int const indicatorWidth = 2;   // Space for "→ "
+                    int const contentMaxX    = box_.x_max - overlayWidth_ - indicatorWidth;
+
+                    // Apply stencil to clip content
+                    screen.stencil.x_max = std::min(screen.stencil.x_max, contentMaxX);
                     child_->Render(screen);
                     screen.stencil = oldStencil;
+
+                    // Position for the truncation indicator
+                    int const indicatorX = contentMaxX;
+
+                    // Check if content was actually truncated at the clip edge
+                    for(int y = box_.y_min; y <= box_.y_max; ++y) {
+                        if(y >= 0 && y < screen.dimy() && indicatorX >= 0
+                           && indicatorX < screen.dimx())
+                        {
+                            // Check last column before indicator for content
+                            int const checkX = contentMaxX - 1;
+                            if(checkX >= 0 && checkX < screen.dimx()) {
+                                auto const& edgePixel = screen.PixelAt(checkX, y);
+                                bool const  isTruncated
+                                  = !edgePixel.character.empty() && edgePixel.character != " ";
+
+                                if(isTruncated) {
+                                    screen.PixelAt(indicatorX, y).character = "→";
+                                    screen.PixelAt(indicatorX, y).foreground_color
+                                      = ftxui::Color::Red;
+                                }
+                            }
+                        }
+                    }
+
                     fixedOverlay_->Render(screen);
                 }
 
