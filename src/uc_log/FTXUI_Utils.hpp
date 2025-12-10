@@ -316,9 +316,13 @@ namespace uc_log { namespace FTXUIGui {
                 void ComputeRequirement() override {
                     child_->ComputeRequirement();
                     requirement_ = child_->requirement();
-                    fixedOverlay_->ComputeRequirement();
-                    auto fixReq = fixedOverlay_->requirement();
-                    requirement_.min_x += fixReq.min_x;
+
+                    // Only compute overlay requirements when there's metadata
+                    if(overlayWidth_ > 0) {
+                        fixedOverlay_->ComputeRequirement();
+                        auto fixReq = fixedOverlay_->requirement();
+                        requirement_.min_x += fixReq.min_x;
+                    }
                 }
 
                 void SetBox(ftxui::Box box) override {
@@ -327,77 +331,70 @@ namespace uc_log { namespace FTXUIGui {
                     child_box.x_min -= offset_;
                     child_box.x_max += 10000;
                     child_->SetBox(child_box);
-                    ftxui::Box overlay_box = box;
-                    overlay_box.x_min      = box.x_max - overlayWidth_ + 1;
-                    overlay_box.x_max      = box.x_max;
-                    fixedOverlay_->SetBox(overlay_box);
+
+                    // Only set overlay box when there's actual metadata
+                    if(overlayWidth_ > 0) {
+                        ftxui::Box overlay_box = box;
+                        overlay_box.x_min      = box.x_max - overlayWidth_ + 1;
+                        overlay_box.x_max      = box.x_max;
+                        fixedOverlay_->SetBox(overlay_box);
+                    }
                 }
 
                 void Render(ftxui::Screen& screen) override {
-                    auto oldStencil = screen.stencil;
-
-                    // Calculate where content should be clipped (before metadata and indicator)
-                    int const contentMaxX    = box_.x_max - overlayWidth_;
-                    int const availableWidth = contentMaxX - box_.x_min;
-
-                    // Apply stencil to clip content
-                    screen.stencil.x_max = std::min(screen.stencil.x_max, contentMaxX);
-                    child_->Render(screen);
-                    screen.stencil = oldStencil;
-
-                    // Position for the truncation indicator
-                    int const indicatorX = contentMaxX - 1;
-
-                    // Calculate spacer height to map y coordinates to line indices
                     int const spacerHeight
                       = static_cast<int>(std::min(static_cast<std::size_t>(firstVisibleY_),
                                                   GUI_Constants::MaxScrollLines));
 
-                    // Use actual content width to determine truncation per line
+                    int const contentEdge = box_.x_max - overlayWidth_;
+                    int const fullWidth   = contentEdge - box_.x_min;
+                    int const indicatorX  = overlayWidth_ > 0 ? (contentEdge - 1) : contentEdge;
+                    int const separatorX  = box_.x_max - overlayWidth_;
+
+                    {
+                        auto const oldStencil = screen.stencil;
+                        screen.stencil.x_max  = std::min(screen.stencil.x_max, contentEdge);
+                        child_->Render(screen);
+                        screen.stencil = oldStencil;
+                    }
+
+                    auto inLimit = [](auto value, auto min, auto max) {
+                        return std::clamp<int>(value, min, max) == value;
+                    };
+
                     for(int y = box_.y_min; y <= box_.y_max; ++y) {
-                        // Map y coordinate to actual log line index
                         int const relativeY = y - box_.y_min;
-                        if(relativeY < spacerHeight) {
-                            continue;   // This is part of the hiddenBefore spacer
-                        }
+                        if(relativeY < spacerHeight) { continue; }
 
                         int const lineIndex = relativeY - spacerHeight;
-                        if(y >= 0 && y < screen.dimy() && indicatorX >= 0
-                           && indicatorX < screen.dimx() && lineIndex >= 0
-                           && lineIndex < static_cast<int>(lineContentWidths_.size()))
+
+                        if(!inLimit(lineIndex, 0, static_cast<int>(lineContentWidths_.size()) - 1)
+                           || !inLimit(y, 0, screen.dimy()))
                         {
-                            // Check if this specific line's content exceeds available width
+                            continue;
+                        }
+
+                        if(inLimit(indicatorX, 0, screen.dimx())) {
                             int const contentWidth
                               = lineContentWidths_[static_cast<std::size_t>(lineIndex)];
-                            bool const isTruncated = (contentWidth - offset_) > availableWidth;
+                            bool const isTruncated
+                              = (overlayWidth_ > 0 ? contentWidth - offset_
+                                                   : (contentWidth - offset_) - 1)
+                              > fullWidth;
 
                             if(isTruncated) {
                                 screen.PixelAt(indicatorX, y).character        = "→";
                                 screen.PixelAt(indicatorX, y).foreground_color = ftxui::Color::Red;
                             }
                         }
-                    }
 
-                    // Draw pipe separator at fixed position before metadata column (only on log lines)
-                    int const separatorX = box_.x_max - overlayWidth_;
-                    for(int y = box_.y_min; y <= box_.y_max; ++y) {
-                        // Only draw separator on actual log lines, not spacers or empty area
-                        int const relativeY = y - box_.y_min;
-                        if(relativeY < spacerHeight) {
-                            continue;   // Skip hiddenBefore spacer
-                        }
-
-                        int const lineIndex = relativeY - spacerHeight;
-                        if(lineIndex >= 0 && lineIndex < static_cast<int>(lineContentWidths_.size())
-                           && y >= 0 && y < screen.dimy() && separatorX >= 0
-                           && separatorX < screen.dimx())
-                        {
+                        if(inLimit(separatorX, 0, screen.dimx()) && overlayWidth_ > 0) {
                             screen.PixelAt(separatorX, y).character        = "|";
                             screen.PixelAt(separatorX, y).foreground_color = ftxui::Color::GrayDark;
                         }
                     }
 
-                    fixedOverlay_->Render(screen);
+                    if(overlayWidth_ > 0) { fixedOverlay_->Render(screen); }
                 }
 
             private:
