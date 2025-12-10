@@ -524,7 +524,7 @@ namespace uc_log { namespace FTXUIGui {
                 // Show full prefix for first/single lines
                 if(showSysTime) {
                     elements.push_back(
-                      ftxui::text(detail::to_time_string_with_milliseconds(entry.recv_time))
+                      ftxui::text(to_time_string_with_milliseconds(entry.recv_time))
                       | ftxui::color(Theme::Text::timestamp()));
                     elements.push_back(ftxui::text(" "));
                 }
@@ -590,7 +590,7 @@ namespace uc_log { namespace FTXUIGui {
             ftxui::Elements elements;
             elements.reserve(3);
 
-            elements.push_back(ftxui::text(detail::to_time_string_with_milliseconds(entry.time))
+            elements.push_back(ftxui::text(to_time_string_with_milliseconds(entry.time))
                                | ftxui::color(Theme::Text::timestamp()));
 
             elements.push_back(ftxui::text(" | ") | ftxui::color(Theme::Text::normal()));
@@ -712,7 +712,7 @@ namespace uc_log { namespace FTXUIGui {
             ftxui::Elements elements;
             elements.reserve(3);
 
-            elements.push_back(ftxui::text(detail::to_time_string_with_milliseconds(entry.time))
+            elements.push_back(ftxui::text(to_time_string_with_milliseconds(entry.time))
                                | ftxui::color(Theme::Text::timestamp()));
 
             elements.push_back(ftxui::text(" | ") | ftxui::color(Theme::Text::normal()));

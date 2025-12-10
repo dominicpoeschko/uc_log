@@ -1386,4 +1386,18 @@ namespace uc_log { namespace FTXUIGui {
         return fmt::format("{}B", bytes);
     }
 
+    static std::string
+    to_time_string_with_milliseconds(std::chrono::system_clock::time_point const& value) {
+        //00:00:00.000 in local time
+        auto const seconds = std::chrono::duration_cast<std::chrono::seconds>(
+          value - std::chrono::time_point_cast<std::chrono::minutes>(value));
+        auto const milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
+          value - std::chrono::time_point_cast<std::chrono::seconds>(value));
+        return fmt::format(
+          "{:%H:%M}:{:02}.{:03}",
+          std::chrono::zoned_time{std::chrono::current_zone(), value}.get_local_time(),
+          seconds.count(),
+          milliseconds.count());
+    }
+
 }}   // namespace uc_log::FTXUIGui
