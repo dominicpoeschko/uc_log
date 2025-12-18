@@ -536,32 +536,57 @@ namespace uc_log { namespace FTXUIGui {
                                        std::size_t>& container_)
           : container{container_} {}
 
-        std::size_t size() const override { return container.size(); }
+        std::size_t size() const override {
+            string_storage.clear();   // Clear at start of render pass
+            return container.size();
+        }
 
-        std::string operator[](std::size_t index) const override {
+        std::string_view operator[](std::size_t index) const override {
+            // Always compute fresh string
             auto const iter = std::next(container.begin(), static_cast<int>(index));
 
             auto const& [sourceLocation, count] = *iter;
             auto const& [fileName, lineNumber]  = sourceLocation;
-            return fmt::format("{}:{} -> {}", fileName, lineNumber, count);
+
+            // Store in map and return string_view to stable storage
+            auto [inserted_it, inserted]
+              = string_storage.emplace(index,
+                                       fmt::format("{}:{} -> {}", fileName, lineNumber, count));
+
+            return inserted_it->second;
         }
 
-        std::map<SourceLocation, std::size_t>& container;
+        std::map<SourceLocation, std::size_t>&     container;
+        mutable std::map<std::size_t, std::string> string_storage;
     };
 
     struct EnabledLocationAdapter : ftxui::ConstStringListRef::Adapter {
         EnabledLocationAdapter(std::set<SourceLocation>& container_) : container{container_} {}
 
-        std::size_t size() const override { return container.size(); }
-
-        std::string operator[](std::size_t index) const override {
-            auto const iter = std::next(container.begin(), static_cast<int>(index));
-            auto const& [fileName, lineNumber] = *iter;
-            if(lineNumber == 0) { return fmt::format("{}:all", fileName); }
-            return fmt::format("{}:{}", fileName, lineNumber);
+        std::size_t size() const override {
+            string_storage.clear();   // Clear at start of render pass
+            return container.size();
         }
 
-        std::set<SourceLocation>& container;
+        std::string_view operator[](std::size_t index) const override {
+            // Always compute fresh string
+            auto const iter = std::next(container.begin(), static_cast<int>(index));
+            auto const& [fileName, lineNumber] = *iter;
+
+            std::string formatted;
+            if(lineNumber == 0) {
+                formatted = fmt::format("{}:all", fileName);
+            } else {
+                formatted = fmt::format("{}:{}", fileName, lineNumber);
+            }
+
+            // Store in map and return string_view to stable storage
+            auto [inserted_it, inserted] = string_storage.emplace(index, std::move(formatted));
+            return inserted_it->second;
+        }
+
+        std::set<SourceLocation>&                  container;
+        mutable std::map<std::size_t, std::string> string_storage;
     };
 
     static ftxui::Element ansiColoredTextToFtxui(std::string_view text) {
