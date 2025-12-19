@@ -1,6 +1,7 @@
 #include "jlink/JLink.hpp"
 
 #include "remote_fmt/catalog_helpers.hpp"
+#include "remote_fmt/fmt_wrapper.hpp"
 #include "remote_fmt/parser.hpp"
 #include "uc_log/FTXUIGui.hpp"
 #include "uc_log/JLinkRttReader.hpp"
@@ -12,32 +13,46 @@
 
 #include <CLI/CLI.hpp>
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <fmt/chrono.h>
-#include <fmt/color.h>
-#include <fmt/format.h>
-#include <regex>
+#include <expected>
+#include <filesystem>
+#include <fstream>
+#include <ranges>
 
 namespace {
-std::pair<std::uint32_t,
-          std::string>
-parseMapFileForControlBlockAddress(std::string const& mapFile) {
-    try {
-        std::ifstream file(mapFile);
-        std::string   line;
-        while(std::getline(file, line)) {
-            constexpr std::string_view needle{"::rttControlBlock"};
-            if(!std::ranges::search(line, needle).empty()) {
-                return {static_cast<std::uint32_t>(std::stoull(line, nullptr, 16)), {}};
-            }
-        }
-    } catch(std::exception const& e) {
-        return {0, fmt::format("read mapfile failed: {}", e.what())};
+std::expected<std::uint32_t,
+              std::string>
+parseMapFileForControlBlockAddress(std::filesystem::path const& mapFile) {
+    static constexpr std::string_view needle{"::rttControlBlock"};
+
+    std::ifstream file{mapFile};
+    if(!file) { return std::unexpected(fmt::format("failed to open map file: {:?}", mapFile)); }
+
+    auto const  fileSize = std::filesystem::file_size(mapFile);
+    std::string content;
+    content.resize(fileSize);
+    file.read(content.data(), std::ssize(content));
+
+    auto addressLines = content | std::views::split('\n')
+                      | std::views::transform([](auto&& rng) { return std::string_view{rng}; })
+                      | std::views::filter([](auto&& line) { return line.contains(needle); });
+
+    for(auto addressLine : addressLines) {
+        std::uint32_t address{};
+        auto const [ptr, ec]
+          = std::from_chars(std::data(addressLine),
+                            std::next(std::data(addressLine), std::ssize(addressLine)),
+                            address,
+                            16);
+        if(ec == std::errc{}) { return address; }
     }
-    return {0, "error can't find rtt control block address"};
+
+    return std::unexpected(
+      fmt::format("failed to parse address from file: {:?} lines: {::?}", mapFile, addressLines));
 }
 
 std::string to_iso8601_UTC_string(std::chrono::system_clock::time_point const& value) {
@@ -50,6 +65,72 @@ std::string to_iso8601_UTC_string(std::chrono::system_clock::time_point const& v
       value - std::chrono::time_point_cast<std::chrono::seconds>(value));
     return fmt::format("{:%FT%H:%M}:{:02}.{:03}Z", utc, seconds.count(), milliseconds.count());
 }
+
+struct LogFilePrinter {
+    uc_log::FTXUIGui::Gui& gui;
+    std::filesystem::path  logFilePath;
+    std::ofstream          logFile;
+    bool                   errorShown{false};
+
+    LogFilePrinter(uc_log::FTXUIGui::Gui& gui_,
+                   std::string const&     logDir)
+      : gui{gui_}
+      , logFilePath{std::filesystem::path{logDir}
+                    / fmt::format("{}.rttlog",
+                                  to_iso8601_UTC_string(std::chrono::system_clock::now()))}
+      , logFile{logFilePath} {
+        if(!logFile.is_open()) {
+            fmt::print(stderr, "failed to open logfile: {:?}", logFilePath);
+            std::terminate();
+        }
+        fmt::print(logFile, "recv_time_utc,channel,file,line,function,log_level,uc_time,message\n");
+    }
+
+    void operator()(std::chrono::system_clock::time_point recv_time,
+                    uc_log::detail::LogEntry const&       entry) {
+        if(logFile) {
+            fmt::print(logFile,
+                       "{},{},{:?},{},{:?},{:#},{},{:?}\n",
+                       to_iso8601_UTC_string(recv_time),
+                       entry.channel.channel,
+                       entry.fileName,
+                       entry.line,
+                       entry.functionName,
+                       entry.logLevel,
+                       entry.ucTime.time,
+                       entry.logMsg);
+        } else {
+            if(!errorShown) {
+                gui.errorMessage(fmt::format("error writing logFile: {:?}", logFilePath));
+                errorShown = true;
+            }
+        }
+    }
+};
+
+struct TcpPrinter {
+    TCPSender tcpSender;
+
+    TcpPrinter(uc_log::FTXUIGui::Gui& gui,
+               std::uint16_t          port)
+      : tcpSender{port,
+                  [&gui](auto const& msg) { gui.errorMessage(msg); }} {}
+
+    void operator()(std::chrono::system_clock::time_point recv_time,
+                    uc_log::detail::LogEntry const&       entry) {
+        auto const metrics = uc_log::extractMetrics(recv_time, entry);
+        for(auto const& metric : metrics) {
+            tcpSender.send(
+              fmt::format(R"("/*{{"name":{:?},"scope":{:?},"unit":{:?},"time":{},"value":{}}}*/{})",
+                          metric.first.name,
+                          metric.first.scope,
+                          metric.first.unit,
+                          std::chrono::duration<double>(metric.second.uc_time.time).count(),
+                          metric.second.value,
+                          '\n'));
+        }
+    }
+};
 }   // namespace
 
 int main(int    argc,
@@ -84,86 +165,34 @@ int main(int    argc,
 
     CLI11_PARSE(app, argc, argv)
 
-    std::string const logFileName
-      = logDir + "/" + to_iso8601_UTC_string(std::chrono::system_clock::now()) + ".rttlog";
-    std::ofstream logFile{logFileName};
-    if(!logFile.is_open()) {
-        fmt::print(stderr, "failed to open logfile \"{}\"\n", logFileName);
-        return 1;
-    }
-
     uc_log::FTXUIGui::Gui gui{};
-    auto logFilePrinter = [&gui, &logFile](std::chrono::system_clock::time_point recv_time,
+    LogFilePrinter        logFilePrinter{gui, logDir};
+    TcpPrinter            tcpPrinter{gui, port};
+
+    TimeDelayedQueue queue{
+      [](auto const& entry) { return entry.entry.ucTime; },
+      [&logFilePrinter, &tcpPrinter, &gui](std::chrono::system_clock::time_point recv_time,
                                            uc_log::detail::LogEntry const&       entry) {
-        if(logFile) {
-            std::stringstream quotedMsg;
-            quotedMsg << std::quoted(entry.logMsg, '"', '"');
-
-            std::stringstream quotedFilename;
-            quotedFilename << std::quoted(entry.fileName, '"', '"');
-
-            std::stringstream quotedFunctionName;
-            quotedFunctionName << std::quoted(entry.functionName, '"', '"');
-
-            auto const csvLine = fmt::format("{},{},{},{},{},{:#},{},{}\n",
-                                             to_iso8601_UTC_string(recv_time),
-                                             entry.channel.channel,
-                                             quotedFilename.str(),
-                                             quotedFunctionName.str(),
-                                             entry.line,
-                                             entry.logLevel,
-                                             entry.ucTime.time,
-                                             quotedMsg.str());
-
-            logFile << csvLine;
-        } else {
-            gui.errorMessage("error writing logFile");
-        }
-    };
-    TCPSender tcpSender{port, [&gui](auto msg) { gui.errorMessage(msg); }};
-
-    auto tcpPrinter = [&tcpSender](std::chrono::system_clock::time_point recv_time,
-                                   uc_log::detail::LogEntry const&       entry) {
-        auto const metrics = uc_log::extractMetrics(recv_time, entry);
-        for(auto const& metric : metrics) {
-            tcpSender.send(
-              fmt::format("/*{{\"name\":\"{}\",\"scope\":\"{}\",\"unit\":\"{}\",\"time\":{},"
-                          "\"value\":{}}}*/\n",
-                          metric.first.name,
-                          metric.first.scope,
-                          metric.first.unit,
-                          std::chrono::duration<double>(metric.second.uc_time.time).count(),
-                          metric.second.value));
-        }
-    };
-    auto printer
-      = [&tcpPrinter, &logFilePrinter, &gui](std::chrono::system_clock::time_point recv_time,
-                                             uc_log::detail::LogEntry const&       entry) {
-            tcpPrinter(recv_time, entry);
-            logFilePrinter(recv_time, entry);
-            gui.add(recv_time, entry);
-        };
-    TimeDelayedQueue<uc_log::detail::LogEntry,
-                     decltype([](auto const& entry) { return entry.entry.ucTime; })>
-      queue{printer};
+          logFilePrinter(recv_time, entry);
+          tcpPrinter(recv_time, entry);
+          gui.add(recv_time, entry);
+      }};
 
     JLinkRttReader rttReader{host,
                              device,
                              speed,
                              channels,
                              [&mapFile, &gui]() {
-                                 auto result = parseMapFileForControlBlockAddress(mapFile);
-                                 if(result.second.empty()) { return result.first; }
-                                 gui.fatalError(result.second);
-                                 return decltype(result.first){};
+                                 auto const result = parseMapFileForControlBlockAddress(mapFile);
+                                 if(!result.has_value()) { gui.fatalError(result.error()); }
+                                 return result.value_or(0);
                              },
                              [&hexFile]() { return hexFile; },
                              [&stringConstantsFile, &gui]() {
-                                 auto result = remote_fmt::parseStringConstantsFromJsonFile(
+                                 auto const result = remote_fmt::parseStringConstantsFromJsonFile(
                                    stringConstantsFile);
-                                 if(result.second.empty()) { return result.first; }
-                                 gui.fatalError(result.second);
-                                 return decltype(result.first){};
+                                 if(!result.has_value()) { gui.fatalError(result.error()); }
+                                 return result.value_or({});
                              },
                              [&queue](std::size_t channel, std::string_view msg) {
                                  queue.append(uc_log::detail::LogEntry{channel, msg});
