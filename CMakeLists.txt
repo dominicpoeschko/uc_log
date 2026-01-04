@@ -45,6 +45,8 @@ if(NOT CMAKE_CROSSCOMPILING)
 
     set(Boost_Components filesystem process)
 
+    # Boost fetch strategy: - By default: downloads fast tarball release (99 MB, ~30-60 seconds) - With
+    # -DUSE_GIT_BRANCH=ON: uses git clone (slower, for development)
     set(BOOST_INCLUDE_LIBRARIES ${Boost_Components} asio)
     find_or_fetch_package(
         Boost
@@ -54,7 +56,13 @@ if(NOT CMAKE_CROSSCOMPILING)
         DOWNLOAD_URL
         https://github.com/boostorg/boost/releases/download/boost-1.90.0/boost-1.90.0-cmake.tar.xz
         DOWNLOAD_HASH
-        SHA256=aca59f889f0f32028ad88ba6764582b63c916ce5f77b31289ad19421a96c555f)
+        SHA256=aca59f889f0f32028ad88ba6764582b63c916ce5f77b31289ad19421a96c555f
+        GIT_REPOSITORY
+        https://github.com/boostorg/boost.git
+        GIT_TAG
+        boost-1.90.0
+        GIT_BRANCH
+        master)
 
     set(FMT_INSTALL OFF)
     find_or_fetch_package(
