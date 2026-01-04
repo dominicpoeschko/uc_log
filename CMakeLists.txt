@@ -54,18 +54,48 @@ if(NOT CMAKE_CROSSCOMPILING)
         GIT_REPOSITORY
         https://github.com/boostorg/boost.git
         GIT_TAG
+        boost-1.90.0
+        GIT_BRANCH
         master)
 
     set(FMT_INSTALL OFF)
-    find_or_fetch_package(fmt GIT_REPOSITORY https://github.com/fmtlib/fmt.git GIT_TAG master)
+    find_or_fetch_package(
+        fmt
+        GIT_REPOSITORY
+        https://github.com/fmtlib/fmt.git
+        GIT_TAG
+        12.1.0
+        GIT_BRANCH
+        master)
 
-    find_or_fetch_package(CLI11 GIT_REPOSITORY https://github.com/CLIUtils/CLI11 GIT_TAG main)
+    find_or_fetch_package(
+        CLI11
+        GIT_REPOSITORY
+        https://github.com/CLIUtils/CLI11
+        GIT_TAG
+        v2.6.1
+        GIT_BRANCH
+        main)
 
     set(FTXUI_ENABLE_INSTALL OFF)
     set(FTXUI_QUIET ON)
-    find_or_fetch_package(ftxui GIT_REPOSITORY https://github.com/ArthurSonzogni/ftxui GIT_TAG main)
+    find_or_fetch_package(
+        ftxui
+        GIT_REPOSITORY
+        https://github.com/ArthurSonzogni/ftxui
+        GIT_TAG
+        3330de961ccdbcbc40207b43b4437eb1273677b7
+        GIT_BRANCH
+        main)
 
-    find_or_fetch_package(magic_enum GIT_REPOSITORY https://github.com/Neargye/magic_enum GIT_TAG master)
+    find_or_fetch_package(
+        magic_enum
+        GIT_REPOSITORY
+        https://github.com/Neargye/magic_enum
+        GIT_TAG
+        v0.9.7
+        GIT_BRANCH
+        master)
 
     add_subdirectory(jlink)
 

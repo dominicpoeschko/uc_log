@@ -130,6 +130,38 @@ namespace uc_log { namespace FTXUIGui {
 
         enum class BuildStatus : std::uint8_t { Idle, Running, Success, Failed };
 
+        struct Statistics {
+            std::chrono::system_clock::time_point sessionStartTime{
+              std::chrono::system_clock::now()};
+
+            // JLink connection statistics
+            std::size_t jlinkReconnectionCount{0};
+            std::size_t jlinkDisconnectionCount{0};
+            bool        lastJLinkState{false};
+
+            // Build statistics
+            std::size_t totalBuildsStarted{0};
+            std::size_t successfulBuilds{0};
+            std::size_t failedBuilds{0};
+            std::size_t cancelledBuilds{0};
+
+            // Target control statistics
+            std::size_t flashCount{0};
+            std::size_t resetRequestCount{0};
+            std::size_t detectedResetCount{0};
+
+            // Log statistics
+            std::size_t                           peakLogsPerSecond{0};
+            std::chrono::system_clock::time_point lastLogRateUpdate{
+              std::chrono::system_clock::now()};
+            std::size_t                                     logsInCurrentSecond{0};
+            std::optional<uc_log::detail::LogEntry::UcTime> lastUcTime;
+
+            // Data statistics
+            std::size_t maxBytesRead{0};
+            std::size_t maxOverflowCount{0};
+        };
+
         static constexpr auto NoFilter = [](GuiLogEntry const&) { return true; };
 
         std::mutex mutex;
@@ -188,6 +220,8 @@ namespace uc_log { namespace FTXUIGui {
         int selectedTab{};
 
         int selectedMetricTab{};
+
+        Statistics statistics;
 
         int                      selectedResetType;
         std::vector<std::string> resetTypeOptions{"0 - Normal", "1 - Core", "2 - ResetPin"};
@@ -337,6 +371,7 @@ namespace uc_log { namespace FTXUIGui {
             buildOutput.clear();
 
             buildStatus = BuildStatus::Running;
+            ++statistics.totalBuildsStarted;
 
             try {
                 buildIoContext = std::make_unique<boost::asio::io_context>();
@@ -428,6 +463,11 @@ namespace uc_log { namespace FTXUIGui {
                             std::lock_guard<std::mutex> const lock{mutex};
                             buildStatus
                               = (processExitCode == 0) ? BuildStatus::Success : BuildStatus::Failed;
+                            if(processExitCode == 0) {
+                                ++statistics.successfulBuilds;
+                            } else {
+                                ++statistics.failedBuilds;
+                            }
                         }
 
                         if(processExitCode == 0 && flashAfterBuild.exchange(false)) {
@@ -439,6 +479,7 @@ namespace uc_log { namespace FTXUIGui {
                         {
                             std::lock_guard<std::mutex> const lock{mutex};
                             buildStatus = BuildStatus::Failed;
+                            ++statistics.failedBuilds;
                         }
 
                         if(flashAfterBuild.exchange(false)) {
@@ -451,6 +492,7 @@ namespace uc_log { namespace FTXUIGui {
                 }};
             } catch(std::exception const& e) {
                 buildStatus = BuildStatus::Failed;
+                ++statistics.failedBuilds;
                 addBuildOutputGui(fmt::format("❌ Build error: {}", e.what()), true);
             }
         }
@@ -459,6 +501,60 @@ namespace uc_log { namespace FTXUIGui {
             if(buildStatus == BuildStatus::Running || buildThread.joinable()) { return; }
             flashAfterBuild = true;
             executeBuild();
+        }
+
+        template<typename Reader>
+        void resetTargetWithStats(Reader& rttReader) {
+            ++statistics.resetRequestCount;
+            rttReader.resetTarget();
+        }
+
+        template<typename Reader>
+        void flashWithStats(Reader& rttReader) {
+            ++statistics.flashCount;
+            rttReader.flash();
+        }
+
+        template<typename Reader>
+        void updateJLinkStatistics(Reader& rttReader) {
+            auto const rttStatus         = rttReader.getStatus();
+            bool const currentJLinkState = (rttStatus.isRunning != 0);
+
+            // Track state transitions
+            if(currentJLinkState && !statistics.lastJLinkState) {
+                // Transition from disconnected to connected
+                ++statistics.jlinkReconnectionCount;
+            } else if(!currentJLinkState && statistics.lastJLinkState) {
+                // Transition from connected to disconnected
+                ++statistics.jlinkDisconnectionCount;
+            }
+
+            statistics.lastJLinkState = currentJLinkState;
+
+            // Update max values
+            if(rttStatus.numBytesRead > statistics.maxBytesRead) {
+                statistics.maxBytesRead = rttStatus.numBytesRead;
+            }
+            if(static_cast<std::size_t>(rttStatus.hostOverflowCount) > statistics.maxOverflowCount)
+            {
+                statistics.maxOverflowCount = static_cast<std::size_t>(rttStatus.hostOverflowCount);
+            }
+        }
+
+        void updateLogRateStatistics() {
+            auto const now     = std::chrono::system_clock::now();
+            auto const elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+              now - statistics.lastLogRateUpdate);
+
+            if(elapsed.count() >= 1) {
+                if(statistics.logsInCurrentSecond > statistics.peakLogsPerSecond) {
+                    statistics.peakLogsPerSecond = statistics.logsInCurrentSecond;
+                }
+                statistics.logsInCurrentSecond = 0;
+                statistics.lastLogRateUpdate   = now;
+            }
+
+            ++statistics.logsInCurrentSecond;
         }
 
         std::string processLogMessage(std::string const& originalMsg) const {
@@ -1388,7 +1484,8 @@ namespace uc_log { namespace FTXUIGui {
                    ftxui::text("  5       - Debug tab"),
                    ftxui::text("  6       - Metrics tab"),
                    ftxui::text("  7       - Status tab"),
-                   ftxui::text("  8       - Help tab"),
+                   ftxui::text("  8       - Statistics tab"),
+                   ftxui::text("  9       - Help tab"),
                    ftxui::text(""),
                    ftxui::text("🔧 Actions") | ftxui::bold | ftxui::color(Theme::Header::accent()),
                    ftxui::text("  q       - Quit application"),
@@ -1405,11 +1502,127 @@ namespace uc_log { namespace FTXUIGui {
             });
         }
 
+        ftxui::Component getStatisticsComponent() {
+            auto resetButton = ftxui::Button(
+              "🔄 Reset Statistics",
+              [this]() { statistics = Statistics{}; },
+              createButtonStyle(Theme::Button::Background::reset(), Theme::Button::text()));
+
+            return ftxui::Container::Vertical(
+              {resetButton,
+               ftxui::Renderer([]() { return ftxui::separator(); }),
+               ftxui::Renderer([this]() {
+                   auto const now    = std::chrono::system_clock::now();
+                   auto const uptime = std::chrono::duration_cast<std::chrono::seconds>(
+                     now - statistics.sessionStartTime);
+                   auto const hours   = uptime.count() / 3600;
+                   auto const minutes = (uptime.count() % 3600) / 60;
+                   auto const seconds = uptime.count() % 60;
+
+                   return ftxui::vbox(
+                     {ftxui::text("📊 Session Statistics") | ftxui::bold
+                        | ftxui::color(Theme::Header::primary()) | ftxui::center,
+                      ftxui::separator(),
+                      ftxui::text(""),
+
+                      ftxui::text("⏱️ Session Information") | ftxui::bold
+                        | ftxui::color(Theme::Header::accent()),
+                      ftxui::hbox({ftxui::text("  Session Uptime: ") | ftxui::bold,
+                                   ftxui::text(fmt::format("{}h {}m {}s", hours, minutes, seconds))
+                                     | ftxui::color(Theme::Status::info())}),
+                      ftxui::text(""),
+
+                      ftxui::text("🔗 JLink Connection") | ftxui::bold
+                        | ftxui::color(Theme::Header::accent()),
+                      ftxui::hbox({ftxui::text("  Reconnections: ") | ftxui::bold,
+                                   ftxui::text(fmt::format("{}", statistics.jlinkReconnectionCount))
+                                     | ftxui::color(statistics.jlinkReconnectionCount > 0
+                                                      ? Theme::Status::warning()
+                                                      : Theme::Status::success())}),
+                      ftxui::hbox(
+                        {ftxui::text("  Disconnections: ") | ftxui::bold,
+                         ftxui::text(fmt::format("{}", statistics.jlinkDisconnectionCount))
+                           | ftxui::color(statistics.jlinkDisconnectionCount > 0
+                                            ? Theme::Status::warning()
+                                            : Theme::Status::success())}),
+                      ftxui::hbox(
+                        {ftxui::text("  Current State: ") | ftxui::bold,
+                         ftxui::text(statistics.lastJLinkState ? "Connected ✓" : "Disconnected ✗")
+                           | ftxui::color(statistics.lastJLinkState ? Theme::Status::success()
+                                                                    : Theme::Status::error())}),
+                      ftxui::text(""),
+
+                      ftxui::text("🔨 Build Statistics") | ftxui::bold
+                        | ftxui::color(Theme::Header::accent()),
+                      ftxui::hbox({ftxui::text("  Total Builds: ") | ftxui::bold,
+                                   ftxui::text(fmt::format("{}", statistics.totalBuildsStarted))
+                                     | ftxui::color(Theme::Status::info())}),
+                      ftxui::hbox({ftxui::text("  Successful: ") | ftxui::bold,
+                                   ftxui::text(fmt::format("{}", statistics.successfulBuilds))
+                                     | ftxui::color(Theme::Status::success())}),
+                      ftxui::hbox(
+                        {ftxui::text("  Failed: ") | ftxui::bold,
+                         ftxui::text(fmt::format("{}", statistics.failedBuilds))
+                           | ftxui::color(statistics.failedBuilds > 0 ? Theme::Status::error()
+                                                                      : Theme::Status::success())}),
+                      ftxui::hbox(
+                        {ftxui::text("  Success Rate: ") | ftxui::bold,
+                         ftxui::text(
+                           statistics.totalBuildsStarted > 0
+                             ? fmt::format("{:.1f}%",
+                                           100.0 * static_cast<double>(statistics.successfulBuilds)
+                                             / static_cast<double>(statistics.totalBuildsStarted))
+                             : "N/A")
+                           | ftxui::color(Theme::Status::info())}),
+                      ftxui::text(""),
+
+                      ftxui::text("🎯 Target Control") | ftxui::bold
+                        | ftxui::color(Theme::Header::accent()),
+                      ftxui::hbox({ftxui::text("  Flash Count: ") | ftxui::bold,
+                                   ftxui::text(fmt::format("{}", statistics.flashCount))
+                                     | ftxui::color(Theme::Status::info())}),
+                      ftxui::hbox({ftxui::text("  Reset Requests: ") | ftxui::bold,
+                                   ftxui::text(fmt::format("{}", statistics.resetRequestCount))
+                                     | ftxui::color(Theme::Status::info())}),
+                      ftxui::hbox({ftxui::text("  Resets Detected: ") | ftxui::bold,
+                                   ftxui::text(fmt::format("{}", statistics.detectedResetCount))
+                                     | ftxui::color(statistics.detectedResetCount > 0
+                                                      ? Theme::Status::warning()
+                                                      : Theme::Status::info())}),
+                      ftxui::text(""),
+
+                      ftxui::text("📝 Log Statistics") | ftxui::bold
+                        | ftxui::color(Theme::Header::accent()),
+                      ftxui::hbox({ftxui::text("  Total Logs: ") | ftxui::bold,
+                                   ftxui::text(FTXUIGui::formatNumber(
+                                     static_cast<std::uint32_t>(originalLogCount)))
+                                     | ftxui::color(Theme::Status::info())}),
+                      ftxui::hbox(
+                        {ftxui::text("  Peak Rate: ") | ftxui::bold,
+                         ftxui::text(fmt::format("{} logs/sec", statistics.peakLogsPerSecond))
+                           | ftxui::color(Theme::Status::warning())}),
+                      ftxui::text(""),
+
+                      ftxui::text("📡 Data Transfer") | ftxui::bold
+                        | ftxui::color(Theme::Header::accent()),
+                      ftxui::hbox({ftxui::text("  Max Bytes Read: ") | ftxui::bold,
+                                   ftxui::text(FTXUIGui::formatBytes(
+                                     static_cast<std::uint32_t>(statistics.maxBytesRead)))
+                                     | ftxui::color(Theme::Status::info())}),
+                      ftxui::hbox({ftxui::text("  Max Overflows: ") | ftxui::bold,
+                                   ftxui::text(FTXUIGui::formatNumber(
+                                     static_cast<std::uint32_t>(statistics.maxOverflowCount)))
+                                     | ftxui::color(statistics.maxOverflowCount > 0
+                                                      ? Theme::Status::error()
+                                                      : Theme::Status::success())})});
+               })});
+        }
+
         template<typename Reader>
         ftxui::Component getDebuggerComponent(Reader& rttReader) {
             auto resetTargetBtn = ftxui::Button(
               "🔄 Reset Target [r]",
-              [&rttReader]() { rttReader.resetTarget(); },
+              [this, &rttReader]() { resetTargetWithStats(rttReader); },
               createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
 
             auto resetDebuggerBtn = ftxui::Button(
@@ -1419,7 +1632,7 @@ namespace uc_log { namespace FTXUIGui {
 
             auto flashBtn = ftxui::Button(
               "⚡ Flash Target [f]",
-              [&rttReader]() { rttReader.flash(); },
+              [this, &rttReader]() { flashWithStats(rttReader); },
               createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
 
             auto goBtn = ftxui::Button(
@@ -1552,12 +1765,12 @@ namespace uc_log { namespace FTXUIGui {
 
             auto resetBtn = ftxui::Button(
               "[r]eset",
-              [&rttReader]() { rttReader.resetTarget(); },
+              [this, &rttReader]() { resetTargetWithStats(rttReader); },
               createButtonStyle(Theme::Button::Background::reset(), Theme::Button::text()));
 
             auto flashBtn = ftxui::Button(
               "[f]lash",
-              [&rttReader]() { rttReader.flash(); },
+              [this, &rttReader]() { flashWithStats(rttReader); },
               createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
 
             auto buildBtn = ftxui::Button(
@@ -1654,14 +1867,15 @@ namespace uc_log { namespace FTXUIGui {
         template<typename Reader>
         ftxui::Component getTabComponent(Reader& rttReader) {
             auto tabs = generateTabsComponent({
-              {   "📄 Logs",                getLogComponent()},
-              {  "🔨 Build",              getBuildComponent()},
-              { "🔍 Filter",             getFilterComponent()},
-              {"🎨 Display", getAppearanceSettingsComponent()},
-              {  "🔧 Debug",  getDebuggerComponent(rttReader)},
-              {"📈 Metrics",             getMetricComponent()},
-              { "💬 Status",             getStatusComponent()},
-              {   "❓ Help",               getHelpComponent()}
+              {      "📄 Logs",                getLogComponent()},
+              {     "🔨 Build",              getBuildComponent()},
+              {    "🔍 Filter",             getFilterComponent()},
+              {   "🎨 Display", getAppearanceSettingsComponent()},
+              {     "🔧 Debug",  getDebuggerComponent(rttReader)},
+              {   "📈 Metrics",             getMetricComponent()},
+              {    "💬 Status",             getStatusComponent()},
+              {"📊 Statistics",         getStatisticsComponent()},
+              {      "❓ Help",               getHelpComponent()}
             });
 
             return ftxui::Container::Vertical({getStatusLineComponent(rttReader),
@@ -1676,6 +1890,19 @@ namespace uc_log { namespace FTXUIGui {
             std::lock_guard<std::mutex> const lock{mutex};
 
             ++originalLogCount;
+            updateLogRateStatistics();
+
+            // Detect target reset by checking if ucTime went backwards significantly
+            if(statistics.lastUcTime.has_value()) {
+                // If new time is less than last time, it's a backwards jump
+                if(entry.ucTime < statistics.lastUcTime.value()) {
+                    // Calculate how far backwards it went
+                    auto const timeDiff = statistics.lastUcTime.value().time - entry.ucTime.time;
+                    // If it went back by more than 1 second, consider it a reset
+                    if(timeDiff > std::chrono::seconds{1}) { ++statistics.detectedResetCount; }
+                }
+            }
+            statistics.lastUcTime = entry.ucTime;
 
             auto const metrics = uc_log::extractMetrics(recv_time, entry);
             for(auto const& metric : metrics) {
@@ -1826,17 +2053,21 @@ namespace uc_log { namespace FTXUIGui {
                             return true;
                         }
                         if(event == ftxui::Event::Character('8')) {
-                            selectedTab = 7;   // Help
+                            selectedTab = 7;   // Statistics
+                            return true;
+                        }
+                        if(event == ftxui::Event::Character('9')) {
+                            selectedTab = 8;   // Help
                             return true;
                         }
 
                         // Action hotkeys
                         if(event == ftxui::Event::Character('r')) {
-                            rttReader.resetTarget();
+                            resetTargetWithStats(rttReader);
                             return true;
                         }
                         if(event == ftxui::Event::Character('f')) {
-                            rttReader.flash();
+                            flashWithStats(rttReader);
                             return true;
                         }
                         if(event == ftxui::Event::Character('b')) {
@@ -1860,6 +2091,7 @@ namespace uc_log { namespace FTXUIGui {
             while(!loop.HasQuitted()) {
                 {
                     std::lock_guard<std::mutex> const lock{mutex};
+                    updateJLinkStatistics(rttReader);
                     loop.RunOnce();
                     if(screenPointer == nullptr) { screenPointer = &screen; }
                 }
@@ -1868,7 +2100,7 @@ namespace uc_log { namespace FTXUIGui {
                     if(buildThread.joinable()) { buildThread.join(); }
                     callJoin = false;
                 }
-                if(triggerFlashNow.exchange(false)) { rttReader.flash(); }
+                if(triggerFlashNow.exchange(false)) { flashWithStats(rttReader); }
             }
             {
                 std::lock_guard<std::mutex> const lock{mutex};
