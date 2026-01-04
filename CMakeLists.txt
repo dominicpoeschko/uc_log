@@ -43,11 +43,9 @@ if(NOT CMAKE_CROSSCOMPILING)
 
     find_package(Threads REQUIRED)
 
-    set(Boost_Components filesystem process)
+    set(Boost_Components filesystem process asio)
 
-    # Boost fetch strategy: - By default: downloads fast tarball release (99 MB, ~30-60 seconds) - With
-    # -DUSE_GIT_BRANCH=ON: uses git clone (slower, for development)
-    set(BOOST_INCLUDE_LIBRARIES ${Boost_Components} asio)
+    set(BOOST_INCLUDE_LIBRARIES ${Boost_Components})
     find_or_fetch_package(
         Boost
         CONFIG
