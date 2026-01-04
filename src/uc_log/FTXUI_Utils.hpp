@@ -1395,20 +1395,20 @@ namespace uc_log { namespace FTXUIGui {
         }
     };
 
-    static std::string formatNumber(std::uint32_t num) {
+    static inline std::string formatNumber(std::uint32_t num) {
         if(num >= 1000000) { return fmt::format("{}M", num / 1000000); }
         if(num >= 1000) { return fmt::format("{}K", num / 1000); }
         return std::to_string(num);
     }
 
-    static std::string formatBytes(std::uint32_t bytes) {
+    static inline std::string formatBytes(std::uint32_t bytes) {
         if(bytes >= 1073741824) { return fmt::format("{:.1f}GB", bytes / 1073741824.0); }
         if(bytes >= 1048576) { return fmt::format("{:.1f}MB", bytes / 1048576.0); }
         if(bytes >= 1024) { return fmt::format("{:.1f}KB", bytes / 1024.0); }
         return fmt::format("{}B", bytes);
     }
 
-    static std::string
+    static inline std::string
     to_time_string_with_milliseconds(std::chrono::system_clock::time_point const& value) {
         //00:00:00.000 in local time
         auto const seconds = std::chrono::duration_cast<std::chrono::seconds>(

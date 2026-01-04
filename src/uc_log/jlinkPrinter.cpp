@@ -86,8 +86,8 @@ struct LogFilePrinter {
         fmt::print(logFile, "recv_time_utc,channel,file,line,function,log_level,uc_time,message\n");
     }
 
-    void operator()(std::chrono::system_clock::time_point recv_time,
-                    uc_log::detail::LogEntry const&       entry) {
+    void add(std::chrono::system_clock::time_point recv_time,
+             uc_log::detail::LogEntry const&       entry) {
         if(logFile) {
             fmt::print(logFile,
                        "{},{},{:?},{},{:?},{:#},{},{:?}\n",
@@ -116,8 +116,8 @@ struct TcpPrinter {
       : tcpSender{port,
                   [&gui](auto const& msg) { gui.errorMessage(msg); }} {}
 
-    void operator()(std::chrono::system_clock::time_point recv_time,
-                    uc_log::detail::LogEntry const&       entry) {
+    void add(std::chrono::system_clock::time_point recv_time,
+             uc_log::detail::LogEntry const&       entry) {
         auto const metrics = uc_log::extractMetrics(recv_time, entry);
         for(auto const& metric : metrics) {
             tcpSender.send(
@@ -147,6 +147,7 @@ int main(int    argc,
     std::string   logDir{};
     std::string   buildCommand{};
     std::uint16_t port{};
+    bool          disableUi{false};
 
     app.add_option("--metrics_port", port, "tcp for metrics")->required();
     app.add_option("--speed", speed, "swd speed")->required();
@@ -162,6 +163,7 @@ int main(int    argc,
       ->required()
       ->check(CLI::ExistingDirectory);
     app.add_option("--host", host, "jlink host");
+    app.add_flag("--disable_ui", disableUi, "disable ui and just log to file and tcp");
 
     CLI11_PARSE(app, argc, argv)
 
@@ -173,8 +175,8 @@ int main(int    argc,
       [](auto const& entry) { return entry.entry.ucTime; },
       [&logFilePrinter, &tcpPrinter, &gui](std::chrono::system_clock::time_point recv_time,
                                            uc_log::detail::LogEntry const&       entry) {
-          logFilePrinter(recv_time, entry);
-          tcpPrinter(recv_time, entry);
+          logFilePrinter.add(recv_time, entry);
+          tcpPrinter.add(recv_time, entry);
           gui.add(recv_time, entry);
       }};
 
@@ -202,5 +204,14 @@ int main(int    argc,
                              [&gui](std::string_view msg) { gui.toolStatusMessage(msg); },
                              [&gui](std::string_view msg) { gui.toolErrorMessage(msg); }};
 
-    return gui.run(rttReader, buildCommand);
+    if(!disableUi) {
+        return gui.run(rttReader, buildCommand);
+    } else {
+        static std::atomic<bool> shutdown_requested(false);
+        std::signal(SIGINT, [](int signal) {
+            if(signal == SIGINT) { shutdown_requested = true; }
+        });
+        while(!shutdown_requested) { std::this_thread::sleep_for(std::chrono::milliseconds(100)); }
+        return 0;
+    }
 }
