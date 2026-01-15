@@ -20,6 +20,10 @@ set(UC_LOG_BUILD_TEST_GUI
     false
     CACHE BOOL "build the test gui")
 
+set(UC_LOG_BUILD_PRINTER
+    true
+    CACHE BOOL "build the uc_log_printer host tool")
+
 add_subdirectory(rtt)
 add_subdirectory(remote_fmt)
 
@@ -29,120 +33,124 @@ target_link_libraries(uc_log INTERFACE rtt::rtt remote_fmt::remote_fmt)
 
 add_library(uc_log::uc_log ALIAS uc_log)
 
-if(NOT CMAKE_CROSSCOMPILING)
+if(UC_LOG_BUILD_PRINTER)
 
-    project(
-        uc_log
-        VERSION 0.1.0
-        DESCRIPTION "Microcontroller logging system with RTT and Remote FMT"
-        HOMEPAGE_URL "https://github.com/dominicpoeschko/uc_log"
-        LANGUAGES CXX)
+    if(NOT CMAKE_CROSSCOMPILING)
 
-    include(cmake_helpers/BuildOptions.cmake)
-    include(cmake_helpers/FindOrFetch.cmake)
+        project(
+            uc_log
+            VERSION 0.1.0
+            DESCRIPTION "Microcontroller logging system with RTT and Remote FMT"
+            HOMEPAGE_URL "https://github.com/dominicpoeschko/uc_log"
+            LANGUAGES CXX)
 
-    find_package(Threads REQUIRED)
+        include(cmake_helpers/BuildOptions.cmake)
+        include(cmake_helpers/FindOrFetch.cmake)
 
-    set(Boost_Components filesystem process asio)
+        find_package(Threads REQUIRED)
 
-    set(BOOST_INCLUDE_LIBRARIES ${Boost_Components})
-    find_or_fetch_package(
-        Boost
-        CONFIG
-        COMPONENTS
-        ${Boost_Components}
-        DOWNLOAD_URL
-        https://github.com/boostorg/boost/releases/download/boost-1.90.0/boost-1.90.0-cmake.tar.xz
-        DOWNLOAD_HASH
-        SHA256=aca59f889f0f32028ad88ba6764582b63c916ce5f77b31289ad19421a96c555f
-        GIT_REPOSITORY
-        https://github.com/boostorg/boost.git
-        GIT_TAG
-        boost-1.90.0
-        GIT_BRANCH
-        master)
+        set(Boost_Components filesystem process asio)
 
-    set(FMT_INSTALL OFF)
-    find_or_fetch_package(
-        fmt
-        GIT_REPOSITORY
-        https://github.com/fmtlib/fmt.git
-        GIT_TAG
-        12.1.0
-        GIT_BRANCH
-        master)
+        set(BOOST_INCLUDE_LIBRARIES ${Boost_Components})
+        find_or_fetch_package(
+            Boost
+            CONFIG
+            COMPONENTS
+            ${Boost_Components}
+            DOWNLOAD_URL
+            https://github.com/boostorg/boost/releases/download/boost-1.90.0/boost-1.90.0-cmake.tar.xz
+            DOWNLOAD_HASH
+            SHA256=aca59f889f0f32028ad88ba6764582b63c916ce5f77b31289ad19421a96c555f
+            GIT_REPOSITORY
+            https://github.com/boostorg/boost.git
+            GIT_TAG
+            boost-1.90.0
+            GIT_BRANCH
+            master)
 
-    find_or_fetch_package(
-        CLI11
-        GIT_REPOSITORY
-        https://github.com/CLIUtils/CLI11
-        GIT_TAG
-        v2.6.1
-        GIT_BRANCH
-        main)
+        set(FMT_INSTALL OFF)
+        find_or_fetch_package(
+            fmt
+            GIT_REPOSITORY
+            https://github.com/fmtlib/fmt.git
+            GIT_TAG
+            12.1.0
+            GIT_BRANCH
+            master)
 
-    set(FTXUI_ENABLE_INSTALL OFF)
-    set(FTXUI_QUIET ON)
-    find_or_fetch_package(
-        ftxui
-        GIT_REPOSITORY
-        https://github.com/ArthurSonzogni/ftxui
-        GIT_TAG
-        3330de961ccdbcbc40207b43b4437eb1273677b7
-        GIT_BRANCH
-        main)
+        find_or_fetch_package(
+            CLI11
+            GIT_REPOSITORY
+            https://github.com/CLIUtils/CLI11
+            GIT_TAG
+            v2.6.1
+            GIT_BRANCH
+            main)
 
-    find_or_fetch_package(
-        magic_enum
-        GIT_REPOSITORY
-        https://github.com/Neargye/magic_enum
-        GIT_TAG
-        v0.9.7
-        GIT_BRANCH
-        master)
+        set(FTXUI_ENABLE_INSTALL OFF)
+        set(FTXUI_QUIET ON)
+        find_or_fetch_package(
+            ftxui
+            GIT_REPOSITORY
+            https://github.com/ArthurSonzogni/ftxui
+            GIT_TAG
+            3330de961ccdbcbc40207b43b4437eb1273677b7
+            GIT_BRANCH
+            main)
 
-    add_subdirectory(jlink)
+        find_or_fetch_package(
+            magic_enum
+            GIT_REPOSITORY
+            https://github.com/Neargye/magic_enum
+            GIT_TAG
+            v0.9.7
+            GIT_BRANCH
+            master)
 
-    add_executable(uc_log_printer src/uc_log/jlinkPrinter.cpp)
+        add_subdirectory(jlink)
 
-    list(TRANSFORM Boost_Components PREPEND "Boost::")
-    target_link_libraries(
-        uc_log_printer
-        PRIVATE remote_fmt::parser
+        add_executable(uc_log_printer src/uc_log/jlinkPrinter.cpp)
+
+        list(TRANSFORM Boost_Components PREPEND "Boost::")
+        target_link_libraries(
+            uc_log_printer
+            PRIVATE remote_fmt::parser
+                    fmt::fmt
+                    Threads::Threads
+                    uc_log::uc_log
+                    jlink::jlink
+                    CLI11::CLI11
+                    atomic
+                    ${Boost_Components}
+                    ftxui::screen
+                    ftxui::dom
+                    ftxui::component
+                    magic_enum::magic_enum)
+
+        target_add_default_build_options(uc_log_printer PRIVATE)
+
+        if(${UC_LOG_BUILD_TEST_GUI})
+            add_executable(uc_log_gui_test src/uc_log/gui_test.cpp)
+            target_link_libraries(
+                uc_log_gui_test
+                remote_fmt::parser
                 fmt::fmt
                 Threads::Threads
                 uc_log::uc_log
-                jlink::jlink
                 CLI11::CLI11
-                atomic
                 ${Boost_Components}
                 ftxui::screen
                 ftxui::dom
-                ftxui::component
-                magic_enum::magic_enum)
+                ftxui::component)
 
-    target_add_default_build_options(uc_log_printer PRIVATE)
-
-    if(${UC_LOG_BUILD_TEST_GUI})
-        add_executable(uc_log_gui_test src/uc_log/gui_test.cpp)
-        target_link_libraries(
-            uc_log_gui_test
-            remote_fmt::parser
-            fmt::fmt
-            Threads::Threads
-            uc_log::uc_log
-            CLI11::CLI11
-            ${Boost_Components}
-            ftxui::screen
-            ftxui::dom
-            ftxui::component)
-
-        target_add_default_build_options(uc_log_gui_test PUBLIC)
+            target_add_default_build_options(uc_log_gui_test PUBLIC)
+        endif()
+    else()
+        include(cmake_helpers/HostBuild.cmake)
+        configure_host_build(uc_log_printer)
     endif()
-else()
-    include(cmake_helpers/HostBuild.cmake)
-    configure_host_build(uc_log_printer)
-endif()
+
+endif() # UC_LOG_BUILD_PRINTER
 
 function(target_add_uc_log_rtt_jlink targetname)
     set(options VERBOSE)
@@ -199,6 +207,13 @@ function(target_add_uc_log_rtt_jlink targetname)
         set(PARSED_ARGS_METRICS_PORT 34565)
     elseif(${PARSED_ARGS_METRICS_PORT} LESS 1024 OR PARSED_ARGS_METRICS_PORT GREATER 65535)
         message(WARNING "METRICS_PORT ${PARSED_ARGS_METRICS_PORT} may be out of valid range (1024-65535)")
+    endif()
+
+    target_generate_string_constants(${targetname})
+    target_generate_ssproj(${targetname})
+
+    if(NOT UC_LOG_BUILD_PRINTER)
+        return()
     endif()
 
     get_target_property(build_dir uc_log_printer BINARY_DIR)
@@ -262,9 +277,6 @@ function(target_add_uc_log_rtt_jlink targetname)
         USES_TERMINAL
         COMMAND ${command}
         DEPENDS ${targetname} uc_log_printer ${uc_log_printer_bin})
-
-    target_generate_string_constants(${targetname})
-    target_generate_ssproj(${targetname})
 
     add_dependencies(${targetname} uc_log_printer)
 
