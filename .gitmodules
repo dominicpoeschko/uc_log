@@ -1,9 +1,6 @@
 [submodule "remote_fmt"]
 	path = remote_fmt
 	url = https://github.com/dominicpoeschko/remote_fmt.git
-[submodule "cmake_helpers"]
-	path = cmake_helpers
-	url = https://github.com/dominicpoeschko/cmake_helpers.git
 [submodule "rtt"]
 	path = rtt
 	url = https://github.com/dominicpoeschko/rtt.git

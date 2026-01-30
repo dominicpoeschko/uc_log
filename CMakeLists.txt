@@ -35,6 +35,13 @@ add_library(uc_log::uc_log ALIAS uc_log)
 
 if(UC_LOG_BUILD_PRINTER)
 
+    include(FetchContent)
+    FetchContent_Declare(
+        cmake_helpers
+        GIT_REPOSITORY https://github.com/dominicpoeschko/cmake_helpers.git
+        GIT_TAG master)
+    FetchContent_MakeAvailable(cmake_helpers)
+
     if(NOT CMAKE_CROSSCOMPILING)
 
         project(
@@ -44,8 +51,8 @@ if(UC_LOG_BUILD_PRINTER)
             HOMEPAGE_URL "https://github.com/dominicpoeschko/uc_log"
             LANGUAGES CXX)
 
-        include(cmake_helpers/BuildOptions.cmake)
-        include(cmake_helpers/FindOrFetch.cmake)
+        include(${cmake_helpers_SOURCE_DIR}/BuildOptions.cmake)
+        include(${cmake_helpers_SOURCE_DIR}/FindOrFetch.cmake)
 
         find_package(Threads REQUIRED)
 
@@ -146,7 +153,7 @@ if(UC_LOG_BUILD_PRINTER)
             target_add_default_build_options(uc_log_gui_test PUBLIC)
         endif()
     else()
-        include(cmake_helpers/HostBuild.cmake)
+        include(${cmake_helpers_SOURCE_DIR}/HostBuild.cmake)
         configure_host_build(uc_log_printer)
     endif()
 
