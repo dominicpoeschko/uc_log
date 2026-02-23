@@ -646,8 +646,8 @@ namespace uc_log { namespace FTXUIGui {
                 elements.push_back(ftxui::text(std::string(indentWidth, ' ')));
             }
 
-            // Message is always shown (already processed in add())
-            elements.push_back(ansiColoredTextToFtxui(entry.logEntry.logMsg));
+            // Message is processed at render time so toggles apply to existing entries
+            elements.push_back(ansiColoredTextToFtxui(processLogMessage(entry.logEntry.logMsg)));
 
             auto scrollableContent = ftxui::hbox(elements) | ftxui::flex;
 
@@ -1909,19 +1909,15 @@ namespace uc_log { namespace FTXUIGui {
                 metricEntries[metric.first].push_back(metric.second);
             }
 
-            std::string const processedMsg = processLogMessage(entry.logMsg);
             std::size_t const newlineCount
-              = static_cast<std::size_t>(std::ranges::count(processedMsg, '\n'));
+              = static_cast<std::size_t>(std::ranges::count(entry.logMsg, '\n'));
             std::size_t const groupId = ++nextMultilineGroupId;
 
             allSourceLocations[SourceLocation{entry.fileName, entry.line}]++;
 
             if(newlineCount == 0) {
-                uc_log::detail::LogEntry processedEntry = entry;
-                processedEntry.logMsg                   = processedMsg;
-
                 auto logEntry = std::make_shared<GuiLogEntry const>(
-                  GuiLogEntry{recv_time, processedEntry, LineType::SingleLine, groupId});
+                  GuiLogEntry{recv_time, entry, LineType::SingleLine, groupId});
 
                 allLogEntries.push_back(logEntry);
                 if(currentFilter(*logEntry)) {
@@ -1929,7 +1925,7 @@ namespace uc_log { namespace FTXUIGui {
                     ++filteredOriginalLogCount;
                 }
             } else {
-                auto const lines = splitIntoLines(processedMsg);
+                auto const lines = splitIntoLines(entry.logMsg);
 
                 // Check filter on first line entry
                 bool groupPassesFilter = false;
