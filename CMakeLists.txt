@@ -231,7 +231,7 @@ function(target_add_uc_log_rtt_jlink targetname)
     if(NOT CMAKE_CROSSCOMPILING)
         set(uc_log_printer_bin "${build_dir}/uc_log_printer")
     else()
-        set(uc_log_printer_bin "${build_dir}/host_build/uc_log_printer")
+        get_target_property(uc_log_printer_bin uc_log_printer HOST_EXECUTABLE_PATH)
     endif()
 
     set(log_base_dir "${CMAKE_CURRENT_BINARY_DIR}/rtt_log")
