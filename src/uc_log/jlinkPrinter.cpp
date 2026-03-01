@@ -11,13 +11,13 @@
 #include "uc_log/detail/TcpSender.hpp"
 #include "uc_log/metric_utils.hpp"
 
-#include <CLI/CLI.hpp>
 #include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cxxopts.hpp>
 #include <expected>
 #include <filesystem>
 #include <fstream>
@@ -135,8 +135,6 @@ struct TcpPrinter {
 
 int main(int    argc,
          char** argv) {
-    CLI::App app{};
-
     std::uint32_t speed{};
     std::string   device{};
     std::uint32_t channels{};
@@ -149,23 +147,45 @@ int main(int    argc,
     std::uint16_t port{};
     bool          disableUi{false};
 
-    app.add_option("--metrics_port", port, "tcp for metrics")->required();
-    app.add_option("--speed", speed, "swd speed")->required();
-    app.add_option("--device", device, "mpu device")->required();
-    app.add_option("--channels", channels, "rtt channels")->required();
-    app.add_option("--build_command", buildCommand, "build command")->required();
-    app.add_option("--map_file", mapFile, "map file")->required()->check(CLI::ExistingFile);
-    app.add_option("--hex_file", hexFile, "hex file")->required()->check(CLI::ExistingFile);
-    app.add_option("--string_constants_file", stringConstantsFile, "string constants map file")
-      ->required()
-      ->check(CLI::ExistingFile);
-    app.add_option("--log_dir", logDir, "log file directory")
-      ->required()
-      ->check(CLI::ExistingDirectory);
-    app.add_option("--host", host, "jlink host");
-    app.add_flag("--disable_ui", disableUi, "disable ui and just log to file and tcp");
-
-    CLI11_PARSE(app, argc, argv)
+    cxxopts::Options options("uc_log_printer");
+    try {
+        options.add_options()("metrics_port", "tcp for metrics", cxxopts::value<std::uint16_t>())(
+          "speed",
+          "swd speed",
+          cxxopts::value<std::uint32_t>())("device", "mpu device", cxxopts::value<std::string>())(
+          "channels",
+          "rtt channels",
+          cxxopts::value<std::uint32_t>())("build_command",
+                                           "build command",
+                                           cxxopts::value<std::string>())(
+          "map_file",
+          "map file",
+          cxxopts::value<std::string>())("hex_file", "hex file", cxxopts::value<std::string>())(
+          "string_constants_file",
+          "string constants map file",
+          cxxopts::value<std::string>())("log_dir",
+                                         "log file directory",
+                                         cxxopts::value<std::string>())(
+          "host",
+          "jlink host",
+          cxxopts::value<std::string>()->default_value(
+            ""))("disable_ui", "disable ui and just log to file and tcp");
+        auto const result   = options.parse(argc, argv);
+        port                = result["metrics_port"].as<std::uint16_t>();
+        speed               = result["speed"].as<std::uint32_t>();
+        device              = result["device"].as<std::string>();
+        channels            = result["channels"].as<std::uint32_t>();
+        buildCommand        = result["build_command"].as<std::string>();
+        mapFile             = result["map_file"].as<std::string>();
+        hexFile             = result["hex_file"].as<std::string>();
+        stringConstantsFile = result["string_constants_file"].as<std::string>();
+        logDir              = result["log_dir"].as<std::string>();
+        host                = result["host"].as<std::string>();
+        disableUi           = result.count("disable_ui") > 0;
+    } catch(cxxopts::exceptions::exception const& e) {
+        fmt::print(stderr, "Error: {}\n{}\n", e.what(), options.help());
+        return 1;
+    }
 
     uc_log::FTXUIGui::Gui gui{};
     LogFilePrinter        logFilePrinter{gui, logDir};

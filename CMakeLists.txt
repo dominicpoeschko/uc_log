@@ -86,13 +86,13 @@ if(UC_LOG_BUILD_PRINTER)
             master)
 
         find_or_fetch_package(
-            CLI11
+            cxxopts
             GIT_REPOSITORY
-            https://github.com/CLIUtils/CLI11
+            https://github.com/jarro2783/cxxopts
             GIT_TAG
-            v2.6.1
+            v3.3.1
             GIT_BRANCH
-            main)
+            master)
 
         set(FTXUI_ENABLE_INSTALL OFF)
         set(FTXUI_QUIET ON)
@@ -126,7 +126,7 @@ if(UC_LOG_BUILD_PRINTER)
                     Threads::Threads
                     uc_log::uc_log
                     jlink::jlink
-                    CLI11::CLI11
+                    cxxopts::cxxopts
                     atomic
                     ${Boost_Components}
                     ftxui::screen
@@ -134,6 +134,7 @@ if(UC_LOG_BUILD_PRINTER)
                     ftxui::component
                     magic_enum::magic_enum)
 
+        target_compile_definitions(uc_log_printer PRIVATE CXXOPTS_NO_RTTI)
         target_add_default_build_options(uc_log_printer PRIVATE)
 
         if(${UC_LOG_BUILD_TEST_GUI})
@@ -144,7 +145,7 @@ if(UC_LOG_BUILD_PRINTER)
                 fmt::fmt
                 Threads::Threads
                 uc_log::uc_log
-                CLI11::CLI11
+                cxxopts::cxxopts
                 ${Boost_Components}
                 ftxui::screen
                 ftxui::dom
