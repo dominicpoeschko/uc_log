@@ -17,7 +17,21 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+// clang-format off
+#ifdef __clang__
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wreserved-macro-identifier"
+#  pragma clang diagnostic ignored "-Wexit-time-destructors"
+#  pragma clang diagnostic ignored "-Wglobal-constructors"
+#  pragma clang diagnostic ignored "-Wextra-semi-stmt"
+#  pragma clang diagnostic ignored "-Wdeprecated-copy-with-dtor"
+#  pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+#endif
 #include <cxxopts.hpp>
+#ifdef __clang__
+#  pragma clang diagnostic pop
+#endif
+// clang-format on
 #include <expected>
 #include <filesystem>
 #include <fstream>
