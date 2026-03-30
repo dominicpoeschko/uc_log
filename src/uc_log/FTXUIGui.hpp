@@ -941,10 +941,10 @@ namespace uc_log { namespace FTXUIGui {
               | ftxui::Renderer([this, metricsContainer](ftxui::Element const&) mutable {
                     auto       currentSelected = metricPlotWidget.getSelectedMetric();
                     bool const needsRebuild    = (metricEntries.size() != lastMetricCount)
-                                           || (!hasLastSelectedInfo && currentSelected.has_value())
-                                           || (hasLastSelectedInfo && !currentSelected.has_value())
-                                           || (hasLastSelectedInfo && currentSelected.has_value()
-                                               && *currentSelected != lastSelectedInfo);
+                                              || (!hasLastSelectedInfo && currentSelected.has_value())
+                                              || (hasLastSelectedInfo && !currentSelected.has_value())
+                                              || (hasLastSelectedInfo && currentSelected.has_value()
+                                                  && *currentSelected != lastSelectedInfo);
 
                     if(needsRebuild) {
                         metricsContainer->DetachAllChildren();

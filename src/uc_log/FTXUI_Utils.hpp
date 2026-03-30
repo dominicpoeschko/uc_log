@@ -96,11 +96,11 @@ namespace uc_log { namespace FTXUIGui {
             bool const is_focused  = Focused();
             bool const is_active   = Active();
             auto       entry_state = ftxui::EntryState{
-                    .label   = *label,
-                    .state   = is_checked(),
-                    .active  = is_active,
-                    .focused = is_focused || isHovered,
-                    .index   = -1,
+              .label   = *label,
+              .state   = is_checked(),
+              .active  = is_active,
+              .focused = is_focused || isHovered,
+              .index   = -1,
             };
             auto element
               = (transform ? transform : CheckboxOption::Simple().transform)(entry_state);

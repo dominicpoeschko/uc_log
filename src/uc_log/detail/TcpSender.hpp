@@ -127,11 +127,14 @@ struct TCPSender {
     std::jthread                          thread{std::bind_front(&TCPSender::runner, this)};
 
     template<typename ErrorMessageF>
-    explicit TCPSender(std::uint16_t port, ErrorMessageF && errorMessagef_)
-      : errorMessagef{std::forward<ErrorMessageF>(errorMessagef_)}, acceptor{
-        ioc,
-        {boost::asio::ip::tcp::v4(), port}
-    } {
+    explicit TCPSender(std::uint16_t   port,
+                       ErrorMessageF&& errorMessagef_)
+      : errorMessagef{
+          std::forward<ErrorMessageF>(errorMessagef_)
+    }
+      , acceptor{ioc,
+                 {boost::asio::ip::tcp::v4(),
+                  port}} {
         async_accept_one();
     }
 
