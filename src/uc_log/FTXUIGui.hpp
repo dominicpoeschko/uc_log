@@ -11,11 +11,13 @@
     #pragma GCC diagnostic ignored "-Woverloaded-virtual"
     #pragma GCC diagnostic ignored "-Wsign-conversion"
     #pragma GCC diagnostic ignored "-Wshadow"
+    #pragma GCC diagnostic ignored "-Wunused-parameter"
 #endif
 
 #ifdef __clang__
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Wsign-conversion"
+    #pragma clang diagnostic ignored "-Wunused-parameter"
     #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
     #pragma clang diagnostic ignored "-Wunsafe-buffer-usage-in-libc-call"
     #pragma clang diagnostic ignored "-Wreserved-macro-identifier"
@@ -58,17 +60,80 @@
 
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/loop.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
+#include <glaze/glaze.hpp>
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <thread>
+
+namespace glz {
+/// Registers every non-`std::byte` enum type with glaze using
+/// `magic_enum`-derived names, satisfying `glaze_enum_t<T>`.
+template<typename T>
+    requires(std::is_enum_v<T> && !std::is_same_v<T, std::byte>)
+struct meta<T> {
+    static constexpr auto value = []<std::size_t... Is>(std::index_sequence<Is...>) {
+        constexpr auto names  = magic_enum::enum_names<T>();
+        constexpr auto values = magic_enum::enum_values<T>();
+        return std::apply(
+          [](auto&&... args) { return glz::enumerate(std::forward<decltype(args)>(args)...); },
+          std::tuple_cat(std::make_tuple(names[Is], values[Is])...));
+    }(std::make_index_sequence<magic_enum::enum_count<T>()>{});
+};
+
+/// Serialises std::set<std::pair<K,V>> as a JSON array-of-arrays [[k,v],...].
+/// Glaze's default treats any container of pair<string,T> as a sorted map → {}
+/// which then fails to round-trip.  Direct to/from specialisations bypass that.
+template<typename K, typename V>
+struct to<JSON, std::set<std::pair<K, V>>> {
+    template<auto Opts,
+             class B>
+    static void op(std::set<std::pair<K,
+                                      V>> const& value,
+                   is_context auto&&             ctx,
+                   B&&                           b,
+                   auto&                         ix) {
+        dump('[', b, ix);
+        bool first_elem = true;
+        for(auto const& [k, v] : value) {
+            if(!first_elem) { dump(',', b, ix); }
+            first_elem = false;
+            dump('[', b, ix);
+            serialize<JSON>::op<Opts>(k, ctx, b, ix);
+            dump(',', b, ix);
+            serialize<JSON>::op<Opts>(v, ctx, b, ix);
+            dump(']', b, ix);
+        }
+        dump(']', b, ix);
+    }
+};
+
+/// Reads a JSON array-of-arrays [[k,v],...] back into std::set<std::pair<K,V>>.
+/// Delegates to glaze's built-in vector<tuple> reader (tuples are always arrays).
+template<typename K, typename V>
+struct from<JSON, std::set<std::pair<K, V>>> {
+    template<auto Opts>
+    static void op(std::set<std::pair<K,
+                                      V>>& value,
+                   is_context auto&&       ctx,
+                   auto&&                  it,
+                   auto&&                  end) {
+        std::vector<std::tuple<K, V>> tmp;
+        from<JSON, std::vector<std::tuple<K, V>>>::template op<Opts>(tmp, ctx, it, end);
+        for(auto& [k, v] : tmp) { value.emplace(std::move(k), std::move(v)); }
+    }
+};
+}   // namespace glz
 
 namespace uc_log { namespace FTXUIGui {
 
@@ -129,6 +194,21 @@ namespace uc_log { namespace FTXUIGui {
         };
 
         enum class BuildStatus : std::uint8_t { Idle, Running, Success, Failed };
+
+        enum class OutlierMethod : std::uint8_t {
+            IQRTukey,           // cutoff = Q3 + k × (Q3 - Q1)
+            TopNPercent,        // exclude the top N% most frequent locations
+            AbsoluteThreshold   // exclude locations with count > N
+        };
+
+        struct OutlierResult {
+            std::size_t                 cutoff{0};
+            std::size_t                 q1{0};
+            std::size_t                 median{0};
+            std::size_t                 q3{0};
+            std::vector<SourceLocation> wouldExclude;
+            bool                        valid{false};
+        };
 
         struct Statistics {
             std::chrono::system_clock::time_point sessionStartTime{
@@ -216,6 +296,23 @@ namespace uc_log { namespace FTXUIGui {
         SourceLocation   selectedSourceLocation;
         std::string      locationFilterInput;
         ftxui::Component manualLocationInput;
+        ftxui::Component filterConfigInput;
+        ftxui::Component iqrInput;
+        ftxui::Component topNInput;
+        ftxui::Component absInput;
+
+        std::string filterConfigPath{"filter.json"};
+        std::string filterConfigStatus;
+
+        std::string   noiseExcludeStatus;
+        OutlierMethod outlierMethod{OutlierMethod::IQRTukey};
+        int           selectedOutlierMethod{0};
+        double        iqrMultiplier{1.5};
+        std::string   iqrMultiplierStr{"1.5"};
+        double        topNPercent{10.0};
+        std::string   topNPercentStr{"10"};
+        std::size_t   absoluteThreshold{100};
+        std::string   absoluteThresholdStr{"100"};
 
         int selectedTab{};
 
@@ -223,8 +320,10 @@ namespace uc_log { namespace FTXUIGui {
 
         Statistics statistics;
 
-        int                      selectedResetType;
-        std::vector<std::string> resetTypeOptions{"0 - Normal", "1 - Core", "2 - ResetPin"};
+        int              selectedResetType;
+        int              connectionTypeSelection{0};   // 0 = USB, 1 = IP
+        std::string      ipAddressInput{};
+        ftxui::Component ipAddressInputComponent;
 
         std::unique_ptr<boost::asio::io_context> buildIoContext;
         std::jthread                             buildThread;
@@ -773,6 +872,126 @@ namespace uc_log { namespace FTXUIGui {
                 currentFilter = createFilter(activeFilterState);
             }
             updateFilteredLogEntries();
+        }
+
+        void saveFilterConfig(std::string const& path,
+                              FilterState const& fs) {
+            std::string buffer{};
+            if(auto err = glz::write_json(fs, buffer); err) {
+                filterConfigStatus = "Error serializing: " + glz::format_error(err, buffer);
+                return;
+            }
+            auto const    pretty = glz::prettify_json(buffer);
+            std::ofstream out(path);
+            if(!out) {
+                filterConfigStatus = fmt::format("Error: cannot open '{}' for writing", path);
+                return;
+            }
+            out << pretty;
+            if(!out) {
+                filterConfigStatus = "Error: write failed";
+                return;
+            }
+            filterConfigStatus = "Saved.";
+        }
+
+        void loadFilterConfig(std::string const& path,
+                              FilterState&       fs) {
+            std::ifstream in(path);
+            if(!in) {
+                filterConfigStatus = fmt::format("Error: cannot open '{}'", path);
+                return;
+            }
+            std::string const buffer(std::istreambuf_iterator<char>(in),
+                                     std::istreambuf_iterator<char>{});
+            FilterState       loaded{};
+            if(auto err = glz::read_json(loaded, buffer); err) {
+                filterConfigStatus = "Error parsing: " + glz::format_error(err, buffer);
+                return;
+            }
+            fs = std::move(loaded);
+            updateCurrentFilter();
+            filterConfigStatus = "Loaded.";
+        }
+
+        [[nodiscard]] static OutlierResult computeOutliers(std::map<SourceLocation,
+                                                                    std::size_t> const& locations,
+                                                           OutlierMethod                method,
+                                                           double                       iqrK,
+                                                           double                       topNPct,
+                                                           std::size_t absThreshold) {
+            if(locations.size() < 3) { return {}; }
+
+            auto counts = locations | std::views::values | std::ranges::to<std::vector>();
+            std::ranges::sort(counts);
+            auto const n = counts.size();
+
+            auto medianOf = [&counts](std::size_t lo, std::size_t hi) -> std::size_t {
+                auto const len = hi - lo;
+                if(len % 2 == 1) { return counts[lo + len / 2]; }
+                return (counts[lo + len / 2 - 1] + counts[lo + len / 2]) / 2;
+            };
+            std::size_t const medianVal = medianOf(0, n);
+            std::size_t const q1        = medianOf(0, n / 2);
+            std::size_t const q3        = medianOf((n % 2 == 1) ? n / 2 + 1 : n / 2, n);
+
+            std::size_t cutoff{};
+            switch(method) {
+            case OutlierMethod::IQRTukey:
+                {
+                    double const iqr = (q3 >= q1) ? static_cast<double>(q3 - q1) : 0.0;
+                    cutoff           = static_cast<std::size_t>(static_cast<double>(q3)
+                                                                + iqrK * (iqr > 0.0 ? iqr : 1.0));
+                    cutoff           = std::max(cutoff, std::size_t{1});
+                    break;
+                }
+            case OutlierMethod::TopNPercent:
+                {
+                    if(topNPct <= 0.0 || topNPct >= 100.0) {
+                        cutoff = counts.back();
+                        break;
+                    }
+                    auto const keep = static_cast<std::size_t>(
+                      std::floor((1.0 - topNPct / 100.0) * static_cast<double>(n)));
+                    cutoff = (keep > 0 && keep < n) ? counts[keep] : counts.back();
+                    break;
+                }
+            case OutlierMethod::AbsoluteThreshold: cutoff = absThreshold; break;
+            }
+
+            return OutlierResult{.cutoff       = cutoff,
+                                 .q1           = q1,
+                                 .median       = medianVal,
+                                 .q3           = q3,
+                                 .wouldExclude = locations
+                                               | std::views::filter([cutoff](auto const& kv) {
+                                                     return kv.second > cutoff;
+                                                 })
+                                               | std::views::keys | std::ranges::to<std::vector>(),
+                                 .valid        = true};
+        }
+
+        void autoExcludeNoisyLocations() {
+            auto const result = computeOutliers(allSourceLocations,
+                                                outlierMethod,
+                                                iqrMultiplier,
+                                                topNPercent,
+                                                absoluteThreshold);
+            if(!result.valid) {
+                noiseExcludeStatus = "Need ≥ 3 known locations";
+                return;
+            }
+
+            std::ranges::copy(result.wouldExclude,
+                              std::inserter(editedFilterState.excludedLocations,
+                                            editedFilterState.excludedLocations.end()));
+            updateCurrentFilter();
+
+            noiseExcludeStatus = result.wouldExclude.empty()
+                                 ? "No outliers found"
+                                 : fmt::format("{} location{} excluded",
+                                               result.wouldExclude.size(),
+                                               result.wouldExclude.size() == 1 ? "" : "s");
         }
 
         ftxui::Component getLogComponent() {
@@ -1384,6 +1603,67 @@ namespace uc_log { namespace FTXUIGui {
               },
               createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
 
+            auto saveButton = ftxui::Button(
+              "💾 Save",
+              [this]() { saveFilterConfig(filterConfigPath, editedFilterState); },
+              createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
+
+            auto loadButton = ftxui::Button(
+              "📂 Load",
+              [this]() { loadFilterConfig(filterConfigPath, editedFilterState); },
+              createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
+
+            filterConfigInput = ftxui::Input(&filterConfigPath, "filter.json");
+
+            // File row: label + input + status
+            auto fileRow = ftxui::Container::Horizontal({filterConfigInput})
+                         | ftxui::Renderer([this](ftxui::Element inner) {
+                               ftxui::Element statusEl = ftxui::text("");
+                               if(!filterConfigStatus.empty()) {
+                                   bool isError = filterConfigStatus.rfind("Error", 0) == 0;
+                                   statusEl     = ftxui::text("  " + filterConfigStatus)
+                                                | ftxui::color(isError ? Theme::Status::error()
+                                                                       : Theme::Status::success());
+                               }
+                               return ftxui::hbox(
+                                 {ftxui::text(" 📁 File: ") | ftxui::color(Theme::Status::info()),
+                                  std::move(inner) | ftxui::flex,
+                                  std::move(statusEl)});
+                           });
+
+            // Buttons row: indented to align under the input, with gap between buttons
+            auto buttonsRow = ftxui::Container::Horizontal({saveButton, loadButton})
+                            | ftxui::Renderer([saveButton, loadButton](ftxui::Element) {
+                                  return ftxui::hbox({ftxui::text(" 📁       "),
+                                                      saveButton->Render(),
+                                                      ftxui::text("  "),
+                                                      loadButton->Render()});
+                              });
+
+            // Info hint
+            auto infoBox = ftxui::Renderer([] {
+                return ftxui::vbox({ftxui::separator(),
+                                    ftxui::hbox({ftxui::text(" ℹ ") | ftxui::bold
+                                                   | ftxui::color(Theme::Status::info()),
+                                                 ftxui::text("Filter File") | ftxui::bold
+                                                   | ftxui::color(Theme::Status::info())}),
+                                    ftxui::text("   Saves/loads filter state as JSON. Relative "
+                                                "paths use the working directory.")
+                                      | ftxui::color(Theme::Status::inactive())});
+            });
+
+            auto saveLoadSection
+              = ftxui::Container::Vertical({fileRow, buttonsRow})
+              | ftxui::Renderer([infoBox](ftxui::Element inner) {
+                    return ftxui::vbox({ftxui::text("💾 Filter Configuration") | ftxui::bold
+                                          | ftxui::color(Theme::Header::secondary())
+                                          | ftxui::center,
+                                        ftxui::separator(),
+                                        std::move(inner),
+                                        infoBox->Render()})
+                         | ftxui::border;
+                });
+
             std::vector<ftxui::Component> mainComponents;
 
             std::vector<ftxui::Component> levelComponents;
@@ -1409,6 +1689,145 @@ namespace uc_log { namespace FTXUIGui {
             mainComponents.push_back(ftxui::Container::Horizontal(horizontalComponents));
             mainComponents.push_back(getLocationFilterComponent());
 
+            // --- Noisy-exclude section ---
+            // Method selector toggle
+            std::vector<std::string> methodLabels{"Statistical", "Top Percent", "Count Limit"};
+            auto methodToggle = ftxui::Toggle(std::move(methodLabels), &selectedOutlierMethod);
+            methodToggle = ftxui::CatchEvent(methodToggle, [this](ftxui::Event const&) -> bool {
+                outlierMethod = static_cast<OutlierMethod>(selectedOutlierMethod);
+                noiseExcludeStatus.clear();
+                return false;
+            });
+
+            // Statistical (IQR/Tukey) sensitivity param row (float text input, shown only for method 0)
+            iqrInput         = ftxui::Input(&iqrMultiplierStr, "1.5");
+            iqrInput         = ftxui::CatchEvent(iqrInput, [this](ftxui::Event const&) -> bool {
+                try {
+                    double const v = std::stod(iqrMultiplierStr);
+                    if(v > 0.0) { iqrMultiplier = v; }
+                } catch(std::exception const&) {}
+                return false;
+            });
+            auto iqrParamRow = ftxui::Maybe(
+              ftxui::Container::Horizontal({iqrInput})
+                | ftxui::Renderer([this](ftxui::Element inner) {
+                      return ftxui::hbox(
+                        {ftxui::text(" sensitivity: ") | ftxui::color(Theme::Status::info()),
+                         std::move(inner) | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 8)});
+                  }),
+              [this] { return selectedOutlierMethod == 0; });
+
+            // Top Percent param row (float text input, shown only for method 1)
+            topNInput         = ftxui::Input(&topNPercentStr, "10");
+            topNInput         = ftxui::CatchEvent(topNInput, [this](ftxui::Event const&) -> bool {
+                try {
+                    double const v = std::stod(topNPercentStr);
+                    if(v > 0.0 && v < 100.0) { topNPercent = v; }
+                } catch(std::exception const&) {}
+                return false;
+            });
+            auto topNParamRow = ftxui::Maybe(
+              ftxui::Container::Horizontal({topNInput})
+                | ftxui::Renderer([this](ftxui::Element inner) {
+                      return ftxui::hbox(
+                        {ftxui::text(" top %: ") | ftxui::color(Theme::Status::info()),
+                         std::move(inner) | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 8)});
+                  }),
+              [this] { return selectedOutlierMethod == 1; });
+
+            // Count Limit param row (integer text input, shown only for method 2)
+            absInput         = ftxui::Input(&absoluteThresholdStr, "100");
+            absInput         = ftxui::CatchEvent(absInput, [this](ftxui::Event const&) -> bool {
+                try {
+                    auto const v      = std::stoull(absoluteThresholdStr);
+                    absoluteThreshold = static_cast<std::size_t>(v);
+                } catch(std::exception const&) {}
+                return false;
+            });
+            auto absParamRow = ftxui::Maybe(
+              ftxui::Container::Horizontal({absInput})
+                | ftxui::Renderer([this](ftxui::Element inner) {
+                      return ftxui::hbox(
+                        {ftxui::text(" count > ") | ftxui::color(Theme::Status::info()),
+                         std::move(inner) | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 10)});
+                  }),
+              [this] { return selectedOutlierMethod == 2; });
+
+            // Enhanced preview: delegates to computeOutliers — no duplication
+            auto previewRenderer = ftxui::Renderer([this] {
+                auto const r = computeOutliers(allSourceLocations,
+                                               outlierMethod,
+                                               iqrMultiplier,
+                                               topNPercent,
+                                               absoluteThreshold);
+                if(!r.valid) {
+                    return ftxui::text("  (need ≥ 3 known locations to preview)")
+                         | ftxui::color(Theme::Status::inactive());
+                }
+                auto const n = allSourceLocations.size();
+                auto const w = r.wouldExclude.size();
+                return ftxui::vbox(
+                  {ftxui::text(fmt::format("  → {} of {} location{} would be excluded",
+                                           w,
+                                           n,
+                                           n == 1 ? "" : "s"))
+                     | ftxui::color(w > 0 ? Theme::Status::warning() : Theme::Status::inactive()),
+                   ftxui::text(fmt::format("    cutoff: {}", r.cutoff))
+                     | ftxui::color(Theme::Status::inactive())});
+            });
+
+            auto excludeButton = ftxui::Button(
+              "🎯 Exclude Outliers",
+              [this]() { autoExcludeNoisyLocations(); },
+              createButtonStyle(Theme::Button::Background::debug(), Theme::Button::text()));
+
+            auto noiseButtonRow
+              = ftxui::Container::Horizontal({excludeButton})
+              | ftxui::Renderer([this, excludeButton](ftxui::Element) {
+                    ftxui::Element statusEl = ftxui::text("");
+                    if(!noiseExcludeStatus.empty()) {
+                        bool isError = noiseExcludeStatus.rfind("Need", 0) == 0
+                                    || noiseExcludeStatus.rfind("No outliers", 0) == 0;
+                        statusEl     = ftxui::text("  " + noiseExcludeStatus)
+                                     | ftxui::color(isError ? Theme::Status::inactive()
+                                                            : Theme::Status::success());
+                    }
+                    return ftxui::hbox({ftxui::text(" ") | ftxui::color(ftxui::Color::Default),
+                                        excludeButton->Render(),
+                                        std::move(statusEl)});
+                });
+
+            auto noiseInfoBox = ftxui::Renderer([] {
+                return ftxui::vbox(
+                  {ftxui::separator(),
+                   ftxui::hbox(
+                     {ftxui::text(" ℹ ") | ftxui::bold | ftxui::color(Theme::Status::info()),
+                      ftxui::text("Noisy Locations") | ftxui::bold
+                        | ftxui::color(Theme::Status::info())}),
+                   ftxui::text("   Statistical: auto-detects outliers using inter-quartile range")
+                     | ftxui::color(Theme::Status::inactive()),
+                   ftxui::text("   Top Percent: exclude the N% most frequent locations")
+                     | ftxui::color(Theme::Status::inactive()),
+                   ftxui::text("   Count Limit: exclude locations seen more than N times")
+                     | ftxui::color(Theme::Status::inactive())});
+            });
+
+            auto noisyExcludeSection
+              = ftxui::Container::Vertical({methodToggle,
+                                            iqrParamRow,
+                                            topNParamRow,
+                                            absParamRow,
+                                            previewRenderer,
+                                            noiseButtonRow})
+              | ftxui::Renderer([noiseInfoBox](ftxui::Element inner) {
+                    return ftxui::vbox({ftxui::text("🎯 Auto-Exclude Noisy Locations") | ftxui::bold
+                                          | ftxui::color(Theme::Header::accent()) | ftxui::center,
+                                        ftxui::separator(),
+                                        std::move(inner),
+                                        noiseInfoBox->Render()})
+                         | ftxui::border;
+                });
+
             return ftxui::Container::Vertical(
               {clearButton,
                ftxui::Renderer([]() { return ftxui::separator(); }),
@@ -1419,6 +1838,11 @@ namespace uc_log { namespace FTXUIGui {
                                              | ftxui::center,
                                            ftxui::separator(),
                                            std::move(inner)});
+                   }),
+               ftxui::Container::Horizontal({saveLoadSection, noisyExcludeSection})
+                 | ftxui::Renderer([saveLoadSection, noisyExcludeSection](ftxui::Element) {
+                       return ftxui::hbox({saveLoadSection->Render() | ftxui::flex,
+                                           noisyExcludeSection->Render() | ftxui::flex});
                    })});
         }
 
@@ -1650,7 +2074,9 @@ namespace uc_log { namespace FTXUIGui {
               [&rttReader]() { rttReader.clearAllBreakpointsTarget(); },
               createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
 
-            auto resetTypeRadiobox = ftxui::Radiobox(&resetTypeOptions, &selectedResetType);
+            auto resetTypeRadiobox
+              = ftxui::Radiobox(std::vector<std::string>{"0 - Normal", "1 - Core", "2 - ResetPin"},
+                                &selectedResetType);
 
             auto resetTypeSelector
               = ftxui::Container::Vertical(
@@ -1701,8 +2127,35 @@ namespace uc_log { namespace FTXUIGui {
                         | ftxui::color(Theme::Status::warning())})});
             });
 
+            auto connTypeRadio
+              = ftxui::Radiobox(std::vector<std::string>{"USB (local)", "IP (remote)"},
+                                &connectionTypeSelection);
+
+            ipAddressInputComponent = ftxui::Input(&ipAddressInput, "host or IP address...");
+            auto ipInputMaybe = ftxui::Maybe(ipAddressInputComponent | ftxui::flex,
+                                             [this]() { return connectionTypeSelection == 1; });
+
+            auto applyConnBtn = ftxui::Button(
+              "Apply Connection",
+              [this, &rttReader]() {
+                  rttReader.setHost(connectionTypeSelection == 0 ? "" : ipAddressInput);
+              },
+              createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
+
+            auto connPanel
+              = ftxui::Container::Vertical({ftxui::Renderer([]() {
+                                                return ftxui::text("Connection") | ftxui::bold
+                                                     | ftxui::color(Theme::Header::accent());
+                                            }),
+                                            connTypeRadio,
+                                            ipInputMaybe,
+                                            applyConnBtn})
+              | ftxui::border;
+
             return ftxui::Container::Vertical(
-              {ftxui::Container::Horizontal({resetTargetBtn | ftxui::flex,
+              {connPanel,
+               ftxui::Renderer([]() { return ftxui::separator(); }),
+               ftxui::Container::Horizontal({resetTargetBtn | ftxui::flex,
                                              resetDebuggerBtn | ftxui::flex,
                                              flashBtn | ftxui::flex}),
                ftxui::Renderer([]() { return ftxui::separator(); }),
@@ -2001,7 +2454,10 @@ namespace uc_log { namespace FTXUIGui {
 
         template<typename Reader>
         int run(Reader&            rttReader,
-                std::string const& buildCommand) {
+                std::string const& buildCommand,
+                std::string const& initialHost = "") {
+            connectionTypeSelection = initialHost.empty() ? 0 : 1;
+            ipAddressInput          = initialHost;
             initializeBuildCommand(buildCommand);
 
             auto screen = ftxui::ScreenInteractive::Fullscreen();
@@ -2012,9 +2468,14 @@ namespace uc_log { namespace FTXUIGui {
 
                 mainComponent
                   = ftxui::CatchEvent(getTabComponent(rttReader), [&](ftxui::Event const& event) {
-                        // Only block hotkeys when actively typing in the manual location input field
-                        if(manualLocationInput && manualLocationInput->Focused()
-                           && event.is_character())
+                        // Only block hotkeys when actively typing in a text input field
+                        if(event.is_character()
+                           && ((manualLocationInput && manualLocationInput->Focused())
+                               || (filterConfigInput && filterConfigInput->Focused())
+                               || (iqrInput && iqrInput->Focused())
+                               || (topNInput && topNInput->Focused())
+                               || (absInput && absInput->Focused())
+                               || (ipAddressInputComponent && ipAddressInputComponent->Focused())))
                         {
                             return false;
                         }

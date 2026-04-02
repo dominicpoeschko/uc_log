@@ -239,7 +239,7 @@ int main(int    argc,
                              [&gui](std::string_view msg) { gui.toolErrorMessage(msg); }};
 
     if(!disableUi) {
-        return gui.run(rttReader, buildCommand);
+        return gui.run(rttReader, buildCommand, host);
     } else {
         static std::atomic<bool> shutdown_requested(false);
         std::signal(SIGINT, [](int signal) {

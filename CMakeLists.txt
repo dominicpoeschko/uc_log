@@ -114,6 +114,15 @@ if(UC_LOG_BUILD_PRINTER)
             GIT_BRANCH
             master)
 
+        find_or_fetch_package(
+            glaze
+            GIT_REPOSITORY
+            https://github.com/stephenberry/glaze.git
+            GIT_TAG
+            v7.0.2
+            GIT_BRANCH
+            main)
+
         add_subdirectory(jlink)
 
         add_executable(uc_log_printer src/uc_log/jlinkPrinter.cpp)
@@ -132,7 +141,8 @@ if(UC_LOG_BUILD_PRINTER)
                     ftxui::screen
                     ftxui::dom
                     ftxui::component
-                    magic_enum::magic_enum)
+                    magic_enum::magic_enum
+                    glaze::glaze)
 
         target_compile_definitions(uc_log_printer PRIVATE CXXOPTS_NO_RTTI)
         target_add_default_build_options(uc_log_printer PRIVATE)

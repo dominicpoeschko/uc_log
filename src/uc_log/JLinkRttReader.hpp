@@ -89,6 +89,13 @@ private:
         while(!stoken.stop_requested()) {
             toolMessageCallback("start jlink");
             try {
+                {
+                    std::lock_guard<std::mutex> lock{hostMutex};
+                    if(pendingHost) {
+                        host = std::move(*pendingHost);
+                        pendingHost.reset();
+                    }
+                }
                 jlinkResetFlag = false;
                 JLink jlink    = [&]() {
                     if(host.empty()) {
@@ -201,6 +208,8 @@ private:
     std::atomic<bool>          flashFlag;
     std::atomic<std::uint8_t>  pendingResetType;
     std::atomic<bool>          hasResetTypeChange;
+    std::mutex                 hostMutex;
+    std::optional<std::string> pendingHost;
     std::jthread               thread;
 
 public:
@@ -241,6 +250,19 @@ public:
     JLink::Status getStatus() const { return status; }
 
     void resetJLink() { jlinkResetFlag = true; }
+
+    void setHost(std::string newHost) {
+        {
+            std::lock_guard<std::mutex> lock{hostMutex};
+            pendingHost = std::move(newHost);
+        }
+        jlinkResetFlag = true;
+    }
+
+    std::string getHost() {
+        std::lock_guard<std::mutex> lock{hostMutex};
+        return pendingHost.value_or(host);
+    }
 
     void resetTarget() { targetResetFlag = true; }
 
