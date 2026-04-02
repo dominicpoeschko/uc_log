@@ -1709,12 +1709,11 @@ namespace uc_log { namespace FTXUIGui {
                 return false;
             });
             auto iqrParamRow = ftxui::Maybe(
-              ftxui::Container::Horizontal({iqrInput})
-                | ftxui::Renderer([this](ftxui::Element inner) {
-                      return ftxui::hbox(
-                        {ftxui::text(" sensitivity: ") | ftxui::color(Theme::Status::info()),
-                         std::move(inner) | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 8)});
-                  }),
+              ftxui::Container::Horizontal({iqrInput}) | ftxui::Renderer([](ftxui::Element inner) {
+                  return ftxui::hbox(
+                    {ftxui::text(" sensitivity: ") | ftxui::color(Theme::Status::info()),
+                     std::move(inner) | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 8)});
+              }),
               [this] { return selectedOutlierMethod == 0; });
 
             // Top Percent param row (float text input, shown only for method 1)
@@ -1727,12 +1726,11 @@ namespace uc_log { namespace FTXUIGui {
                 return false;
             });
             auto topNParamRow = ftxui::Maybe(
-              ftxui::Container::Horizontal({topNInput})
-                | ftxui::Renderer([this](ftxui::Element inner) {
-                      return ftxui::hbox(
-                        {ftxui::text(" top %: ") | ftxui::color(Theme::Status::info()),
-                         std::move(inner) | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 8)});
-                  }),
+              ftxui::Container::Horizontal({topNInput}) | ftxui::Renderer([](ftxui::Element inner) {
+                  return ftxui::hbox(
+                    {ftxui::text(" top %: ") | ftxui::color(Theme::Status::info()),
+                     std::move(inner) | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 8)});
+              }),
               [this] { return selectedOutlierMethod == 1; });
 
             // Count Limit param row (integer text input, shown only for method 2)
@@ -1745,12 +1743,11 @@ namespace uc_log { namespace FTXUIGui {
                 return false;
             });
             auto absParamRow = ftxui::Maybe(
-              ftxui::Container::Horizontal({absInput})
-                | ftxui::Renderer([this](ftxui::Element inner) {
-                      return ftxui::hbox(
-                        {ftxui::text(" count > ") | ftxui::color(Theme::Status::info()),
-                         std::move(inner) | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 10)});
-                  }),
+              ftxui::Container::Horizontal({absInput}) | ftxui::Renderer([](ftxui::Element inner) {
+                  return ftxui::hbox(
+                    {ftxui::text(" count > ") | ftxui::color(Theme::Status::info()),
+                     std::move(inner) | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 10)});
+              }),
               [this] { return selectedOutlierMethod == 2; });
 
             // Enhanced preview: delegates to computeOutliers — no duplication
