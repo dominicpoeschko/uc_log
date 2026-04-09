@@ -78,17 +78,17 @@
 
 namespace glz {
 /// Registers every non-`std::byte` enum type with glaze using
-/// `magic_enum`-derived names, satisfying `glaze_enum_t<T>`.
+/// `enchantum`-derived names, satisfying `glaze_enum_t<T>`.
 template<typename T>
     requires(std::is_enum_v<T> && !std::is_same_v<T, std::byte>)
 struct meta<T> {
     static constexpr auto value = []<std::size_t... Is>(std::index_sequence<Is...>) {
-        constexpr auto names  = magic_enum::enum_names<T>();
-        constexpr auto values = magic_enum::enum_values<T>();
+        constexpr auto names  = enchantum::names<T>;
+        constexpr auto values = enchantum::values<T>;
         return std::apply(
           [](auto&&... args) { return glz::enumerate(std::forward<decltype(args)>(args)...); },
           std::tuple_cat(std::make_tuple(names[Is], values[Is])...));
-    }(std::make_index_sequence<magic_enum::enum_count<T>()>{});
+    }(std::make_index_sequence<enchantum::count<T>>{});
 };
 
 /// Serialises std::set<std::pair<K,V>> as a JSON array-of-arrays [[k,v],...].
@@ -1278,7 +1278,7 @@ namespace uc_log { namespace FTXUIGui {
 
             for(auto level : levels) {
                 auto checkbox = FunctionCheckbox(
-                  std::string{magic_enum::enum_name(level)},
+                  std::string{enchantum::to_string(level)},
                   [level, this]() {
                       return editedFilterState.enabledLogLevels.contains(level)
                           || editedFilterState.enabledLogLevels.empty();

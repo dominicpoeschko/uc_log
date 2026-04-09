@@ -106,13 +106,13 @@ if(UC_LOG_BUILD_PRINTER)
             main)
 
         find_or_fetch_package(
-            magic_enum
+            enchantum
             GIT_REPOSITORY
-            https://github.com/Neargye/magic_enum
+            https://github.com/ZXShady/enchantum
             GIT_TAG
-            v0.9.7
+            0.4.0
             GIT_BRANCH
-            master)
+            main)
 
         find_or_fetch_package(
             glaze
@@ -143,7 +143,7 @@ if(UC_LOG_BUILD_PRINTER)
                     ftxui::screen
                     ftxui::dom
                     ftxui::component
-                    magic_enum::magic_enum
+                    enchantum::enchantum
                     glaze::glaze)
 
         target_compile_definitions(uc_log_printer PRIVATE CXXOPTS_NO_RTTI)

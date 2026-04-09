@@ -4,29 +4,25 @@
 #include "uc_log/metric_utils.hpp"
 #include "uc_log/theme.hpp"
 
+#include <algorithm>
+#include <array>
+#include <charconv>
 #ifdef __GNUC__
     #pragma GCC diagnostic push
     #pragma GCC diagnostic ignored "-Wextra-semi"
 #endif
-
 #ifdef __clang__
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+    #pragma clang diagnostic ignored "-Wnewline-eof"
 #endif
-
-#include <magic_enum/magic_enum.hpp>
-
+#include <enchantum/enchantum.hpp>
 #ifdef __GNUC__
     #pragma GCC diagnostic pop
 #endif
-
 #ifdef __clang__
     #pragma clang diagnostic pop
 #endif
-
-#include <algorithm>
-#include <array>
-#include <charconv>
 #include <fmt/format.h>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
