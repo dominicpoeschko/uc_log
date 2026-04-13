@@ -716,6 +716,12 @@ namespace uc_log { namespace FTXUIGui {
                             if(i + 2 < codes.size() && codes[i + 1] == 5) {
                                 currentFgColor = ftxui::Color::Palette256(codes[i + 2]);
                                 i += 2;
+                            } else if(i + 4 < codes.size() && codes[i + 1] == 2) {
+                                currentFgColor
+                                  = ftxui::Color::RGB(static_cast<uint8_t>(codes[i + 2]),
+                                                      static_cast<uint8_t>(codes[i + 3]),
+                                                      static_cast<uint8_t>(codes[i + 4]));
+                                i += 4;
                             }
                             break;
                         case 39: currentFgColor = ftxui::Color::Default; break;
@@ -731,6 +737,12 @@ namespace uc_log { namespace FTXUIGui {
                             if(i + 2 < codes.size() && codes[i + 1] == 5) {
                                 currentBgColor = ftxui::Color::Palette256(codes[i + 2]);
                                 i += 2;
+                            } else if(i + 4 < codes.size() && codes[i + 1] == 2) {
+                                currentBgColor
+                                  = ftxui::Color::RGB(static_cast<uint8_t>(codes[i + 2]),
+                                                      static_cast<uint8_t>(codes[i + 3]),
+                                                      static_cast<uint8_t>(codes[i + 4]));
+                                i += 4;
                             }
                             break;
                         case 49:  currentBgColor = ftxui::Color::Default; break;
