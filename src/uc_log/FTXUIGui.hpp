@@ -1469,18 +1469,65 @@ namespace uc_log { namespace FTXUIGui {
             };
 
             dropdownComponents.push_back(ftxui::Dropdown(dropdownOptions));
-            dropdownComponents.push_back(ftxui::Maybe(
+
+            auto getSelectedLocation = [this]() -> SourceLocation {
+                if(!allSourceLocations.empty()
+                   && static_cast<std::size_t>(selectedLocationIndex) < allSourceLocations.size())
+                {
+                    return std::next(allSourceLocations.begin(), selectedLocationIndex)->first;
+                }
+                return {};
+            };
+
+            auto hasSelectedLocation
+              = [getSelectedLocation]() { return !getSelectedLocation().first.empty(); };
+
+            auto includeLineButton = ftxui::Maybe(
               ftxui::Button(
-                "🟢 Include",
-                [addIncludeEntry, this]() { addIncludeEntry(selectedSourceLocation); },
+                "🟢 Include Line",
+                [addIncludeEntry, getSelectedLocation]() {
+                    addIncludeEntry(getSelectedLocation());
+                },
                 createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text())),
-              [this]() { return !selectedSourceLocation.first.empty(); }));
-            dropdownComponents.push_back(ftxui::Maybe(
+              hasSelectedLocation);
+            auto excludeLineButton = ftxui::Maybe(
               ftxui::Button(
-                "🔴 Exclude",
-                [addExcludeEntry, this]() { addExcludeEntry(selectedSourceLocation); },
+                "🔴 Exclude Line",
+                [addExcludeEntry, getSelectedLocation]() {
+                    addExcludeEntry(getSelectedLocation());
+                },
                 createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text())),
-              [this]() { return !selectedSourceLocation.first.empty(); }));
+              hasSelectedLocation);
+
+            auto includeFileButton = ftxui::Maybe(
+              ftxui::Button(
+                "📁🟢 Include File",
+                [addIncludeEntry, getSelectedLocation]() {
+                    addIncludeEntry(SourceLocation{getSelectedLocation().first, 0});
+                },
+                createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text())),
+              hasSelectedLocation);
+            auto excludeFileButton = ftxui::Maybe(
+              ftxui::Button(
+                "📁🔴 Exclude File",
+                [addExcludeEntry, getSelectedLocation]() {
+                    addExcludeEntry(SourceLocation{getSelectedLocation().first, 0});
+                },
+                createButtonStyle(Theme::Button::Background::danger(), Theme::Button::text())),
+              hasSelectedLocation);
+
+            auto lineButtons = ftxui::Container::Horizontal({includeLineButton, excludeLineButton});
+            auto fileButtons = ftxui::Container::Horizontal({includeFileButton, excludeFileButton});
+
+            auto buttonRows
+              = ftxui::Container::Vertical({lineButtons, fileButtons})
+              | ftxui::Renderer([lineButtons, fileButtons](ftxui::Element) {
+                    return ftxui::vbox({lineButtons->Render(),
+                                        ftxui::separator() | ftxui::color(Theme::UI::separator()),
+                                        fileButtons->Render()});
+                });
+
+            dropdownComponents.push_back(buttonRows);
 
             auto dropdownComponent = ftxui::Container::Horizontal(dropdownComponents);
 
