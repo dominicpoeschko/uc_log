@@ -67,13 +67,13 @@ parseMapFileForControlBlockInfo(std::filesystem::path const& mapFile) {
         if(ec1 != std::errc{}) { continue; }
 
         // skip whitespace + LMA field
-        while(afterAddr != lineEnd && *afterAddr == ' ') { ++afterAddr; }
+        afterAddr = std::find_if_not(afterAddr, lineEnd, [](char c) { return c == ' '; });
         std::uint32_t lma{};
         auto [afterLma, ec2] = std::from_chars(afterAddr, lineEnd, lma, 16);
         if(ec2 != std::errc{}) { continue; }
 
         // skip whitespace + parse size field
-        while(afterLma != lineEnd && *afterLma == ' ') { ++afterLma; }
+        afterLma = std::find_if_not(afterLma, lineEnd, [](char c) { return c == ' '; });
         std::uint32_t size{};
         auto [afterSize, ec3] = std::from_chars(afterLma, lineEnd, size, 16);
         if(ec3 != std::errc{}) { continue; }
