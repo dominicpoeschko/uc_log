@@ -1,6 +1,7 @@
 #pragma once
 #include "jlink/JLink.hpp"
 #include "remote_fmt/remote_fmt.hpp"
+#include "uc_log/RttBlockInfo.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -129,9 +130,11 @@ private:
                 if(restart) { continue; }
                 auto const stringConstantsMap = catalogMapCallback();
 
-                jlink.startRtt(numChannels, blockAddressCallback());
+                auto const blockInfo    = blockInfoCallback();
+                auto const numChannels_ = blockInfo.numUpBuffers;
+                jlink.startRtt(numChannels_, blockInfo.address);
                 std::vector<Channel> channels{};
-                channels.resize(numChannels);
+                channels.resize(numChannels_);
                 auto lastMessage      = Clock::now();
                 auto lastHaltDetected = Clock::time_point{};
 
@@ -155,7 +158,7 @@ private:
                     JLink::Status const local_status = jlink.readStatus();
                     status                           = local_status;
                     if(local_status.isRunning == 0
-                       || local_status.numUpBuffers != static_cast<int>(numChannels))
+                       || local_status.numUpBuffers != static_cast<int>(numChannels_))
                     {
                         throw std::runtime_error("lost connection");
                     }
@@ -188,9 +191,8 @@ private:
     std::string   host;
     std::string   device;
     std::uint32_t speed;
-    std::uint32_t numChannels;
 
-    std::function<std::uint32_t(void)>                                  blockAddressCallback;
+    std::function<RttBlockInfo(void)>                                   blockInfoCallback;
     std::function<std::string(void)>                                    hexFileNameCallback;
     std::function<std::unordered_map<std::uint16_t, std::string>(void)> catalogMapCallback;
     std::function<void(std::size_t, std::string_view)>                  entryPrintCallback;
@@ -213,7 +215,7 @@ private:
     std::jthread               thread;
 
 public:
-    template<typename BlockAddressF,
+    template<typename BlockInfoF,
              typename EntryPrintF,
              typename HexFileNameF,
              typename CatalogMapF,
@@ -224,8 +226,7 @@ public:
     JLinkRttReader(std::string         host_,
                    std::string         device_,
                    std::uint32_t       speed_,
-                   std::uint32_t       numChannels_,
-                   BlockAddressF&&     blockAddressf,
+                   BlockInfoF&&        blockInfof,
                    HexFileNameF&&      hexFileNamef,
                    CatalogMapF&&       catalogMapf,
                    EntryPrintF&&       entryPrintf,
@@ -236,8 +237,7 @@ public:
       : host{std::move(host_)}
       , device{std::move(device_)}
       , speed{speed_}
-      , numChannels{numChannels_}
-      , blockAddressCallback{std::forward<BlockAddressF>(blockAddressf)}
+      , blockInfoCallback{std::forward<BlockInfoF>(blockInfof)}
       , hexFileNameCallback{std::forward<HexFileNameF>(hexFileNamef)}
       , catalogMapCallback{std::forward<CatalogMapF>(catalogMapf)}
       , entryPrintCallback{std::forward<EntryPrintF>(entryPrintf)}

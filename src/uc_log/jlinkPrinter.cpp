@@ -6,6 +6,7 @@
 #include "uc_log/FTXUIGui.hpp"
 #include "uc_log/JLinkRttReader.hpp"
 #include "uc_log/LogLevel.hpp"
+#include "uc_log/RttBlockInfo.hpp"
 #include "uc_log/TimeDelayedQueue.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 #include "uc_log/detail/TcpSender.hpp"
@@ -38,10 +39,12 @@
 #include <ranges>
 
 namespace {
-std::expected<std::uint32_t,
+std::expected<RttBlockInfo,
               std::string>
-parseMapFileForControlBlockAddress(std::filesystem::path const& mapFile) {
+parseMapFileForControlBlockInfo(std::filesystem::path const& mapFile) {
     static constexpr std::string_view needle{"::rttControlBlock"};
+    static constexpr std::uint32_t    controlBlockHeaderSize{24};   // 16 ID + 4 numUp + 4 numDown
+    static constexpr std::uint32_t    bufferControlBlockSize{24};   // per RTT spec
 
     std::ifstream file{mapFile};
     if(!file) { return std::unexpected(fmt::format("failed to open map file: {:?}", mapFile)); }
@@ -56,13 +59,32 @@ parseMapFileForControlBlockAddress(std::filesystem::path const& mapFile) {
                       | std::views::filter([](auto&& line) { return line.contains(needle); });
 
     for(auto addressLine : addressLines) {
+        auto const lineEnd = std::next(std::data(addressLine), std::ssize(addressLine));
+
+        // parse: "<address> <lma> <size> ..."
         std::uint32_t address{};
-        auto const [ptr, ec]
-          = std::from_chars(std::data(addressLine),
-                            std::next(std::data(addressLine), std::ssize(addressLine)),
-                            address,
-                            16);
-        if(ec == std::errc{}) { return address; }
+        auto [afterAddr, ec1] = std::from_chars(std::data(addressLine), lineEnd, address, 16);
+        if(ec1 != std::errc{}) { continue; }
+
+        // skip whitespace + LMA field
+        while(afterAddr != lineEnd && *afterAddr == ' ') { ++afterAddr; }
+        std::uint32_t lma{};
+        auto [afterLma, ec2] = std::from_chars(afterAddr, lineEnd, lma, 16);
+        if(ec2 != std::errc{}) { continue; }
+
+        // skip whitespace + parse size field
+        while(afterLma != lineEnd && *afterLma == ' ') { ++afterLma; }
+        std::uint32_t size{};
+        auto [afterSize, ec3] = std::from_chars(afterLma, lineEnd, size, 16);
+        if(ec3 != std::errc{}) { continue; }
+
+        if(size >= controlBlockHeaderSize
+           && (size - controlBlockHeaderSize) % bufferControlBlockSize == 0)
+        {
+            std::uint32_t const totalBuffers
+              = (size - controlBlockHeaderSize) / bufferControlBlockSize;
+            return RttBlockInfo{address, totalBuffers};
+        }
     }
 
     return std::unexpected(
@@ -151,7 +173,6 @@ int main(int    argc,
          char** argv) {
     std::uint32_t speed{};
     std::string   device{};
-    std::uint32_t channels{};
     std::string   mapFile{};
     std::string   hexFile{};
     std::string   stringConstantsFile{};
@@ -167,28 +188,25 @@ int main(int    argc,
           "speed",
           "swd speed",
           cxxopts::value<std::uint32_t>())("device", "mpu device", cxxopts::value<std::string>())(
-          "channels",
-          "rtt channels",
-          cxxopts::value<std::uint32_t>())("build_command",
-                                           "build command",
-                                           cxxopts::value<std::string>())(
-          "map_file",
-          "map file",
-          cxxopts::value<std::string>())("hex_file", "hex file", cxxopts::value<std::string>())(
-          "string_constants_file",
-          "string constants map file",
-          cxxopts::value<std::string>())("log_dir",
-                                         "log file directory",
+          "build_command",
+          "build command",
+          cxxopts::value<std::string>())("map_file", "map file", cxxopts::value<std::string>())(
+          "hex_file",
+          "hex file",
+          cxxopts::value<std::string>())("string_constants_file",
+                                         "string constants map file",
                                          cxxopts::value<std::string>())(
-          "host",
-          "jlink host",
-          cxxopts::value<std::string>()->default_value(
-            ""))("disable_ui", "disable ui and just log to file and tcp");
+          "log_dir",
+          "log file directory",
+          cxxopts::value<std::string>())("host",
+                                         "jlink host",
+                                         cxxopts::value<std::string>()->default_value(""))(
+          "disable_ui",
+          "disable ui and just log to file and tcp");
         auto const result   = options.parse(argc, argv);
         port                = result["metrics_port"].as<std::uint16_t>();
         speed               = result["speed"].as<std::uint32_t>();
         device              = result["device"].as<std::string>();
-        channels            = result["channels"].as<std::uint32_t>();
         buildCommand        = result["build_command"].as<std::string>();
         mapFile             = result["map_file"].as<std::string>();
         hexFile             = result["hex_file"].as<std::string>();
@@ -217,11 +235,10 @@ int main(int    argc,
     JLinkRttReader rttReader{host,
                              device,
                              speed,
-                             channels,
                              [&mapFile, &gui]() {
-                                 auto const result = parseMapFileForControlBlockAddress(mapFile);
+                                 auto const result = parseMapFileForControlBlockInfo(mapFile);
                                  if(!result.has_value()) { gui.fatalError(result.error()); }
-                                 return result.value_or(0);
+                                 return result.value_or(RttBlockInfo{});
                              },
                              [&hexFile]() { return hexFile; },
                              [&stringConstantsFile, &gui]() {

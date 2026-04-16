@@ -3,6 +3,7 @@
 #include "ComBackend.hpp"
 #include "LogClock.hpp"
 #include "LogLevel.hpp"
+#include "detail/LevelBoundBackend.hpp"
 #include "metric.hpp"
 #include "remote_fmt/remote_fmt.hpp"
 #include "rtt/rtt.hpp"
@@ -50,7 +51,9 @@ namespace uc_log { namespace detail {
                 constexpr auto UC_LOG_DO_NOT_USE_FUNCTION_NAME = __FUNCTION__;                \
                 using namespace ::remote_fmt::detail;                                         \
                 using namespace ::sc::literals;                                               \
-                ::uc_log::detail::log<::uc_log::ComBackend<::uc_log::Tag::User>>(             \
+                ::uc_log::detail::log<                                                        \
+                  ::uc_log::detail::ResolveBackend<::uc_log::Tag::User,                       \
+                                                   static_cast<::uc_log::LogLevel>(level)>>(  \
                   "(\""_sc + SC_LIFT(::uc_log::detail::FileName{filename}) + "\", "_sc        \
                     + ::sc::detail::format<static_cast<std::uint32_t>(line),                  \
                                            static_cast<std::uint8_t>(level)>("{}, {}"_sc)     \

@@ -178,7 +178,6 @@ function(target_add_uc_log_rtt_jlink targetname)
         TARGET_MPU
         SWD_SPEED
         JLINK_IP
-        CHANNELS
         MAP_FILE
         PREFIX
         METRICS_PORT
@@ -203,12 +202,6 @@ function(target_add_uc_log_rtt_jlink targetname)
         set(PARSED_ARGS_SWD_SPEED 100000)
     elseif(${PARSED_ARGS_SWD_SPEED} LESS 1000 OR ${PARSED_ARGS_SWD_SPEED} GREATER 50000000)
         message(WARNING "SWD_SPEED ${PARSED_ARGS_SWD_SPEED} may be out of valid range (1000-50000000)")
-    endif()
-
-    if(NOT PARSED_ARGS_CHANNELS)
-        set(PARSED_ARGS_CHANNELS 2)
-    elseif(${PARSED_ARGS_CHANNELS} LESS 1 OR ${PARSED_ARGS_CHANNELS} GREATER 16)
-        message(WARNING "CHANNELS ${PARSED_ARGS_CHANNELS} may be out of valid range (1-16)")
     endif()
 
     if(NOT PARSED_ARGS_MAP_FILE)
@@ -265,8 +258,6 @@ function(target_add_uc_log_rtt_jlink targetname)
         ${PARSED_ARGS_TARGET_MPU}
         --speed
         ${PARSED_ARGS_SWD_SPEED}
-        --channels
-        ${PARSED_ARGS_CHANNELS}
         --map_file
         ${PARSED_ARGS_MAP_FILE}
         --hex_file
