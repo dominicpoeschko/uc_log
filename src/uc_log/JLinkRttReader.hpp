@@ -112,6 +112,9 @@ private:
                 bool restart = false;
 
                 if(flashFlag) {
+                    toolMessageCallback("resetting target");
+                    jlink.resetTarget();
+                    toolMessageCallback("resetting target succeeded");
                     toolMessageCallback("flashing target");
                     jlink.flash(hexFileNameCallback());
                     toolMessageCallback("flashing target succeeded");
@@ -139,7 +142,7 @@ private:
                 auto lastHaltDetected = Clock::time_point{};
 
                 while(!stoken.stop_requested() && !jlinkResetFlag && !targetResetFlag && !flashFlag
-                      && !((Clock::now() > lastMessage + std::chrono::seconds{5})
+                      && !((Clock::now() > lastMessage + std::chrono::seconds{noLogTimeoutSeconds_})
                            && (Clock::now() > lastHaltDetected + std::chrono::seconds{60})))
                 {
                     for(std::size_t channelId{}; auto& channel : channels) {
@@ -202,6 +205,7 @@ private:
     std::function<void(std::string_view)>                               toolErrorMessageCallback;
 
     std::atomic<JLink::Status> status;
+    std::atomic<std::uint32_t> noLogTimeoutSeconds_{15};
     std::atomic<bool>          targetResetFlag;
     std::atomic<bool>          targetContinueFlag;
     std::atomic<bool>          targetHaltFlag;
@@ -280,4 +284,6 @@ public:
     void flash() { flashFlag = true; }
 
     bool isFlashing() const { return flashFlag; }
+
+    void setNoLogTimeout(std::uint32_t seconds) { noLogTimeoutSeconds_ = seconds; }
 };

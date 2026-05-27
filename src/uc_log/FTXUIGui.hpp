@@ -324,6 +324,8 @@ namespace uc_log { namespace FTXUIGui {
         int              connectionTypeSelection{0};   // 0 = USB, 1 = IP
         std::string      ipAddressInput{};
         ftxui::Component ipAddressInputComponent;
+        std::string      noLogTimeoutStr{"15"};
+        ftxui::Component noLogTimeoutInput;
 
         std::unique_ptr<boost::asio::io_context> buildIoContext;
         std::jthread                             buildThread;
@@ -340,6 +342,16 @@ namespace uc_log { namespace FTXUIGui {
         void addBuildOutputGui(std::string const& line,
                                bool               isError) {
             buildOutput.emplace_back(std::chrono::system_clock::now(), line, false, isError);
+        }
+
+        static ftxui::ComponentDecorator numericFilter(bool allowDot) {
+            return ftxui::CatchEvent([allowDot](ftxui::Event const& e) {
+                if(!e.is_character()) { return false; }
+                auto const& s = e.character();
+                if(s.size() != 1) { return true; }
+                char const c = s[0];
+                return !((c >= '0' && c <= '9') || (allowDot && c == '.'));
+            });
         }
 
         static std::vector<std::string> splitIntoLines(std::string_view msg) {
@@ -1394,7 +1406,11 @@ namespace uc_log { namespace FTXUIGui {
                 return ftxui::text("📝 Manual:") | ftxui::bold
                      | ftxui::color(Theme::Header::accent());
             }));
-            manualLocationInput = ftxui::Input(&locationFilterInput, "filename:line") | ftxui::flex;
+            ftxui::InputOption manualLocationOpts;
+            manualLocationOpts.multiline = false;
+            manualLocationInput
+              = ftxui::Input(&locationFilterInput, "filename:line", manualLocationOpts)
+              | ftxui::flex;
             manualInputComponents.push_back(manualLocationInput);
             manualInputComponents.push_back(ftxui::Maybe(
               ftxui::Button(
@@ -1660,7 +1676,9 @@ namespace uc_log { namespace FTXUIGui {
               [this]() { loadFilterConfig(filterConfigPath, editedFilterState); },
               createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
 
-            filterConfigInput = ftxui::Input(&filterConfigPath, "filter.json");
+            ftxui::InputOption filterConfigOpts;
+            filterConfigOpts.multiline = false;
+            filterConfigInput = ftxui::Input(&filterConfigPath, "filter.json", filterConfigOpts);
 
             // File row: label + input + status
             auto fileRow = ftxui::Container::Horizontal({filterConfigInput})
@@ -1747,14 +1765,15 @@ namespace uc_log { namespace FTXUIGui {
             });
 
             // Statistical (IQR/Tukey) sensitivity param row (float text input, shown only for method 0)
-            iqrInput         = ftxui::Input(&iqrMultiplierStr, "1.5");
-            iqrInput         = ftxui::CatchEvent(iqrInput, [this](ftxui::Event const&) -> bool {
+            ftxui::InputOption iqrOpts;
+            iqrOpts.multiline = false;
+            iqrOpts.on_change = [this]() {
                 try {
                     double const v = std::stod(iqrMultiplierStr);
                     if(v > 0.0) { iqrMultiplier = v; }
                 } catch(std::exception const&) {}
-                return false;
-            });
+            };
+            iqrInput = ftxui::Input(&iqrMultiplierStr, "1.5", iqrOpts) | numericFilter(true);
             auto iqrParamRow = ftxui::Maybe(
               ftxui::Container::Horizontal({iqrInput}) | ftxui::Renderer([](ftxui::Element inner) {
                   return ftxui::hbox(
@@ -1764,14 +1783,15 @@ namespace uc_log { namespace FTXUIGui {
               [this] { return selectedOutlierMethod == 0; });
 
             // Top Percent param row (float text input, shown only for method 1)
-            topNInput         = ftxui::Input(&topNPercentStr, "10");
-            topNInput         = ftxui::CatchEvent(topNInput, [this](ftxui::Event const&) -> bool {
+            ftxui::InputOption topNOpts;
+            topNOpts.multiline = false;
+            topNOpts.on_change = [this]() {
                 try {
                     double const v = std::stod(topNPercentStr);
                     if(v > 0.0 && v < 100.0) { topNPercent = v; }
                 } catch(std::exception const&) {}
-                return false;
-            });
+            };
+            topNInput         = ftxui::Input(&topNPercentStr, "10", topNOpts) | numericFilter(true);
             auto topNParamRow = ftxui::Maybe(
               ftxui::Container::Horizontal({topNInput}) | ftxui::Renderer([](ftxui::Element inner) {
                   return ftxui::hbox(
@@ -1781,14 +1801,15 @@ namespace uc_log { namespace FTXUIGui {
               [this] { return selectedOutlierMethod == 1; });
 
             // Count Limit param row (integer text input, shown only for method 2)
-            absInput         = ftxui::Input(&absoluteThresholdStr, "100");
-            absInput         = ftxui::CatchEvent(absInput, [this](ftxui::Event const&) -> bool {
+            ftxui::InputOption absOpts;
+            absOpts.multiline = false;
+            absOpts.on_change = [this]() {
                 try {
                     auto const v      = std::stoull(absoluteThresholdStr);
                     absoluteThreshold = static_cast<std::size_t>(v);
                 } catch(std::exception const&) {}
-                return false;
-            });
+            };
+            absInput = ftxui::Input(&absoluteThresholdStr, "100", absOpts) | numericFilter(false);
             auto absParamRow = ftxui::Maybe(
               ftxui::Container::Horizontal({absInput}) | ftxui::Renderer([](ftxui::Element inner) {
                   return ftxui::hbox(
@@ -2175,7 +2196,10 @@ namespace uc_log { namespace FTXUIGui {
               = ftxui::Radiobox(std::vector<std::string>{"USB (local)", "IP (remote)"},
                                 &connectionTypeSelection);
 
-            ipAddressInputComponent = ftxui::Input(&ipAddressInput, "host or IP address...");
+            ftxui::InputOption ipAddressOpts;
+            ipAddressOpts.multiline = false;
+            ipAddressInputComponent
+              = ftxui::Input(&ipAddressInput, "host or IP address...", ipAddressOpts);
             auto ipInputMaybe = ftxui::Maybe(ipAddressInputComponent | ftxui::flex,
                                              [this]() { return connectionTypeSelection == 1; });
 
@@ -2196,8 +2220,29 @@ namespace uc_log { namespace FTXUIGui {
                                             applyConnBtn})
               | ftxui::border;
 
+            ftxui::InputOption noLogTimeoutOpts;
+            noLogTimeoutOpts.multiline = false;
+            noLogTimeoutOpts.on_change = [this, &rttReader]() {
+                try {
+                    auto const v = std::stoi(noLogTimeoutStr);
+                    if(v > 0) { rttReader.setNoLogTimeout(static_cast<std::uint32_t>(v)); }
+                } catch(std::exception const&) {}
+            };
+            noLogTimeoutInput
+              = ftxui::Input(&noLogTimeoutStr, "15", noLogTimeoutOpts) | numericFilter(false);
+            auto timeoutRow
+              = ftxui::Container::Horizontal({noLogTimeoutInput})
+              | ftxui::Renderer([](ftxui::Element inner) {
+                    return ftxui::hbox(
+                      {ftxui::text("No-log reconnect timeout (s): ")
+                         | ftxui::color(Theme::Status::info()),
+                       std::move(inner) | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 6)});
+                });
+
             return ftxui::Container::Vertical(
               {connPanel,
+               ftxui::Renderer([]() { return ftxui::separator(); }),
+               timeoutRow,
                ftxui::Renderer([]() { return ftxui::separator(); }),
                ftxui::Container::Horizontal({resetTargetBtn | ftxui::flex,
                                              resetDebuggerBtn | ftxui::flex,
@@ -2519,7 +2564,8 @@ namespace uc_log { namespace FTXUIGui {
                                || (iqrInput && iqrInput->Focused())
                                || (topNInput && topNInput->Focused())
                                || (absInput && absInput->Focused())
-                               || (ipAddressInputComponent && ipAddressInputComponent->Focused())))
+                               || (ipAddressInputComponent && ipAddressInputComponent->Focused())
+                               || (noLogTimeoutInput && noLogTimeoutInput->Focused())))
                         {
                             return false;
                         }
