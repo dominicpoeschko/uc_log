@@ -9,6 +9,7 @@
 #include "uc_log/RttBlockInfo.hpp"
 #include "uc_log/TimeDelayedQueue.hpp"
 #include "uc_log/detail/LogEntry.hpp"
+#include "uc_log/detail/LogFormat.hpp"
 #include "uc_log/detail/TcpSender.hpp"
 #include "uc_log/metric_utils.hpp"
 
@@ -91,55 +92,62 @@ parseMapFileForControlBlockInfo(std::filesystem::path const& mapFile) {
       fmt::format("failed to parse address from file: {:?} lines: {::?}", mapFile, addressLines));
 }
 
-std::string to_iso8601_UTC_string(std::chrono::system_clock::time_point const& value) {
-    //1970-01-01T00:00:00.000Z
-    auto const time{std::chrono::system_clock::to_time_t(value)};
-    auto const utc     = fmt::gmtime(time);
-    auto const seconds = std::chrono::duration_cast<std::chrono::seconds>(
-      value - std::chrono::time_point_cast<std::chrono::minutes>(value));
-    auto const milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
-      value - std::chrono::time_point_cast<std::chrono::seconds>(value));
-    return fmt::format("{:%FT%H:%M}:{:02}.{:03}Z", utc, seconds.count(), milliseconds.count());
-}
-
 struct LogFilePrinter {
-    uc_log::FTXUIGui::Gui& gui;
-    std::filesystem::path  logFilePath;
-    std::ofstream          logFile;
-    bool                   errorShown{false};
+    std::function<void(std::string_view)>                errorMessagef;
+    std::function<void(LogFileStatus, std::string_view)> statusChangef;
+    std::filesystem::path                                logFilePath;
+    std::ofstream                                        logFile;
+    bool                                                 errorShown{false};
+    bool                                                 logFileEnabled{true};
+    std::mutex                                           mutex;
 
-    LogFilePrinter(uc_log::FTXUIGui::Gui& gui_,
+    LogFilePrinter(uc_log::FTXUIGui::Gui& gui,
                    std::string const&     logDir)
-      : gui{gui_}
-      , logFilePath{std::filesystem::path{logDir}
-                    / fmt::format("{}.rttlog",
-                                  to_iso8601_UTC_string(std::chrono::system_clock::now()))}
-      , logFile{logFilePath} {
-        if(!logFile.is_open()) {
-            fmt::print(stderr, "failed to open logfile: {:?}", logFilePath);
-            std::terminate();
-        }
-        fmt::print(logFile, "recv_time_utc,channel,file,line,function,log_level,uc_time,message\n");
+      : errorMessagef{[&gui](auto const& m) { gui.errorMessage(m); }}
+      , statusChangef{[&gui](LogFileStatus    s,
+                             std::string_view p) { gui.setLogFileStatus(s, p); }} {
+        openFileUnlocked(logDir);
+    }
+
+    void changeDir(std::string const& newDir) {
+        std::lock_guard<std::mutex> const lock{mutex};
+        openFileUnlocked(newDir);
+    }
+
+    void setEnabled(bool enabled) {
+        std::lock_guard<std::mutex> const lock{mutex};
+        logFileEnabled = enabled;
     }
 
     void add(std::chrono::system_clock::time_point recv_time,
              uc_log::detail::LogEntry const&       entry) {
+        std::lock_guard<std::mutex> const lock{mutex};
+        if(!logFileEnabled) { return; }
         if(logFile) {
-            fmt::print(logFile,
-                       "{},{},{:?},{},{:?},{:#},{},{:?}\n",
-                       to_iso8601_UTC_string(recv_time),
-                       entry.channel.channel,
-                       entry.fileName,
-                       entry.line,
-                       entry.functionName,
-                       entry.logLevel,
-                       entry.ucTime.time,
-                       entry.logMsg);
+            uc_log::detail::logformat::writeEntry(logFile, recv_time, entry);
         } else {
             if(!errorShown) {
-                gui.errorMessage(fmt::format("error writing logFile: {:?}", logFilePath));
+                errorMessagef(fmt::format("error writing logFile: {:?}", logFilePath));
                 errorShown = true;
             }
+        }
+    }
+
+private:
+    void openFileUnlocked(std::string const& dir) {
+        logFile.close();
+        errorShown = false;
+        logFilePath
+          = std::filesystem::path{dir}
+          / fmt::format("{}.rttlog",
+                        uc_log::detail::logformat::toIso8601Utc(std::chrono::system_clock::now()));
+        logFile.open(logFilePath);
+        if(!logFile.is_open()) {
+            errorMessagef(fmt::format("failed to open logfile: {:?}", logFilePath));
+            if(statusChangef) { statusChangef(LogFileStatus::Error, logFilePath.string()); }
+        } else {
+            uc_log::detail::logformat::writeHeader(logFile);
+            if(statusChangef) { statusChangef(LogFileStatus::Active, logFilePath.string()); }
         }
     }
 };
@@ -150,7 +158,11 @@ struct TcpPrinter {
     TcpPrinter(uc_log::FTXUIGui::Gui& gui,
                std::uint16_t          port)
       : tcpSender{port,
-                  [&gui](auto const& msg) { gui.errorMessage(msg); }} {}
+                  [&gui](auto const& msg) { gui.errorMessage(msg); },
+                  [&gui](TcpPortStatus s,
+                         std::uint16_t p) { gui.setTcpPortStatus(s, p); }} {}
+
+    void restart(std::uint16_t newPort) { tcpSender.restart(newPort); }
 
     void add(std::chrono::system_clock::time_point recv_time,
              uc_log::detail::LogEntry const&       entry) {
@@ -222,6 +234,19 @@ int main(int    argc,
     uc_log::FTXUIGui::Gui gui{};
     LogFilePrinter        logFilePrinter{gui, logDir};
     TcpPrinter            tcpPrinter{gui, port};
+    gui.setOnTcpPortChange([&tcpPrinter](std::uint16_t newPort) { tcpPrinter.restart(newPort); });
+    gui.setTcpClientCountGetter([&tcpPrinter]() { return tcpPrinter.tcpSender.getClientCount(); });
+    gui.setOnLogDirChange(
+      [&logFilePrinter](std::string const& newDir) { logFilePrinter.changeDir(newDir); });
+    gui.setOnLogFileEnable([&logFilePrinter](bool enabled) { logFilePrinter.setEnabled(enabled); });
+    gui.setOnTcpEnable([&tcpPrinter, port](bool enabled) {
+        if(enabled) {
+            auto const current = tcpPrinter.tcpSender.getPort();
+            tcpPrinter.restart(current != 0 ? current : port);
+        } else {
+            tcpPrinter.tcpSender.stop();
+        }
+    });
 
     TimeDelayedQueue queue{
       [](auto const& entry) { return entry.entry.ucTime; },

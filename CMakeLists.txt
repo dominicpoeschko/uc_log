@@ -65,13 +65,13 @@ if(UC_LOG_BUILD_PRINTER)
             COMPONENTS
             ${Boost_Components}
             DOWNLOAD_URL
-            https://github.com/boostorg/boost/releases/download/boost-1.90.0/boost-1.90.0-cmake.tar.xz
+            https://github.com/boostorg/boost/releases/download/boost-1.91.0-1/boost-1.91.0-1-cmake.tar.xz
             DOWNLOAD_HASH
-            SHA256=aca59f889f0f32028ad88ba6764582b63c916ce5f77b31289ad19421a96c555f
+            SHA256=cc5dc5006ecbdf0051f90979be31b4eee5987d9ae14ae9fb9c03cfa43fa3cdad
             GIT_REPOSITORY
             https://github.com/boostorg/boost.git
             GIT_TAG
-            boost-1.90.0
+            boost-1.91.0-1
             GIT_BRANCH
             master)
 
@@ -81,7 +81,7 @@ if(UC_LOG_BUILD_PRINTER)
             GIT_REPOSITORY
             https://github.com/fmtlib/fmt.git
             GIT_TAG
-            12.1.0
+            12.2.0
             GIT_BRANCH
             master)
 
@@ -101,7 +101,7 @@ if(UC_LOG_BUILD_PRINTER)
             GIT_REPOSITORY
             https://github.com/ArthurSonzogni/ftxui
             GIT_TAG
-            3330de961ccdbcbc40207b43b4437eb1273677b7
+            v7.0.0
             GIT_BRANCH
             main)
 
@@ -119,7 +119,7 @@ if(UC_LOG_BUILD_PRINTER)
             GIT_REPOSITORY
             https://github.com/stephenberry/glaze.git
             GIT_TAG
-            v7.0.2
+            v7.7.1
             GIT_BRANCH
             main
             PATCH_FILE

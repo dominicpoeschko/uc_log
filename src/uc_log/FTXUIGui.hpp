@@ -2,6 +2,8 @@
 
 #include "uc_log/FTXUI_Utils.hpp"
 #include "uc_log/detail/LogEntry.hpp"
+#include "uc_log/detail/LogFormat.hpp"
+#include "uc_log/detail/TcpPortStatus.hpp"
 #include "uc_log/metric_utils.hpp"
 #include "uc_log/theme.hpp"
 
@@ -60,6 +62,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/loop.hpp>
@@ -68,6 +71,7 @@
 #include <ftxui/screen/terminal.hpp>
 #include <glaze/glaze.hpp>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -246,6 +250,9 @@ namespace uc_log { namespace FTXUIGui {
 
         std::mutex mutex;
 
+        // Actions posted by button callbacks and drained after loop.RunOnce() releases gui.mutex.
+        std::vector<std::function<void()>> pendingActions;
+
         std::atomic<bool> callJoin{false};
         std::size_t       nextMultilineGroupId{0};
 
@@ -265,6 +272,23 @@ namespace uc_log { namespace FTXUIGui {
         FilterState editedFilterState;
 
         std::function<bool(GuiLogEntry const&)> currentFilter = NoFilter;
+
+        // UC time filter (seconds from target start = 0.0)
+        bool             ucTimeFilterEnabled{false};
+        double           minUcTimeSec{0.0};
+        double           maxUcTimeSec{std::numeric_limits<double>::infinity()};
+        std::string      minUcTimeStr;
+        std::string      maxUcTimeStr;
+        ftxui::Component ucTimeMinInput;
+        ftxui::Component ucTimeMaxInput;
+
+        double ucTimeDataMin{std::numeric_limits<double>::infinity()};
+        double ucTimeDataMax{-std::numeric_limits<double>::infinity()};
+
+        bool             ucTimeLiveMode{false};
+        double           ucTimeLiveWindowSecs{10.0};
+        std::string      ucTimeLiveWindowStr{"10"};
+        ftxui::Component ucTimeLiveWindowInput;
 
         bool showSysTime{true};
         bool showFunctionName{false};
@@ -317,6 +341,29 @@ namespace uc_log { namespace FTXUIGui {
         int selectedTab{};
 
         int selectedMetricTab{};
+
+        TcpPortStatus                      tcpPortStatus{TcpPortStatus::NotStarted};
+        std::uint16_t                      tcpCurrentPort{0};
+        std::string                        tcpPortInput;
+        std::function<void(std::uint16_t)> onTcpPortChange;
+        std::function<std::size_t()>       tcpClientCountGetter;
+        ftxui::Component                   tcpPortInputComponent;
+
+        LogFileStatus                           logFileStatus{LogFileStatus::NotStarted};
+        std::string                             logFileCurrentPath;
+        std::string                             logDirInput;
+        std::function<void(std::string const&)> onLogDirChange;
+        std::function<void(bool)>               onLogFileEnable;
+        std::function<void(bool)>               onTcpEnable;
+        bool                                    logFileEnabled{true};
+        bool                                    tcpEnabled{true};
+        ftxui::Component                        logDirInputComponent;
+
+        std::string      exportDirInput;
+        ftxui::Component exportDirInputComponent;
+        std::string      lastExportPath;
+        std::size_t      lastExportCount{0};
+        bool             lastExportOk{false};
 
         Statistics statistics;
 
@@ -820,17 +867,48 @@ namespace uc_log { namespace FTXUIGui {
             return ftxui::hbox(elements);
         }
 
+        bool passesAllFilters(GuiLogEntry const& ep) const {
+            if(!currentFilter(ep)) { return false; }
+            if(ucTimeFilterEnabled) {
+                auto const s = std::chrono::duration<double>(ep.logEntry.ucTime.time).count();
+                if(s < minUcTimeSec || s > maxUcTimeSec) { return false; }
+            }
+
+            return true;
+        }
+
         void updateFilteredLogEntries() {
             filteredLogEntries.clear();
             std::set<std::size_t> uniqueGroupIds{};
             std::ranges::copy_if(allLogEntries,
                                  std::back_inserter(filteredLogEntries),
-                                 [&](auto const& value) {
-                                     bool const active = currentFilter(*value);
-                                     if(active) { uniqueGroupIds.insert(value->multilineGroupId); }
-                                     return active;
+                                 [&](auto const& ep) {
+                                     if(!passesAllFilters(*ep)) { return false; }
+                                     uniqueGroupIds.insert(ep->multilineGroupId);
+                                     return true;
                                  });
             filteredOriginalLogCount = uniqueGroupIds.size();
+        }
+
+        void clearBeforeLastBoot() {
+            auto it = allLogEntries.end();
+            for(auto cur = std::next(allLogEntries.begin()); cur != allLogEntries.end(); ++cur) {
+                auto prev = std::prev(cur);
+                if((*cur)->logEntry.ucTime.time < (*prev)->logEntry.ucTime.time) { it = cur; }
+            }
+            if(it == allLogEntries.end()) { return; }
+            allLogEntries.erase(allLogEntries.begin(), it);
+            std::set<std::size_t> uniqueGroupIds;
+            ucTimeDataMin = std::numeric_limits<double>::infinity();
+            ucTimeDataMax = -std::numeric_limits<double>::infinity();
+            for(auto const& ep : allLogEntries) {
+                uniqueGroupIds.insert(ep->multilineGroupId);
+                auto const ucSecs = std::chrono::duration<double>(ep->logEntry.ucTime.time).count();
+                ucTimeDataMin     = std::min(ucTimeDataMin, ucSecs);
+                ucTimeDataMax     = std::max(ucTimeDataMax, ucSecs);
+            }
+            originalLogCount = uniqueGroupIds.size();
+            updateFilteredLogEntries();
         }
 
         auto createFilter(FilterState const& filterState) {
@@ -871,6 +949,28 @@ namespace uc_log { namespace FTXUIGui {
                 }
                 return true;
             };
+        }
+
+        void exportFilteredLogs(std::string                                     dir,
+                                std::vector<std::shared_ptr<GuiLogEntry const>> entries) {
+            namespace lf       = uc_log::detail::logformat;
+            namespace fs       = std::filesystem;
+            auto const    path = fs::path{dir}
+                               / fmt::format("filtered_{}.rttlog",
+                                             lf::toIso8601Utc(std::chrono::system_clock::now()));
+            std::ofstream f{path};
+            if(!f.is_open()) {
+                lastExportPath = path.string();
+                lastExportOk   = false;
+                errorMessage(fmt::format("Export failed — cannot write: {:?}", path));
+                return;
+            }
+            lf::writeHeader(f);
+            for(auto const& ep : entries) { lf::writeEntry(f, ep->recv_time, ep->logEntry); }
+            lastExportPath  = path.string();
+            lastExportCount = entries.size();
+            lastExportOk    = true;
+            statusMessage(fmt::format("{} entries saved to {}", entries.size(), path.string()));
         }
 
         void updateCurrentFilter() {
@@ -1008,10 +1108,10 @@ namespace uc_log { namespace FTXUIGui {
 
         ftxui::Component getLogComponent() {
             return Scroller(
-              [&]() -> std::vector<std::shared_ptr<GuiLogEntry const>> const& {
+              [this]() -> std::vector<std::shared_ptr<GuiLogEntry const>> const& {
                   return filteredLogEntries;
               },
-              [&](auto const& entry) { return defaultRender(*entry); });
+              [this](auto const& entry) { return defaultRender(*entry); });
         }
 
         ftxui::Component getStatusComponent() {
@@ -1658,10 +1758,58 @@ namespace uc_log { namespace FTXUIGui {
         }
 
         ftxui::Component getFilterComponent() {
+            ftxui::InputOption exportOpts;
+            exportOpts.multiline    = false;
+            exportDirInputComponent = ftxui::Input(&exportDirInput, "directory", exportOpts);
+
+            auto exportBtn = ftxui::Button(
+              " Export Filtered ",
+              [this]() {
+                  if(exportDirInput.empty()) { return; }
+                  auto snapshot = filteredLogEntries;
+                  pendingActions.push_back(
+                    [this, dir = exportDirInput, entries = std::move(snapshot)]() {
+                        exportFilteredLogs(std::move(dir), std::move(entries));
+                    });
+              },
+              createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
+
+            auto exportSection
+              = ftxui::Container::Horizontal(
+                  {ftxui::Renderer([]() { return ftxui::text(" Export dir: "); }),
+                   exportDirInputComponent | ftxui::border | ftxui::flex,
+                   exportBtn})
+              | ftxui::Renderer([this, exportBtn](ftxui::Element inner) {
+                    auto resultEl
+                      = lastExportPath.empty()
+                        ? ftxui::text("")
+                        : ftxui::text(lastExportOk
+                                        ? fmt::format(" {} entries saved to {}",
+                                                      lastExportCount,
+                                                      lastExportPath)
+                                        : fmt::format(" Export failed: {}", lastExportPath))
+                            | ftxui::color(lastExportOk ? Theme::Status::success()
+                                                        : Theme::Status::error());
+                    return ftxui::vbox({ftxui::text("💾 Export Filtered Logs") | ftxui::bold
+                                          | ftxui::color(Theme::Header::accent()) | ftxui::center,
+                                        ftxui::separator(),
+                                        std::move(inner),
+                                        std::move(resultEl)})
+                         | ftxui::border;
+                });
+
             auto clearButton = ftxui::Button(
               "🗑️ Clear All Filters",
               [this]() {
-                  editedFilterState = FilterState{};
+                  editedFilterState    = FilterState{};
+                  ucTimeFilterEnabled  = false;
+                  ucTimeLiveMode       = false;
+                  ucTimeLiveWindowSecs = 10.0;
+                  ucTimeLiveWindowStr  = "10";
+                  minUcTimeStr.clear();
+                  maxUcTimeStr.clear();
+                  minUcTimeSec = 0.0;
+                  maxUcTimeSec = std::numeric_limits<double>::infinity();
                   updateCurrentFilter();
               },
               createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
@@ -1893,8 +2041,170 @@ namespace uc_log { namespace FTXUIGui {
                          | ftxui::border;
                 });
 
+            // ── Time Filter section ──────────────────────────────────────────────
+            {
+                ftxui::InputOption o;
+                o.multiline = false;
+                o.on_change = [this]() {
+                    ucTimeFilterEnabled = true;
+                    ucTimeLiveMode      = false;
+                    if(minUcTimeStr.empty()) {
+                        minUcTimeSec = 0.0;
+                    } else {
+                        try {
+                            minUcTimeSec = std::stod(minUcTimeStr);
+                        } catch(...) {}
+                    }
+                    updateFilteredLogEntries();
+                };
+                ucTimeMinInput = ftxui::Input(&minUcTimeStr, "0.0", o) | numericFilter(true);
+            }
+            {
+                ftxui::InputOption o;
+                o.multiline = false;
+                o.on_change = [this]() {
+                    ucTimeFilterEnabled = true;
+                    ucTimeLiveMode      = false;
+                    if(maxUcTimeStr.empty()) {
+                        maxUcTimeSec = std::numeric_limits<double>::infinity();
+                    } else {
+                        try {
+                            maxUcTimeSec = std::stod(maxUcTimeStr);
+                        } catch(...) {}
+                    }
+                    updateFilteredLogEntries();
+                };
+                ucTimeMaxInput = ftxui::Input(&maxUcTimeStr, "∞", o) | numericFilter(true);
+            }
+            {
+                ftxui::InputOption o;
+                o.multiline = false;
+                o.on_change = [this]() {
+                    try {
+                        ucTimeLiveWindowSecs = std::stod(ucTimeLiveWindowStr);
+                    } catch(...) {}
+                };
+                ucTimeLiveWindowInput
+                  = ftxui::Input(&ucTimeLiveWindowStr, "10", o) | numericFilter(true);
+            }
+
+            auto ucTimeCheckbox = ftxui::Checkbox("Enable", &ucTimeFilterEnabled);
+            ucTimeCheckbox      = ftxui::CatchEvent(ucTimeCheckbox, [this](ftxui::Event const&) {
+                if(!ucTimeFilterEnabled) { ucTimeLiveMode = false; }
+                updateFilteredLogEntries();
+                return false;
+            });
+
+            auto makeStaticPreset = [this](char const* label, double from, double to) {
+                return ftxui::Button(
+                  label,
+                  [this, from, to]() {
+                      ucTimeLiveMode      = false;
+                      ucTimeFilterEnabled = true;
+                      minUcTimeSec        = from;
+                      minUcTimeStr        = fmt::format("{:.1f}", from);
+                      maxUcTimeSec        = to;
+                      maxUcTimeStr        = std::isinf(to) ? "" : fmt::format("{:.1f}", to);
+                      updateFilteredLogEntries();
+                  },
+                  createButtonStyle(Theme::Button::Background::build(), Theme::Button::text()));
+            };
+            auto makeLivePreset = [this](char const* label, double secs) {
+                return ftxui::Button(
+                  label,
+                  [this, secs]() {
+                      ucTimeLiveWindowSecs = secs;
+                      ucTimeLiveWindowStr  = fmt::format("{:.0f}", secs);
+                      ucTimeLiveMode       = true;
+                      ucTimeFilterEnabled  = true;
+                      minUcTimeSec         = std::max(0.0, ucTimeDataMax - secs);
+                      minUcTimeStr         = fmt::format("{:.1f}", minUcTimeSec);
+                      maxUcTimeSec         = std::numeric_limits<double>::infinity();
+                      maxUcTimeStr.clear();
+                      updateFilteredLogEntries();
+                  },
+                  createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
+            };
+
+            auto resetUcTimeBtn = ftxui::Button(
+              " ✕ Reset ",
+              [this]() {
+                  ucTimeFilterEnabled = false;
+                  ucTimeLiveMode      = false;
+                  minUcTimeSec        = 0.0;
+                  minUcTimeStr.clear();
+                  maxUcTimeSec = std::numeric_limits<double>::infinity();
+                  maxUcTimeStr.clear();
+                  updateFilteredLogEntries();
+              },
+              createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
+
+            auto inputWidth     = ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 8);
+            auto liveInputWidth = ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 6);
+
+            auto ucTimeSection
+              = ftxui::Container::Vertical(
+                  {ftxui::Container::Horizontal({ucTimeCheckbox, resetUcTimeBtn}),
+                   ftxui::Container::Horizontal(
+                     {ftxui::Renderer([]() { return ftxui::text(" From: "); }),
+                      ucTimeMinInput | inputWidth,
+                      ftxui::Renderer([]() { return ftxui::text(" s   To: "); }),
+                      ucTimeMaxInput | inputWidth,
+                      ftxui::Renderer([]() { return ftxui::text(" s"); })}),
+                   ftxui::Container::Horizontal({makeStaticPreset(" First 10 s ", 0.0, 10.0),
+                                                 makeStaticPreset(" First 30 s ", 0.0, 30.0),
+                                                 makeStaticPreset(" First 1 m ", 0.0, 60.0)}),
+                   ftxui::Container::Horizontal(
+                     {makeLivePreset(" ⟳ 10 s ", 10.0),
+                      makeLivePreset(" ⟳ 30 s ", 30.0),
+                      makeLivePreset(" ⟳ 1 m ", 60.0),
+                      ftxui::Renderer([]() { return ftxui::text("  Custom: "); }),
+                      ucTimeLiveWindowInput | liveInputWidth,
+                      ftxui::Renderer([]() { return ftxui::text(" s"); })})})
+              | ftxui::Renderer([this](ftxui::Element inner) {
+                    auto dataStr = std::isinf(ucTimeDataMin)
+                                   ? std::string{"--"}
+                                   : fmt::format("{:.1f} – {:.1f} s", ucTimeDataMin, ucTimeDataMax);
+                    auto liveStr = ucTimeLiveMode
+                                   ? fmt::format(" ⟳ live: last {:.0f} s", ucTimeLiveWindowSecs)
+                                   : std::string{};
+                    return ftxui::vbox(
+                             {ftxui::text("⏱ UC Time Filter") | ftxui::bold
+                                | ftxui::color(Theme::Header::primary()) | ftxui::center,
+                              ftxui::separator(),
+                              std::move(inner),
+                              ftxui::hbox(
+                                {ftxui::text(" Data: ") | ftxui::color(Theme::Text::normal()),
+                                 ftxui::text(dataStr) | ftxui::color(Theme::Header::accent()),
+                                 ftxui::text(liveStr) | ftxui::color(Theme::Text::normal())})})
+                         | ftxui::border;
+                });
+
+            auto timeFilterSection = ucTimeSection;
+
+            auto clearLogButton = ftxui::Button(
+              "❌ Clear All Log Entries",
+              [this]() {
+                  allLogEntries.clear();
+                  filteredLogEntries.clear();
+                  originalLogCount         = 0;
+                  filteredOriginalLogCount = 0;
+                  ucTimeDataMin            = std::numeric_limits<double>::infinity();
+                  ucTimeDataMax            = -std::numeric_limits<double>::infinity();
+              },
+              createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
+
+            auto clearBootButton = ftxui::Button(
+              "🔄 Clear Log Entries Before Last Boot",
+              [this]() { clearBeforeLastBoot(); },
+              createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
+
             return ftxui::Container::Vertical(
-              {clearButton,
+              {ftxui::Container::Horizontal({clearButton | ftxui::flex,
+                                             clearLogButton | ftxui::flex,
+                                             clearBootButton | ftxui::flex}),
+               ftxui::Renderer([]() { return ftxui::separator(); }),
+               timeFilterSection,
                ftxui::Renderer([]() { return ftxui::separator(); }),
                ftxui::Container::Vertical(mainComponents)
                  | ftxui::Renderer([](ftxui::Element inner) {
@@ -1908,10 +2218,12 @@ namespace uc_log { namespace FTXUIGui {
                  | ftxui::Renderer([saveLoadSection, noisyExcludeSection](ftxui::Element) {
                        return ftxui::hbox({saveLoadSection->Render() | ftxui::flex,
                                            noisyExcludeSection->Render() | ftxui::flex});
-                   })});
+                   }),
+               exportSection});
         }
 
-        ftxui::Component getAppearanceSettingsComponent() {
+        ftxui::Component getSettingsComponent() {
+            // ── Section A: Display ────────────────────────────────────────────────
             auto resetButton = ftxui::Button(
               "🔄 Reset to Defaults",
               [this]() {
@@ -1926,18 +2238,8 @@ namespace uc_log { namespace FTXUIGui {
               },
               createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
 
-            auto clearButton = ftxui::Button(
-              "❌ Clear log entries",
-              [this]() {
-                  allLogEntries.clear();
-                  filteredLogEntries.clear();
-                  originalLogCount         = 0;
-                  filteredOriginalLogCount = 0;
-              },
-              createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
-
-            return ftxui::Container::Vertical(
-              {ftxui::Container::Horizontal({resetButton | ftxui::flex, clearButton | ftxui::flex}),
+            auto displaySection = ftxui::Container::Vertical(
+              {resetButton | ftxui::flex,
                ftxui::Renderer([]() { return ftxui::separator(); }),
                ftxui::Container::Vertical(
                  {ftxui::Checkbox("⏰ System Time", &showSysTime),
@@ -1955,6 +2257,210 @@ namespace uc_log { namespace FTXUIGui {
                                            ftxui::separator(),
                                            std::move(inner)});
                    })});
+
+            // ── Section B: File Logging ───────────────────────────────────────────
+            ftxui::InputOption logDirOpts;
+            logDirOpts.multiline = false;
+            logDirInputComponent = ftxui::Input(&logDirInput, "path/to/log/dir", logDirOpts);
+
+            auto logToggleBtn = ftxui::Button(
+              " Toggle ",
+              [this]() {
+                  logFileEnabled = !logFileEnabled;
+                  if(onLogFileEnable) { onLogFileEnable(logFileEnabled); }
+              },
+              createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
+
+            auto logApplyBtn = ftxui::Button(
+              " Apply ",
+              [this]() {
+                  if(!onLogDirChange || logDirInput.empty()) { return; }
+                  pendingActions.push_back([this, dir = logDirInput]() { onLogDirChange(dir); });
+              },
+              createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
+
+            auto logSection = ftxui::Container::Vertical(
+              {ftxui::Renderer([this]() {
+                   auto const enabled    = logFileEnabled;
+                   auto const statusText = [this, enabled]() -> std::string {
+                       if(!enabled) { return "Disabled ○"; }
+                       switch(logFileStatus) {
+                       case LogFileStatus::Active:     return "Active ●";
+                       case LogFileStatus::Error:      return "Error ✘";
+                       case LogFileStatus::NotStarted: return "Not Started ○";
+                       }
+                       return "Not Started ○";
+                   }();
+                   auto const statusColor = [this, enabled]() {
+                       if(!enabled) { return Theme::Text::normal(); }
+                       switch(logFileStatus) {
+                       case LogFileStatus::Active:     return Theme::Status::success();
+                       case LogFileStatus::Error:      return Theme::Status::error();
+                       case LogFileStatus::NotStarted: return Theme::Text::normal();
+                       }
+                       return Theme::Text::normal();
+                   }();
+                   return ftxui::vbox(
+                     {ftxui::text("📄 File Logging") | ftxui::bold
+                        | ftxui::color(Theme::Header::accent()) | ftxui::center,
+                      ftxui::separator(),
+                      ftxui::text(""),
+                      ftxui::text("  About") | ftxui::bold | ftxui::color(Theme::Header::accent()),
+                      ftxui::text(
+                        "  Target log data is written to a timestamped CSV file (.rttlog) each"),
+                      ftxui::text(
+                        "  session. Columns: recv_time_utc, channel, file, line, function,"),
+                      ftxui::text("  log_level, uc_time, message."),
+                      ftxui::text(""),
+                      ftxui::text("  Status") | ftxui::bold | ftxui::color(Theme::Header::accent()),
+                      ftxui::hbox(
+                        {ftxui::text("    Logging:     ") | ftxui::bold,
+                         ftxui::text(statusText) | ftxui::color(statusColor) | ftxui::bold}),
+                      ftxui::hbox(
+                        {ftxui::text("    Current file: ") | ftxui::bold,
+                         ftxui::text(!logFileCurrentPath.empty() ? logFileCurrentPath : "—")
+                           | ftxui::color(logFileStatus == LogFileStatus::Active
+                                            ? Theme::Status::info()
+                                            : Theme::Text::normal())}),
+                      ftxui::text(""),
+                      ftxui::text("  Change Directory") | ftxui::bold
+                        | ftxui::color(Theme::Header::accent()),
+                      ftxui::text(
+                        "  Enter a directory path. A new .rttlog file will be created there."),
+                      ftxui::text(
+                        "  The previous file remains intact; logging continues in the new file.")
+                        | ftxui::color(Theme::Status::info()),
+                      logFileStatus == LogFileStatus::Error
+                        ? ftxui::text(fmt::format("  ✘  Cannot write to: {}", logFileCurrentPath))
+                            | ftxui::color(Theme::Status::error())
+                        : ftxui::text("")});
+               }),
+               ftxui::Container::Horizontal(
+                 {logToggleBtn,
+                  ftxui::Renderer([]() { return ftxui::text("  Directory: "); }),
+                  logDirInputComponent | ftxui::border | ftxui::flex,
+                  ftxui::Renderer([]() { return ftxui::text("  "); }),
+                  logApplyBtn})});
+
+            // ── Section C: Network / TCP ──────────────────────────────────────────
+            ftxui::InputOption portInputOpts;
+            portInputOpts.multiline = false;
+            tcpPortInputComponent   = ftxui::Input(&tcpPortInput, "1024–65535", portInputOpts)
+                                    | numericFilter(false)
+                                    | ftxui::CatchEvent([this](ftxui::Event const& e) {
+                                        return e.is_character() && tcpPortInput.size() >= 5;
+                                      });
+
+            auto tcpToggleBtn = ftxui::Button(
+              " Toggle ",
+              [this]() {
+                  tcpEnabled = !tcpEnabled;
+                  if(onTcpEnable) { onTcpEnable(tcpEnabled); }
+              },
+              createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
+
+            auto portApplyBtn = ftxui::Button(
+              " Apply ",
+              [this]() {
+                  if(!onTcpPortChange) { return; }
+                  try {
+                      auto const val = std::stoul(tcpPortInput);
+                      if(val < 1024 || val > 65535) { return; }
+                      tcpEnabled = true;
+                      onTcpPortChange(static_cast<std::uint16_t>(val));
+                  } catch(...) {}
+              },
+              createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
+
+            auto netSection = ftxui::Container::Vertical(
+              {ftxui::Renderer([this]() {
+                   auto const statusText = [this]() -> std::string {
+                       if(!tcpEnabled) { return "Disabled ○"; }
+                       switch(tcpPortStatus) {
+                       case TcpPortStatus::Active:       return "Active ●";
+                       case TcpPortStatus::PortOccupied: return "Port Occupied ⚠";
+                       case TcpPortStatus::NotStarted:   return "Not Started ○";
+                       }
+                       return "Not Started ○";
+                   }();
+                   auto const statusColor = [this]() {
+                       if(!tcpEnabled) { return Theme::Text::normal(); }
+                       switch(tcpPortStatus) {
+                       case TcpPortStatus::Active:       return Theme::Status::success();
+                       case TcpPortStatus::PortOccupied: return Theme::Status::error();
+                       case TcpPortStatus::NotStarted:   return Theme::Text::normal();
+                       }
+                       return Theme::Text::normal();
+                   }();
+                   auto const clientCount = tcpClientCountGetter ? tcpClientCountGetter() : 0u;
+
+                   bool inputValid = false;
+                   try {
+                       auto const val = std::stoul(tcpPortInput);
+                       inputValid     = (val >= 1024 && val <= 65535);
+                   } catch(...) {}
+                   bool const inputChanged
+                     = !tcpPortInput.empty() && tcpPortInput != std::to_string(tcpCurrentPort);
+
+                   return ftxui::vbox(
+                     {ftxui::text("🌐 Network — TCP Metrics Port") | ftxui::bold
+                        | ftxui::color(Theme::Header::accent()) | ftxui::center,
+                      ftxui::separator(),
+                      ftxui::text(""),
+                      ftxui::text("  About") | ftxui::bold | ftxui::color(Theme::Header::accent()),
+                      ftxui::text(
+                        "  Metric data from the target is forwarded as JSON to all connected TCP"),
+                      ftxui::text(
+                        "  clients. External tools such as plotters or dashboards can subscribe"),
+                      ftxui::text("  by opening a TCP connection to this port."),
+                      ftxui::text("  Each metric line uses the format:"),
+                      ftxui::text(
+                        R"(    /*{"name":..., "scope":..., "unit":..., "time":..., "value":...}*/)")
+                        | ftxui::color(Theme::Status::info()),
+                      ftxui::text(""),
+                      ftxui::text("  Status") | ftxui::bold | ftxui::color(Theme::Header::accent()),
+                      ftxui::hbox(
+                        {ftxui::text("    Port status:      ") | ftxui::bold,
+                         ftxui::text(statusText) | ftxui::color(statusColor) | ftxui::bold}),
+                      ftxui::hbox({ftxui::text("    Listening on:     ") | ftxui::bold,
+                                   tcpCurrentPort > 0
+                                     ? ftxui::text(fmt::format("localhost:{}", tcpCurrentPort))
+                                         | ftxui::color(Theme::Status::info())
+                                     : ftxui::text("—") | ftxui::color(Theme::Text::normal())}),
+                      ftxui::hbox({ftxui::text("    Connected clients: ") | ftxui::bold,
+                                   ftxui::text(std::to_string(clientCount))
+                                     | ftxui::color(clientCount > 0 ? Theme::Status::success()
+                                                                    : Theme::Text::normal())}),
+                      ftxui::text(""),
+                      ftxui::text("  Change Port") | ftxui::bold
+                        | ftxui::color(Theme::Header::accent()),
+                      ftxui::text(
+                        "  Type a new port number and press Apply (or Enter). Valid: 1024–65535."),
+                      ftxui::text(
+                        "  Existing connections are kept alive and continue receiving data.")
+                        | ftxui::color(Theme::Status::info()),
+                      tcpPortStatus == TcpPortStatus::PortOccupied
+                        ? ftxui::text("  ⚠  Port is in use — enter a different port and Apply.")
+                            | ftxui::color(Theme::Status::error())
+                        : ftxui::text(""),
+                      inputChanged && !inputValid
+                        ? ftxui::text("  ✘  Port out of range (must be 1024–65535).")
+                            | ftxui::color(Theme::Status::error())
+                        : ftxui::text("")});
+               }),
+               ftxui::Container::Horizontal(
+                 {tcpToggleBtn,
+                  ftxui::Renderer([]() { return ftxui::text("  New port: "); }),
+                  tcpPortInputComponent | ftxui::border | ftxui::flex,
+                  ftxui::Renderer([]() { return ftxui::text("  "); }),
+                  portApplyBtn})});
+
+            // ── Combine all three sections ────────────────────────────────────────
+            return ftxui::Container::Vertical({displaySection,
+                                               ftxui::Renderer([]() { return ftxui::separator(); }),
+                                               logSection,
+                                               ftxui::Renderer([]() { return ftxui::separator(); }),
+                                               netSection});
         }
 
         ftxui::Component getHelpComponent() {
@@ -1969,8 +2475,8 @@ namespace uc_log { namespace FTXUIGui {
                    ftxui::text("  1       - Logs tab"),
                    ftxui::text("  2       - Build tab"),
                    ftxui::text("  3       - Filter tab"),
-                   ftxui::text("  4       - Display tab"),
-                   ftxui::text("  5       - Debug tab"),
+                   ftxui::text("  4       - Settings tab (Display, File Logging, Network)"),
+                   ftxui::text("  5       - Debugger tab"),
                    ftxui::text("  6       - Metrics tab"),
                    ftxui::text("  7       - Status tab"),
                    ftxui::text("  8       - Statistics tab"),
@@ -2324,7 +2830,7 @@ namespace uc_log { namespace FTXUIGui {
                 auto const rttStatus    = rttReader.getStatus();
                 auto const logCount     = filteredOriginalLogCount;
                 auto const totalCount   = originalLogCount;
-                bool const filterActive = activeFilterState != FilterState{};
+                bool const filterActive = activeFilterState != FilterState{} || ucTimeFilterEnabled;
                 bool const buildRunning = (buildStatus == BuildStatus::Running);
                 bool const buildSuccess = (buildStatus == BuildStatus::Success);
                 bool const isFlashing   = rttReader.isFlashing();
@@ -2388,6 +2894,41 @@ namespace uc_log { namespace FTXUIGui {
                      ? ftxui::text("🚨 MEM") | ftxui::color(ftxui::Color::Red) | ftxui::bold
                      : ftxui::text(""),
                    ftxui::separator(),
+                   ftxui::text([this]() -> std::string {
+                       if(!logFileEnabled) { return "📄 ○"; }
+                       switch(logFileStatus) {
+                       case LogFileStatus::Active:     return "📄 ●";
+                       case LogFileStatus::Error:      return "📄 ✘";
+                       case LogFileStatus::NotStarted: return "📄 ○";
+                       }
+                       return "📄 ○";
+                   }())
+                     | ftxui::color([this]() {
+                           if(!logFileEnabled) { return Theme::Text::normal(); }
+                           switch(logFileStatus) {
+                           case LogFileStatus::Active:     return Theme::Status::success();
+                           case LogFileStatus::Error:      return Theme::Status::error();
+                           case LogFileStatus::NotStarted: return Theme::Text::normal();
+                           }
+                           return Theme::Text::normal();
+                       }())
+                     | ftxui::bold,
+                   ftxui::separator(),
+                   ftxui::text([this]() -> std::string {
+                       if(!tcpEnabled) { return "🌐 ○"; }
+                       return tcpPortStatus == TcpPortStatus::PortOccupied ? "🌐 ⚠" : "🌐 ●";
+                   }())
+                     | ftxui::color([this]() {
+                           if(!tcpEnabled) { return Theme::Text::normal(); }
+                           switch(tcpPortStatus) {
+                           case TcpPortStatus::Active:       return Theme::Status::success();
+                           case TcpPortStatus::PortOccupied: return Theme::Status::error();
+                           case TcpPortStatus::NotStarted:   return Theme::Text::normal();
+                           }
+                           return Theme::Text::normal();
+                       }())
+                     | ftxui::bold,
+                   ftxui::separator(),
                    ftxui::filler()});
             });
 
@@ -2409,15 +2950,15 @@ namespace uc_log { namespace FTXUIGui {
         template<typename Reader>
         ftxui::Component getTabComponent(Reader& rttReader) {
             auto tabs = generateTabsComponent({
-              {      "📄 Logs",                getLogComponent()},
-              {     "🔨 Build",              getBuildComponent()},
-              {    "🔍 Filter",             getFilterComponent()},
-              {   "🎨 Display", getAppearanceSettingsComponent()},
-              {     "🔧 Debug",  getDebuggerComponent(rttReader)},
-              {   "📈 Metrics",             getMetricComponent()},
-              {    "💬 Status",             getStatusComponent()},
-              {"📊 Statistics",         getStatisticsComponent()},
-              {      "❓ Help",               getHelpComponent()}
+              {    "📄 Logs",               getLogComponent()},
+              {   "🔨 Build",             getBuildComponent()},
+              {  "🔍 Filter",            getFilterComponent()},
+              {"🔧 Settings",          getSettingsComponent()},
+              {"🐛 Debugger", getDebuggerComponent(rttReader)},
+              { "📈 Metrics",            getMetricComponent()},
+              {  "💬 Status",            getStatusComponent()},
+              {   "📊 Stats",        getStatisticsComponent()},
+              {    "❓ Help",              getHelpComponent()}
             });
 
             return ftxui::Container::Vertical({getStatusLineComponent(rttReader),
@@ -2446,6 +2987,21 @@ namespace uc_log { namespace FTXUIGui {
             }
             statistics.lastUcTime = entry.ucTime;
 
+            {
+                auto const ucSecs = std::chrono::duration<double>(entry.ucTime.time).count();
+                ucTimeDataMin     = std::min(ucTimeDataMin, ucSecs);
+                bool const newMax = ucSecs > ucTimeDataMax;
+                ucTimeDataMax     = std::max(ucTimeDataMax, ucSecs);
+                if(ucTimeLiveMode && newMax) {
+                    minUcTimeSec = std::max(0.0, ucTimeDataMax - ucTimeLiveWindowSecs);
+                    minUcTimeStr = fmt::format("{:.1f}", minUcTimeSec);
+                    maxUcTimeSec = std::numeric_limits<double>::infinity();
+                    maxUcTimeStr.clear();
+                    ucTimeFilterEnabled = true;
+                    updateFilteredLogEntries();
+                }
+            }
+
             auto const metrics = uc_log::extractMetrics(recv_time, entry);
             for(auto const& metric : metrics) {
                 metricEntries[metric.first].push_back(metric.second);
@@ -2462,7 +3018,7 @@ namespace uc_log { namespace FTXUIGui {
                   GuiLogEntry{recv_time, entry, LineType::SingleLine, groupId});
 
                 allLogEntries.push_back(logEntry);
-                if(currentFilter(*logEntry)) {
+                if(passesAllFilters(*logEntry)) {
                     filteredLogEntries.push_back(logEntry);
                     ++filteredOriginalLogCount;
                 }
@@ -2490,7 +3046,7 @@ namespace uc_log { namespace FTXUIGui {
 
                     // Check filter once on first line
                     if(i == 0) {
-                        groupPassesFilter = currentFilter(*logEntry);
+                        groupPassesFilter = passesAllFilters(*logEntry);
                         if(groupPassesFilter) { ++filteredOriginalLogCount; }
                     }
 
@@ -2541,6 +3097,43 @@ namespace uc_log { namespace FTXUIGui {
             if(screenPointer != nullptr) { screenPointer->PostEvent(ftxui::Event::Custom); }
         }
 
+        void setTcpPortStatus(TcpPortStatus s,
+                              std::uint16_t p) {
+            std::lock_guard<std::mutex> const lock{mutex};
+            tcpPortStatus  = s;
+            tcpCurrentPort = p;
+            if(tcpPortInput.empty()) { tcpPortInput = std::to_string(p); }
+            if(screenPointer != nullptr) { screenPointer->PostEvent(ftxui::Event::Custom); }
+        }
+
+        void setOnTcpPortChange(std::function<void(std::uint16_t)> cb) {
+            onTcpPortChange = std::move(cb);
+        }
+
+        void setTcpClientCountGetter(std::function<std::size_t()> getter) {
+            tcpClientCountGetter = std::move(getter);
+        }
+
+        void setLogFileStatus(LogFileStatus    s,
+                              std::string_view path) {
+            std::lock_guard<std::mutex> const lock{mutex};
+            logFileStatus      = s;
+            logFileCurrentPath = std::string{path};
+            if(logDirInput.empty()) {
+                logDirInput = std::filesystem::path{path}.parent_path().string();
+            }
+            if(exportDirInput.empty()) { exportDirInput = logDirInput; }
+            if(screenPointer != nullptr) { screenPointer->PostEvent(ftxui::Event::Custom); }
+        }
+
+        void setOnLogDirChange(std::function<void(std::string const&)> cb) {
+            onLogDirChange = std::move(cb);
+        }
+
+        void setOnLogFileEnable(std::function<void(bool)> cb) { onLogFileEnable = std::move(cb); }
+
+        void setOnTcpEnable(std::function<void(bool)> cb) { onTcpEnable = std::move(cb); }
+
         template<typename Reader>
         int run(Reader&            rttReader,
                 std::string const& buildCommand,
@@ -2565,7 +3158,13 @@ namespace uc_log { namespace FTXUIGui {
                                || (topNInput && topNInput->Focused())
                                || (absInput && absInput->Focused())
                                || (ipAddressInputComponent && ipAddressInputComponent->Focused())
-                               || (noLogTimeoutInput && noLogTimeoutInput->Focused())))
+                               || (noLogTimeoutInput && noLogTimeoutInput->Focused())
+                               || (tcpPortInputComponent && tcpPortInputComponent->Focused())
+                               || (logDirInputComponent && logDirInputComponent->Focused())
+                               || (exportDirInputComponent && exportDirInputComponent->Focused())
+                               || (ucTimeMinInput && ucTimeMinInput->Focused())
+                               || (ucTimeMaxInput && ucTimeMaxInput->Focused())
+                               || (ucTimeLiveWindowInput && ucTimeLiveWindowInput->Focused())))
                         {
                             return false;
                         }
@@ -2607,7 +3206,6 @@ namespace uc_log { namespace FTXUIGui {
                             selectedTab = 8;   // Help
                             return true;
                         }
-
                         // Action hotkeys
                         if(event == ftxui::Event::Character('r')) {
                             resetTargetWithStats(rttReader);
@@ -2642,6 +3240,8 @@ namespace uc_log { namespace FTXUIGui {
                     loop.RunOnce();
                     if(screenPointer == nullptr) { screenPointer = &screen; }
                 }
+                for(auto& action : pendingActions) { action(); }
+                pendingActions.clear();
                 std::this_thread::sleep_for(GUI_Constants::UpdateInterval);
                 if(callJoin) {
                     if(buildThread.joinable()) { buildThread.join(); }

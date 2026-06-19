@@ -41,11 +41,14 @@
     #pragma clang diagnostic pop
 #endif
 
+#include "uc_log/detail/TcpPortStatus.hpp"
+
 #include <chrono>
 #include <fmt/format.h>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -85,7 +88,9 @@ struct TCPSender {
               [self = shared_from_this()](boost::system::error_code error_code, std::size_t) {
                   if(!error_code) {
                       self->async_read_some();
-                  } else if(error_code != boost::asio::error::eof) {
+                  } else if(error_code != boost::asio::error::eof
+                            && error_code != boost::asio::error::operation_aborted)
+                  {
                       self->errorMessagef(
                         fmt::format("client recv error {}", error_code.message()));
                   }
@@ -111,7 +116,9 @@ struct TCPSender {
                capturedMessage = message](boost::system::error_code error_code, std::size_t) {
                   if(!error_code) {
                       self->write_rdy();
-                  } else if(error_code != boost::asio::error::eof) {
+                  } else if(error_code != boost::asio::error::eof
+                            && error_code != boost::asio::error::operation_aborted)
+                  {
                       self->errorMessagef(
                         fmt::format("client send error {}", error_code.message()));
                   }
@@ -119,23 +126,27 @@ struct TCPSender {
         }
     };
 
-    std::function<void(std::string_view)> errorMessagef;
-    boost::asio::io_context               ioc;
-    boost::asio::ip::tcp::acceptor        acceptor;
-    std::vector<std::weak_ptr<Session>>   clients;
-    std::mutex                            mutex;
-    std::jthread                          thread{std::bind_front(&TCPSender::runner, this)};
+    std::function<void(std::string_view)>                                    errorMessagef;
+    std::function<void(TcpPortStatus, std::uint16_t)>                        statusChangef;
+    boost::asio::io_context                                                  ioc;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> workGuard{
+      ioc.get_executor()};
+    std::optional<boost::asio::ip::tcp::acceptor> acceptor;
+    std::vector<std::weak_ptr<Session>>           clients;
+    mutable std::mutex                            mutex;
+    std::atomic<TcpPortStatus>                    status{TcpPortStatus::NotStarted};
+    std::atomic<std::uint16_t>                    currentPort{0};
+    std::optional<std::uint16_t>                  pendingRestartPort;
+    std::jthread                                  thread{std::bind_front(&TCPSender::runner, this)};
 
-    template<typename ErrorMessageF>
+    template<typename ErrorMessageF,
+             typename StatusChangeF>
     explicit TCPSender(std::uint16_t   port,
-                       ErrorMessageF&& errorMessagef_)
-      : errorMessagef{
-          std::forward<ErrorMessageF>(errorMessagef_)
-    }
-      , acceptor{ioc,
-                 {boost::asio::ip::tcp::v4(),
-                  port}} {
-        async_accept_one();
+                       ErrorMessageF&& errorMessagef_,
+                       StatusChangeF&& statusChangef_)
+      : errorMessagef{std::forward<ErrorMessageF>(errorMessagef_)}
+      , statusChangef{std::forward<StatusChangeF>(statusChangef_)} {
+        boost::asio::post(ioc, [this, port]() { tryBind(port); });
     }
 
     void send(std::string_view msg) {
@@ -149,7 +160,70 @@ struct TCPSender {
         clean();
     }
 
+    void restart(std::uint16_t newPort) {
+        boost::asio::post(ioc, [this, newPort]() {
+            if(acceptor.has_value()) {
+                pendingRestartPort = newPort;
+                boost::system::error_code ec;
+                acceptor->cancel(ec);
+            } else {
+                tryBind(newPort);
+            }
+        });
+    }
+
+    void stop() {
+        boost::asio::post(ioc, [this]() {
+            closeAllSessions();
+            if(acceptor.has_value()) {
+                pendingRestartPort = std::nullopt;
+                boost::system::error_code ec;
+                acceptor->cancel(ec);
+            } else {
+                status = TcpPortStatus::NotStarted;
+                if(statusChangef) { statusChangef(status.load(), currentPort.load()); }
+            }
+        });
+    }
+
+    TcpPortStatus getStatus() const { return status.load(); }
+
+    std::uint16_t getPort() const { return currentPort.load(); }
+
+    std::size_t getClientCount() const {
+        std::lock_guard<std::mutex> const lock{mutex};
+        return static_cast<std::size_t>(
+          std::ranges::count_if(clients, [](auto const& c) { return !c.expired(); }));
+    }
+
 private:
+    void closeAllSessions() {
+        std::lock_guard<std::mutex> const lock{mutex};
+        for(auto& weak : clients) {
+            if(auto s = weak.lock()) {
+                boost::system::error_code ec;
+                s->socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+                s->socket.close(ec);
+            }
+        }
+        clients.clear();
+    }
+
+    void tryBind(std::uint16_t port) {
+        try {
+            acceptor.emplace(ioc, boost::asio::ip::tcp::endpoint{boost::asio::ip::tcp::v4(), port});
+            status      = TcpPortStatus::Active;
+            currentPort = port;
+            if(statusChangef) { statusChangef(status.load(), currentPort.load()); }
+            async_accept_one();
+        } catch(boost::system::system_error const& e) {
+            errorMessagef(fmt::format("TCP port {} in use: {}", port, e.what()));
+            status      = TcpPortStatus::PortOccupied;
+            currentPort = port;
+            if(statusChangef) { statusChangef(status.load(), port); }
+        }
+    }
+
     void clean() {
         auto ret
           = std::ranges::remove_if(clients, [](auto& client) { return client.use_count() == 0; });
@@ -161,16 +235,30 @@ private:
     }
 
     void async_accept_one() {
-        acceptor.async_accept(
+        if(!acceptor.has_value()) { return; }
+        acceptor->async_accept(
           [this](boost::system::error_code error_code, boost::asio::ip::tcp::socket socket) {
               if(!error_code) {
                   auto session = std::make_shared<Session>(std::move(socket), errorMessagef);
                   clients.push_back(session);
                   session->run();
+                  async_accept_one();
+              } else if(error_code == boost::asio::error::operation_aborted) {
+                  boost::system::error_code ec;
+                  if(acceptor.has_value()) { acceptor->close(ec); }
+                  acceptor.reset();
+                  if(pendingRestartPort.has_value()) {
+                      auto const port = *pendingRestartPort;
+                      pendingRestartPort.reset();
+                      tryBind(port);
+                  } else {
+                      status = TcpPortStatus::NotStarted;
+                      if(statusChangef) { statusChangef(status.load(), currentPort.load()); }
+                  }
               } else {
                   errorMessagef(fmt::format("asio error {}", error_code.message()));
+                  async_accept_one();
               }
-              async_accept_one();
           });
     }
 };
