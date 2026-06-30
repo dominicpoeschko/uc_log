@@ -119,7 +119,7 @@ if(UC_LOG_BUILD_PRINTER)
             GIT_REPOSITORY
             https://github.com/stephenberry/glaze.git
             GIT_TAG
-            v7.7.1
+            v7.8.3
             GIT_BRANCH
             main
             PATCH_FILE
