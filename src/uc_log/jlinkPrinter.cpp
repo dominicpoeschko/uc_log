@@ -8,9 +8,12 @@
 #include "uc_log/LogLevel.hpp"
 #include "uc_log/RttBlockInfo.hpp"
 #include "uc_log/TimeDelayedQueue.hpp"
+#include "uc_log/detail/DuplexChannelServer.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 #include "uc_log/detail/LogFormat.hpp"
+#include "uc_log/detail/RttChannelMap.hpp"
 #include "uc_log/detail/TcpSender.hpp"
+#include "uc_log/detail/TcpServerCommon.hpp"
 #include "uc_log/metric_utils.hpp"
 
 #include <algorithm>
@@ -155,9 +158,13 @@ private:
 struct TcpPrinter {
     TCPSender tcpSender;
 
-    TcpPrinter(uc_log::FTXUIGui::Gui& gui,
-               std::uint16_t          port)
-      : tcpSender{port,
+    TcpPrinter(uc_log::FTXUIGui::Gui&   gui,
+               boost::asio::io_context& ioc,
+               boost::asio::ip::address bindAddress,
+               std::uint16_t            port)
+      : tcpSender{ioc,
+                  std::move(bindAddress),
+                  port,
                   [&gui](auto const& msg) { gui.errorMessage(msg); },
                   [&gui](TcpPortStatus s,
                          std::uint16_t p) { gui.setTcpPortStatus(s, p); }} {}
@@ -191,12 +198,18 @@ int main(int    argc,
     std::string   host{};
     std::string   logDir{};
     std::string   buildCommand{};
+    std::string   bindAddressString{};
     std::uint16_t port{};
+    std::uint16_t duplexBasePort{};
     bool          disableUi{false};
 
     cxxopts::Options options("uc_log_printer");
     try {
-        options.add_options()("metrics_port", "tcp for metrics", cxxopts::value<std::uint16_t>())(
+        options.add_options()(
+          "duplex_base_port",
+          "first tcp port for duplex channels",
+          cxxopts::value<std::uint16_t>()->default_value(
+            "34600"))("metrics_port", "tcp for metrics", cxxopts::value<std::uint16_t>())(
           "speed",
           "swd speed",
           cxxopts::value<std::uint32_t>())("device", "mpu device", cxxopts::value<std::string>())(
@@ -213,10 +226,15 @@ int main(int    argc,
           cxxopts::value<std::string>())("host",
                                          "jlink host",
                                          cxxopts::value<std::string>()->default_value(""))(
-          "disable_ui",
-          "disable ui and just log to file and tcp");
+          "bind_address",
+          "address the tcp servers (metrics + duplex) bind to; the duplex ports give raw "
+          "unauthenticated access to the target, so anything but loopback exposes that "
+          "to the network",
+          cxxopts::value<std::string>()->default_value(
+            "127.0.0.1"))("disable_ui", "disable ui and just log to file and tcp");
         auto const result   = options.parse(argc, argv);
         port                = result["metrics_port"].as<std::uint16_t>();
+        duplexBasePort      = result["duplex_base_port"].as<std::uint16_t>();
         speed               = result["speed"].as<std::uint32_t>();
         device              = result["device"].as<std::string>();
         buildCommand        = result["build_command"].as<std::string>();
@@ -225,15 +243,26 @@ int main(int    argc,
         stringConstantsFile = result["string_constants_file"].as<std::string>();
         logDir              = result["log_dir"].as<std::string>();
         host                = result["host"].as<std::string>();
+        bindAddressString   = result["bind_address"].as<std::string>();
         disableUi           = result.count("disable_ui") > 0;
     } catch(cxxopts::exceptions::exception const& e) {
         fmt::print(stderr, "Error: {}\n{}\n", e.what(), options.help());
         return 1;
     }
 
+    boost::asio::ip::address bindAddress;
+    try {
+        bindAddress = boost::asio::ip::make_address(bindAddressString);
+    } catch(std::exception const& e) {
+        fmt::print(stderr, "Error: invalid bind_address {:?}: {}\n", bindAddressString, e.what());
+        return 1;
+    }
+
     uc_log::FTXUIGui::Gui gui{};
-    LogFilePrinter        logFilePrinter{gui, logDir};
-    TcpPrinter            tcpPrinter{gui, port};
+    gui.setNetworkBindAddress(bindAddressString);
+    LogFilePrinter              logFilePrinter{gui, logDir};
+    uc_log::detail::AsioContext asioContext;
+    TcpPrinter                  tcpPrinter{gui, asioContext.ioc, bindAddress, port};
     gui.setOnTcpPortChange([&tcpPrinter](std::uint16_t newPort) { tcpPrinter.restart(newPort); });
     gui.setTcpClientCountGetter([&tcpPrinter]() { return tcpPrinter.tcpSender.getClientCount(); });
     gui.setOnLogDirChange(
@@ -248,6 +277,38 @@ int main(int    argc,
         }
     });
 
+    uc_log::detail::DuplexChannelHub duplexHub{
+      asioContext.ioc,
+      bindAddress,
+      duplexBasePort,
+      [&gui](std::string_view msg) { gui.errorMessage(msg); },
+      [&gui](std::string_view msg) { gui.statusMessage(msg); },
+      [&gui]() { gui.triggerRedraw(); }};
+    gui.setDuplexInfoGetter([&duplexHub]() { return duplexHub.info(); });
+    gui.setOnDuplexPortChange([&duplexHub](std::size_t ordinal, std::uint16_t newPort) {
+        duplexHub.setPort(ordinal, newPort);
+    });
+    gui.setOnDuplexEnable(
+      [&duplexHub](std::size_t ordinal, bool enabled) { duplexHub.setEnabled(ordinal, enabled); });
+    gui.setOnDuplexBasePortChange(
+      [&duplexHub](std::uint16_t newBasePort) { duplexHub.setBasePort(newBasePort); });
+    gui.setDuplexBasePort(duplexBasePort);
+
+    // let the operator rebind every socket at runtime; returns false on an unparsable
+    // address so the gui can show it without applying anything
+    gui.setOnNetworkBindAddressChange([&tcpPrinter, &duplexHub](std::string const& s) {
+        boost::system::error_code ec;
+        auto const                address = boost::asio::ip::make_address(s, ec);
+        if(ec) { return false; }
+        tcpPrinter.tcpSender.setBindAddress(address);
+        duplexHub.setBindAddress(address);
+        return true;
+    });
+
+    // declared after all users of the context: joined first on destruction so no asio
+    // handler runs while the servers above are torn down
+    uc_log::detail::AsioContextRunner asioRunner{asioContext};
+
     TimeDelayedQueue queue{
       [](auto const& entry) { return entry.entry.ucTime; },
       [&logFilePrinter, &tcpPrinter, &gui](std::chrono::system_clock::time_point recv_time,
@@ -257,28 +318,39 @@ int main(int    argc,
           gui.add(recv_time, entry);
       }};
 
-    JLinkRttReader rttReader{host,
-                             device,
-                             speed,
-                             [&mapFile, &gui]() {
-                                 auto const result = parseMapFileForControlBlockInfo(mapFile);
-                                 if(!result.has_value()) { gui.fatalError(result.error()); }
-                                 return result.value_or(RttBlockInfo{});
-                             },
-                             [&hexFile]() { return hexFile; },
-                             [&stringConstantsFile, &gui]() {
-                                 auto const result = remote_fmt::parseStringConstantsFromJsonFile(
-                                   stringConstantsFile);
-                                 if(!result.has_value()) { gui.fatalError(result.error()); }
-                                 return result.value_or({});
-                             },
-                             [&queue](std::size_t channel, std::string_view msg) {
-                                 queue.append(uc_log::detail::LogEntry{channel, msg});
-                             },
-                             [&gui](std::string_view msg) { gui.statusMessage(msg); },
-                             [&gui](std::string_view msg) { gui.errorMessage(msg); },
-                             [&gui](std::string_view msg) { gui.toolStatusMessage(msg); },
-                             [&gui](std::string_view msg) { gui.toolErrorMessage(msg); }};
+    JLinkRttReader rttReader{
+      host,
+      device,
+      speed,
+      [&mapFile, &gui]() {
+          auto const result = parseMapFileForControlBlockInfo(mapFile);
+          if(!result.has_value()) { gui.fatalError(result.error()); }
+          return result.value_or(RttBlockInfo{});
+                          },
+      [&hexFile]() { return hexFile; },
+      [&stringConstantsFile, &gui]() {
+          auto const result = remote_fmt::parseStringConstantsFromJsonFile(stringConstantsFile);
+          if(!result.has_value()) { gui.fatalError(result.error()); }
+          return result.value_or({});
+                          },
+      [&queue](std::size_t channel, std::string_view msg) {
+          queue.append(uc_log::detail::LogEntry{channel, msg});
+                          },
+      [&gui](std::string_view msg) { gui.statusMessage(msg); },
+      [&gui](std::string_view msg) { gui.errorMessage(msg); },
+      [&gui](std::string_view msg) { gui.toolStatusMessage(msg); },
+      [&gui](std::string_view msg) { gui.toolErrorMessage(msg); },
+      uc_log::detail::DuplexBridge{
+                          [&duplexHub](std::vector<uc_log::detail::DuplexChannelDesc> const& descs) {
+            duplexHub.configure(descs);
+        }, [&duplexHub](std::size_t ordinal, std::span<std::byte const> data) {
+            duplexHub.sendToClient(ordinal, data);
+        }, [&duplexHub](std::size_t ordinal, std::span<std::byte> out) {
+            return duplexHub.peekFromClient(ordinal, out);
+        }, [&duplexHub](std::size_t ordinal, std::size_t n) {
+            duplexHub.consumeFromClient(ordinal, n);
+        }}
+    };
 
     if(!disableUi) {
         return gui.run(rttReader, buildCommand, host);

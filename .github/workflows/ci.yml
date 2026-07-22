@@ -1,0 +1,59 @@
+name: CI
+
+on:
+    workflow_dispatch:
+    push:
+        branches:
+            - master
+    pull_request:
+        branches:
+            - master
+
+jobs:
+    build-and-test:
+        runs-on: ubuntu-latest
+        container:
+            image: archlinux:latest
+        strategy:
+            fail-fast: false
+            matrix:
+                # stdlib_debug and libc++ work because the top-level CMakeLists propagates
+                # the stdlib and debug-ABI flags to the force-fetched dependencies as well
+                compiler:
+                    - {cc: gcc, cxx: g++}
+                    - {cc: gcc, cxx: g++, stdlib_debug: true, sanitizer: address}
+                    - {cc: clang, cxx: clang++}
+                    - {cc: clang, cxx: clang++, stdlib: libc++, stdlib_debug: true, sanitizer: address}
+
+        steps:
+            - name: Set up C++ environment
+              run: |
+                pacman -Syu --noconfirm
+                pacman -S --noconfirm git cmake base-devel ${{ matrix.compiler.cc == 'clang' && 'clang' || '' }} ${{ matrix.compiler.stdlib == 'libc++' && 'libc++ lld' || '' }}
+
+            - name: Checkout repository
+              uses: actions/checkout@v5
+              with:
+                submodules: recursive
+
+            # no SEGGER JLink DLL in CI: the in-process fake stands in, dependencies are
+            # fetched (the container has no boost/fmt/ftxui)
+            - name: Configure CMake
+              run: >
+                cmake -S . -B build
+                -DUC_LOG_BUILD_TESTS=ON
+                -DUC_LOG_BUILD_TEST_GUI=ON
+                -DJLINK_USE_FAKE_DLL=ON
+                -DUSE_FORCE_FETCH=ON
+                ${{ matrix.compiler.sanitizer && format('-DUSE_SANITIZER={0}', matrix.compiler.sanitizer) || '' }}
+                ${{ matrix.compiler.stdlib && format('-DUSE_STD_LIB={0}', matrix.compiler.stdlib) || '' }}
+                ${{ matrix.compiler.stdlib_debug && '-DUSE_STDLIB_DEBUG=true' || '' }}
+              env:
+                CC: ${{ matrix.compiler.cc }}
+                CXX: ${{ matrix.compiler.cxx }}
+
+            - name: Build project
+              run: cmake --build build -j"$(nproc)"
+
+            - name: Run tests
+              run: cd build && ctest --output-on-failure

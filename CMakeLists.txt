@@ -20,9 +20,42 @@ set(UC_LOG_BUILD_TEST_GUI
     false
     CACHE BOOL "build the test gui")
 
+# project() is only called on the standalone/printer path below, so top-level detection has to compare directories here
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(uc_log_is_top_level true)
+else()
+    set(uc_log_is_top_level false)
+endif()
+set(UC_LOG_BUILD_TESTS
+    ${uc_log_is_top_level}
+    CACHE BOOL "build the unit tests (ctest)")
+
 set(UC_LOG_BUILD_PRINTER
     true
     CACHE BOOL "build the uc_log_printer host tool")
+
+# cmake_helpers applies USE_STD_LIB / USE_STDLIB_DEBUG per target, but the fetched dependencies (fmt via remote_fmt
+# below, ftxui, boost, ...) are compiled as static libraries and must share the same stdlib and debug-container ABI or
+# the final link mixes incompatible symbols. This has to happen before ANY add_subdirectory that can fetch a dependency
+# (remote_fmt fetches fmt), and requires the dependencies to actually be built in this tree (USE_FORCE_FETCH), not found
+# prebuilt.
+if(NOT CMAKE_CROSSCOMPILING)
+    if(USE_STDLIB_DEBUG)
+        if("${USE_STD_LIB}" STREQUAL "libc++")
+            add_compile_definitions($<$<COMPILE_LANGUAGE:CXX>:_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_DEBUG>)
+        else()
+            add_compile_definitions($<$<COMPILE_LANGUAGE:CXX>:_GLIBCXX_DEBUG>
+                                    $<$<COMPILE_LANGUAGE:CXX>:_GLIBCXX_DEBUG_PEDANTIC>)
+        endif()
+    endif()
+
+    # the compiler id is not known yet this early (before project()), so the Clang condition lives in generator
+    # expressions instead of an if()
+    if("${USE_STD_LIB}" STREQUAL "libc++")
+        add_compile_options($<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:Clang>>:-stdlib=libc++>)
+        add_link_options($<$<CXX_COMPILER_ID:Clang>:-fuse-ld=lld> $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++>)
+    endif()
+endif()
 
 add_subdirectory(rtt)
 add_subdirectory(remote_fmt)
@@ -53,6 +86,12 @@ if(UC_LOG_BUILD_PRINTER)
 
         include(${cmake_helpers_SOURCE_DIR}/BuildOptions.cmake)
         include(${cmake_helpers_SOURCE_DIR}/FindOrFetch.cmake)
+
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+            # -Weverything enables -Wthread-safety-negative, which requires negative capability annotations on every
+            # function that takes a lock; plain std::mutex code cannot satisfy it without annotating the whole codebase
+            add_compile_options(-Wno-thread-safety-negative)
+        endif()
 
         find_package(Threads REQUIRED)
 
@@ -161,9 +200,16 @@ if(UC_LOG_BUILD_PRINTER)
                 ${Boost_Components}
                 ftxui::screen
                 ftxui::dom
-                ftxui::component)
+                ftxui::component
+                enchantum::enchantum
+                glaze::glaze)
 
             target_add_default_build_options(uc_log_gui_test PUBLIC)
+        endif()
+
+        if(${UC_LOG_BUILD_TESTS})
+            enable_testing()
+            add_subdirectory(tests)
         endif()
     else()
         include(${cmake_helpers_SOURCE_DIR}/HostBuild.cmake)
@@ -181,6 +227,7 @@ function(target_add_uc_log_rtt_jlink targetname)
         MAP_FILE
         PREFIX
         METRICS_PORT
+        DUPLEX_BASE_PORT
         HEX_FILE)
     set(multiValueArgs)
 
@@ -222,6 +269,12 @@ function(target_add_uc_log_rtt_jlink targetname)
         message(WARNING "METRICS_PORT ${PARSED_ARGS_METRICS_PORT} may be out of valid range (1024-65535)")
     endif()
 
+    if(NOT PARSED_ARGS_DUPLEX_BASE_PORT)
+        set(PARSED_ARGS_DUPLEX_BASE_PORT 34600)
+    elseif(${PARSED_ARGS_DUPLEX_BASE_PORT} LESS 1024 OR PARSED_ARGS_DUPLEX_BASE_PORT GREATER 65535)
+        message(WARNING "DUPLEX_BASE_PORT ${PARSED_ARGS_DUPLEX_BASE_PORT} may be out of valid range (1024-65535)")
+    endif()
+
     target_generate_string_constants(${targetname})
     target_generate_ssproj(${targetname})
 
@@ -254,6 +307,8 @@ function(target_add_uc_log_rtt_jlink targetname)
         ${uc_log_printer_bin}
         --metrics_port
         ${PARSED_ARGS_METRICS_PORT}
+        --duplex_base_port
+        ${PARSED_ARGS_DUPLEX_BASE_PORT}
         --device
         ${PARSED_ARGS_TARGET_MPU}
         --speed

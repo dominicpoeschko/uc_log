@@ -3,8 +3,9 @@
 #include "uc_log/LogLevel.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 
+#include <charconv>
 #include <chrono>
-#include <stdexcept>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -80,15 +81,18 @@ extractMetrics(std::chrono::system_clock::time_point recv_time,
             name = std::string{name_and_unit};
         }
 
-        try {
-            double const value = std::stod(std::string{value_str});
-
+        // from_chars: no exceptions on this path (it runs inside the locked gui/tcp add),
+        // no locale dependence, and out-of-range values are skipped instead of throwing
+        double value{};
+        auto const [ptr, ec]
+          = std::from_chars(value_str.data(), std::to_address(value_str.end()), value);
+        if(ec == std::errc{} && ptr != value_str.data()) {
             metrics.emplace_back(MetricInfo{.scope = scope, .name = name, .unit = unit},
                                  MetricEntry{.recv_time = recv_time,
                                              .level     = logEntry.logLevel,
                                              .uc_time   = logEntry.ucTime,
                                              .value     = value});
-        } catch(std::invalid_argument const&) {}
+        }
 
         pos = end_pos + 1;
     }

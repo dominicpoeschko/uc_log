@@ -7,14 +7,17 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <ctime>
 #ifdef __GNUC__
     #pragma GCC diagnostic push
     #pragma GCC diagnostic ignored "-Wextra-semi"
+    #pragma GCC diagnostic ignored "-Wsign-conversion"
 #endif
 #ifdef __clang__
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
     #pragma clang diagnostic ignored "-Wnewline-eof"
+    #pragma clang diagnostic ignored "-Wsign-conversion"
 #endif
 #include <enchantum/enchantum.hpp>
 #ifdef __GNUC__
@@ -23,7 +26,8 @@
 #ifdef __clang__
     #pragma clang diagnostic pop
 #endif
-#include <fmt/format.h>
+#include "remote_fmt/fmt_wrapper.hpp"
+
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/event.hpp>
@@ -42,10 +46,24 @@
 namespace uc_log { namespace FTXUIGui {
 
     namespace GUI_Constants {
-        static constexpr std::size_t MaxScrollLines = 8192;
-        static constexpr std::size_t MaxChannels    = 6;
-        static constexpr auto        UpdateInterval = std::chrono::milliseconds{10};
-        static constexpr std::size_t MaxLogEntries  = 10'000'000;
+        static constexpr std::size_t MaxScrollLines    = 8192;
+        static constexpr std::size_t MaxChannels       = 6;
+        static constexpr std::size_t MaxDuplexChannels = 8;
+        static constexpr auto        UpdateInterval    = std::chrono::milliseconds{10};
+        static constexpr std::size_t MaxLogEntries     = 10'000'000;
+        // Trims are batched: once MaxLogEntries is exceeded, drop down to MaxLogEntries -
+        // TrimSlack so the O(N) front-erase amortizes over many appends.
+        static constexpr std::size_t TrimSlack            = MaxLogEntries / 16;
+        static constexpr std::size_t RefilterChunk        = 16 * 1024;
+        static constexpr auto        FilterDebounce       = std::chrono::milliseconds{300};
+        static constexpr auto        LiveRefilterThrottle = std::chrono::milliseconds{250};
+        // metric series are bounded per key so a chatty metric cannot grow without limit
+        static constexpr std::size_t MaxMetricEntriesPerKey = 100'000;
+        // location dropdown labels contain live counts; count-only updates are rebuilt at
+        // most this often, new locations immediately
+        static constexpr auto LocationLabelRefresh = std::chrono::milliseconds{500};
+        // duplex byte counters on the settings tab refresh without posted events
+        static constexpr auto SettingsRefreshInterval = std::chrono::milliseconds{250};
     }   // namespace GUI_Constants
 
     namespace util {
@@ -245,7 +263,6 @@ namespace uc_log { namespace FTXUIGui {
                 if constexpr(!std::is_same_v<decltype(transformedElement), ftxui::Element>) {
                     scrollableContent  = transformedElement->getScrollableContent();
                     metadataForThisRow = transformedElement->getMetadataContent();
-
                 } else {
                     scrollableContent  = transformedElement;
                     metadataForThisRow = ftxui::text("");
@@ -412,8 +429,67 @@ namespace uc_log { namespace FTXUIGui {
                                                                std::move(lineContentWidths),
                                                                hiddenBefore);
 
-            return std::move(background) | ftxui::vscroll_indicator | ftxui::yframe | ftxui::yflex
-                 | ftxui::reflect(renderBox);
+            // ftxui's vscroll_indicator derives its thumb from the layout height, which
+            // the spacers cap at MaxScrollLines: past ~8k lines the thumb froze. This one
+            // is computed from the true container metrics, drawn outside the frame.
+            struct AccurateScrollIndicator : public ftxui::Node {
+                AccurateScrollIndicator(ftxui::Element child,
+                                        long           total,
+                                        long           first,
+                                        long           visible)
+                  : ftxui::Node({std::move(child)})
+                  , total_{total}
+                  , first_{first}
+                  , visible_{visible} {}
+
+                void ComputeRequirement() override {
+                    children_[0]->ComputeRequirement();
+                    requirement_ = children_[0]->requirement();
+                    requirement_.min_x += 1;
+                }
+
+                void SetBox(ftxui::Box box) override {
+                    box_          = box;
+                    auto childBox = box;
+                    childBox.x_max -= 1;
+                    children_[0]->SetBox(childBox);
+                }
+
+                void Render(ftxui::Screen& screen) override {
+                    children_[0]->Render(screen);
+                    int const height = box_.y_max - box_.y_min + 1;
+                    if(height <= 0 || total_ <= 0) { return; }
+                    int const  x         = box_.x_max;
+                    long const cells     = 2L * height;
+                    long       thumbSize = std::max(1L, cells * visible_ / total_);
+                    long       thumbStart
+                      = visible_ >= total_ ? 0L : cells * first_ / std::max(1L, total_);
+                    if(visible_ >= total_) { thumbSize = cells; }
+                    thumbStart = std::min(thumbStart, cells - thumbSize);
+                    for(int y = 0; y < height; ++y) {
+                        long const upper    = 2L * y;
+                        long const lower    = upper + 1;
+                        bool const upperSet = upper >= thumbStart && upper < thumbStart + thumbSize;
+                        bool const lowerSet = lower >= thumbStart && lower < thumbStart + thumbSize;
+                        auto&      pixel    = screen.PixelAt(x, box_.y_min + y);
+                        pixel.character
+                          = upperSet ? (lowerSet ? "┃" : "╹") : (lowerSet ? "╻" : " ");
+                        pixel.foreground_color = ftxui::Color::GrayDark;
+                    }
+                }
+
+                long total_;
+                long first_;
+                long visible_;
+            };
+
+            ftxui::Element framed = std::move(background) | ftxui::yframe;
+            return std::make_shared<AccurateScrollIndicator>(
+                     std::move(framed),
+                     static_cast<long>(containerSize),
+                     static_cast<long>(hiddenBefore),
+                     static_cast<long>(std::min(containerSize, ySpace)))
+                 | ftxui::yflex | ftxui::reflect(renderBox);
         }
 
         bool OnEvent(ftxui::Event event) final {
@@ -463,6 +539,11 @@ namespace uc_log { namespace FTXUIGui {
                 selectedIndex    = containerSize - 1;
                 horizontalOffset = 0;
             }
+            if(event == ftxui::Event::Character('y') && onYank && containerSize > 0) {
+                onYank(static_cast<std::size_t>(
+                  std::max(0, std::min(containerSize - 1, selectedIndex))));
+                return true;
+            }
 
             if(selectedIndex >= containerSize - 1) { stick = true; }
             selectedIndex = std::max(0, std::min(containerSize - 1, selectedIndex));
@@ -473,12 +554,33 @@ namespace uc_log { namespace FTXUIGui {
 
         bool Focusable() const final { return true; }
 
+    public:
+        // programmatic navigation (e.g. jump-to-time); clamped on the next render
+        void JumpTo(int index) {
+            stick            = false;
+            selectedIndex    = index;
+            horizontalOffset = 0;
+        }
+
+        // called with the selected index when the user presses 'y'
+        std::function<void(std::size_t)> onYank;
+
         bool       stick            = true;
         int        selectedIndex    = 0;
         int        containerSize    = 0;
         int        horizontalOffset = 0;
         ftxui::Box renderBox;
     };
+
+    // like Scroller() but returns the concrete type so callers can wire JumpTo/onYank
+    template<typename ContainerGetter,
+             typename Transform>
+    auto MakeScroller(ContainerGetter&& containerGetter,
+                      Transform&&       transformFunc) {
+        return std::make_shared<ScrollerBase<ContainerGetter, Transform>>(
+          std::forward<ContainerGetter>(containerGetter),
+          std::forward<Transform>(transformFunc));
+    }
 
     template<typename ContainerGetter,
              typename Transform>
@@ -556,6 +658,20 @@ namespace uc_log { namespace FTXUIGui {
         mutable std::map<std::size_t, std::string> string_storage;
     };
 
+    // O(1) adapter over a prebuilt label vector (the map-based SourceLocationAdapter cost
+    // O(index) per visible entry per frame)
+    struct StringVectorAdapter : ftxui::ConstStringListRef::Adapter {
+        explicit StringVectorAdapter(std::vector<std::string> const& labels_) : labels{labels_} {}
+
+        std::size_t size() const override { return labels.size(); }
+
+        std::string_view operator[](std::size_t index) const override {
+            return index < labels.size() ? std::string_view{labels[index]} : std::string_view{};
+        }
+
+        std::vector<std::string> const& labels;
+    };
+
     struct EnabledLocationAdapter : ftxui::ConstStringListRef::Adapter {
         EnabledLocationAdapter(std::set<SourceLocation>& container_) : container{container_} {}
 
@@ -585,7 +701,7 @@ namespace uc_log { namespace FTXUIGui {
         mutable std::map<std::size_t, std::string> string_storage;
     };
 
-    static ftxui::Element ansiColoredTextToFtxui(std::string_view text) {
+    inline ftxui::Element ansiColoredTextToFtxui(std::string_view text) {
         static constexpr char escape = '\x1B';
 
         ftxui::Elements elements;
@@ -669,18 +785,28 @@ namespace uc_log { namespace FTXUIGui {
                     }
 
                     std::vector<int> codes;
-                    std::string      current;
+                    // from_chars instead of stoi: malformed target output must not throw
+                    // in the render path, non numeric parameters are skipped
+                    auto pushCode = [&codes](std::string_view param) {
+                        int code{};
+                        auto const [ptr, ec]
+                          = std::from_chars(param.data(), std::to_address(param.end()), code);
+                        if(ec == std::errc{} && ptr == std::to_address(param.end())) {
+                            codes.push_back(code);
+                        }
+                    };
+                    std::string current;
                     for(char const character : params) {
                         if(character == ';') {
                             if(!current.empty()) {
-                                codes.push_back(std::stoi(current));
+                                pushCode(current);
                                 current.clear();
                             }
                         } else {
                             current.push_back(character);
                         }
                     }
-                    if(!current.empty()) { codes.push_back(std::stoi(current)); }
+                    if(!current.empty()) { pushCode(current); }
 
                     for(std::size_t i = 0; i < codes.size(); ++i) {
                         int const code = codes[i];
@@ -1409,25 +1535,26 @@ namespace uc_log { namespace FTXUIGui {
         return std::to_string(num);
     }
 
-    static inline std::string formatBytes(std::uint32_t bytes) {
-        if(bytes >= 1073741824) { return fmt::format("{:.1f}GB", bytes / 1073741824.0); }
-        if(bytes >= 1048576) { return fmt::format("{:.1f}MB", bytes / 1048576.0); }
-        if(bytes >= 1024) { return fmt::format("{:.1f}KB", bytes / 1024.0); }
+    static inline std::string formatBytes(std::uint64_t bytes) {
+        auto const b = static_cast<double>(bytes);
+        if(bytes >= 1073741824) { return fmt::format("{:.1f}GB", b / 1073741824.0); }
+        if(bytes >= 1048576) { return fmt::format("{:.1f}MB", b / 1048576.0); }
+        if(bytes >= 1024) { return fmt::format("{:.1f}KB", b / 1024.0); }
         return fmt::format("{}B", bytes);
     }
 
     static inline std::string
     to_time_string_with_milliseconds(std::chrono::system_clock::time_point const& value) {
-        //00:00:00.000 in local time
+        // 00:00:00.000 in local time. localtime_r instead of std::chrono::zoned_time:
+        // libc++ does not implement the chrono tz database
         auto const seconds = std::chrono::duration_cast<std::chrono::seconds>(
           value - std::chrono::time_point_cast<std::chrono::minutes>(value));
         auto const milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
           value - std::chrono::time_point_cast<std::chrono::seconds>(value));
-        return fmt::format(
-          "{:%H:%M}:{:02}.{:03}",
-          std::chrono::zoned_time{std::chrono::current_zone(), value}.get_local_time(),
-          seconds.count(),
-          milliseconds.count());
+        auto const time = std::chrono::system_clock::to_time_t(value);
+        std::tm    local{};
+        localtime_r(&time, &local);
+        return fmt::format("{:%H:%M}:{:02}.{:03}", local, seconds.count(), milliseconds.count());
     }
 
 }}   // namespace uc_log::FTXUIGui

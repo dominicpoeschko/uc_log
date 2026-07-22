@@ -1,9 +1,8 @@
 #pragma once
+#include "remote_fmt/fmt_wrapper.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 
 #include <chrono>
-#include <fmt/chrono.h>
-#include <fmt/format.h>
 #include <ostream>
 
 namespace uc_log::detail::logformat {

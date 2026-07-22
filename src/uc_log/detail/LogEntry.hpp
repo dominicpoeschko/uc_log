@@ -23,6 +23,7 @@
     #pragma clang diagnostic ignored "-Wswitch-default"
     #pragma clang diagnostic ignored "-Wglobal-constructors"
     #pragma clang diagnostic ignored "-Wfloat-equal"
+    #pragma clang diagnostic ignored "-Wundefined-func-template"
 #endif
 
 #include <fmt/chrono.h>
@@ -37,6 +38,7 @@
     #pragma clang diagnostic pop
 #endif
 
+#include <limits>
 #include <optional>
 #include <ranges>
 #include <ratio>
@@ -56,14 +58,37 @@ namespace uc_log { namespace detail {
             std::chrono::nanoseconds time{};
             constexpr UcTime() = default;
 
+            // integer arithmetic end to end: double's 53 bit mantissa would corrupt long
+            // or high resolution runs (~104 days at ns resolution). Saturates at the
+            // representable maximum instead of overflowing.
             constexpr UcTime(std::uint64_t value,
                              std::uint64_t num,
                              std::uint64_t den)
-              //TODO overflow...
-              : time{std::chrono::duration_cast<std::chrono::nanoseconds>(
-                  std::chrono::duration<double>{
-                    (static_cast<double>(value) * static_cast<double>(num))
-                    / static_cast<double>(den)})} {}
+              : time{[&]() {
+                  __extension__ using u128            = unsigned __int128;
+                  constexpr std::uint64_t NsPerSecond = 1'000'000'000U;
+                  constexpr u128          MaxNs
+                    = static_cast<u128>(std::numeric_limits<std::chrono::nanoseconds::rep>::max());
+
+                  if(den == 0) { return std::chrono::nanoseconds{0}; }
+                  // value * num always fits u128 (both < 2^64); splitting off the
+                  // remainder keeps the * NsPerSecond step in range as well
+                  u128 const scaled = static_cast<u128>(value) * num;
+                  u128 const whole  = scaled / den;
+                  u128 const rest   = ((scaled % den) * NsPerSecond) / den;
+
+                  if(whole > MaxNs / NsPerSecond) {
+                      return std::chrono::nanoseconds{
+                        std::numeric_limits<std::chrono::nanoseconds::rep>::max()};
+                  }
+                  u128 const total = whole * NsPerSecond + rest;
+                  if(total > MaxNs) {
+                      return std::chrono::nanoseconds{
+                        std::numeric_limits<std::chrono::nanoseconds::rep>::max()};
+                  }
+                  return std::chrono::nanoseconds{
+                    static_cast<std::chrono::nanoseconds::rep>(total)};
+              }()} {}
 
             constexpr auto operator<=>(UcTime const&) const = default;
         };
@@ -75,6 +100,9 @@ namespace uc_log { namespace detail {
         uc_log::LogLevel logLevel{};
         std::string      functionName;
         std::string      logMsg;
+        // false when the header did not parse: such entries carry defaults (trace, time 0,
+        // no location) and must be rendered/counted as unparsed, not trusted
+        bool parsedOk{true};
 
         template<typename Ratio>
         static constexpr auto makeLookUp(std::string_view suffix,
@@ -175,7 +203,8 @@ namespace uc_log { namespace detail {
 
         LogEntry(std::size_t      channel_,
                  std::string_view msg)
-          : channel{channel_} {
+          : channel{channel_}
+          , parsedOk{false} {
             auto const pos = msg.find(R"("""))");
             if(pos == std::string_view::npos || !msg.starts_with("(")) {
                 logMsg = msg;
@@ -204,7 +233,9 @@ namespace uc_log { namespace detail {
             contextMsg.remove_prefix(lineSv.size());
             if(!contextMsg.starts_with(", ")) { return; }
             contextMsg.remove_prefix(2);
-            std::uint16_t line_{};
+            // uint32 matches what the producer emits; uint16 used to discard the whole
+            // header for files with more than 65535 lines
+            std::uint32_t line_{};
             {
                 auto const [ptr, ec] = std::from_chars(lineSv.begin(), lineSv.end(), line_);
                 if(ec != std::errc{} || ptr != lineSv.end()) { return; }
@@ -235,6 +266,7 @@ namespace uc_log { namespace detail {
             line         = line_;
             logLevel     = static_cast<uc_log::LogLevel>(logLevel_);
             functionName = functionNameSv;
+            parsedOk     = true;
         }
     };
 }}   // namespace uc_log::detail

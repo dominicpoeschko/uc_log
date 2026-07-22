@@ -1,6 +1,7 @@
 #include "uc_log/FTXUIGui.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <random>
 #include <string_view>
@@ -71,6 +72,14 @@ struct Reader {
         if(msg) { msg("Set reset type: " + std::to_string(static_cast<int>(type))); }
     }
 
+    void setHost(std::string const& host) {
+        if(msg) { msg("Set host: " + host); }
+    }
+
+    void setNoLogTimeout(std::uint32_t seconds) {
+        if(msg) { msg("Set no-log timeout: " + std::to_string(seconds)); }
+    }
+
     std::function<void(std::string const&)> msg;
 };
 
@@ -100,6 +109,7 @@ void updateMessage(uc_log::detail::LogEntry& e,
     std::ranges::sample(logMessages, &e.logMsg, 1, gen);
     std::ranges::sample(functionNames, &e.functionName, 1, gen);
     std::ranges::sample(functionLines, &e.line, 1, gen);
+    e.parsedOk = true;   // fabricated entries are complete, not parser bailouts
 }
 
 static void updateStatus(Status& status) {
@@ -141,6 +151,19 @@ int main() {
         uc_log::detail::LogEntry e{0, ""};
         e.ucTime.time = std::chrono::nanoseconds{0};
         std::mt19937 gen{std::random_device{}()};
+
+        // GUI_TEST_PRELOAD=1000000 bulk-loads entries as fast as possible to test
+        // filter/scroll performance on large logs.
+        if(char const* env = std::getenv("GUI_TEST_PRELOAD")) {
+            auto const preload = static_cast<std::size_t>(std::atoll(env));
+            for(std::size_t i = 0; i != preload && !stoken.stop_requested(); ++i) {
+                updateMessage(e, gen);
+                if(i % 100 == 0) { e.logMsg = "multi\nline\nmessage"; }
+                e.ucTime.time += std::chrono::milliseconds{1};
+                gui.add(std::chrono::system_clock::now(), e);
+            }
+        }
+
         while(!stoken.stop_requested()) {
             updateMessage(e, gen);
             {
