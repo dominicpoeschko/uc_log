@@ -94,9 +94,9 @@ if(UC_LOG_BUILD_PRINTER)
         endif()
 
         if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND "${USE_SANITIZER}" STREQUAL "thread")
-            # boost::asio's fenced blocks use std::atomic_thread_fence, which TSan does not
-            # model; gcc warns about every inlined use (also at LTO link time). Harmless
-            # noise - TSan still checks all mutex/atomic-object operations.
+            # boost::asio's fenced blocks use std::atomic_thread_fence, which TSan does not model; gcc warns about every
+            # inlined use (also at LTO link time). Harmless noise - TSan still checks all mutex/atomic-object
+            # operations.
             add_compile_options(-Wno-tsan)
             add_link_options(-Wno-tsan)
         endif()
