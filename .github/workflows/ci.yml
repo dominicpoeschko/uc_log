@@ -22,8 +22,10 @@ jobs:
                 compiler:
                     - {cc: gcc, cxx: g++}
                     - {cc: gcc, cxx: g++, stdlib_debug: true, sanitizer: address}
+                    - {cc: gcc, cxx: g++, stdlib_debug: true, sanitizer: thread}
                     - {cc: clang, cxx: clang++}
                     - {cc: clang, cxx: clang++, stdlib: libc++, stdlib_debug: true, sanitizer: address}
+                    - {cc: clang, cxx: clang++, stdlib: libc++, stdlib_debug: true, sanitizer: thread}
 
         steps:
             - name: Set up C++ environment
