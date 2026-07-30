@@ -57,23 +57,49 @@ if(NOT CMAKE_CROSSCOMPILING)
     endif()
 endif()
 
+include(FetchContent)
+FetchContent_Declare(
+    cmake_helpers
+    GIT_REPOSITORY https://github.com/dominicpoeschko/cmake_helpers.git
+    GIT_TAG master)
+FetchContent_MakeAvailable(cmake_helpers)
+
+include(${cmake_helpers_SOURCE_DIR}/FindOrFetch.cmake)
+
 add_subdirectory(rtt)
 add_subdirectory(remote_fmt)
 
+# Not in the printer section below: aglio needs it too, and fetching it first makes aglio skip its own (identically
+# pinned and patched) fetch, so target and host share one copy.
+find_or_fetch_package(
+    glaze
+    GIT_REPOSITORY
+    https://github.com/stephenberry/glaze.git
+    GIT_TAG
+    v7.8.3
+    GIT_BRANCH
+    main
+    PATCH_FILE
+    ${CMAKE_CURRENT_LIST_DIR}/glaze.patch)
+
+# Supplies the remote_fmt formatter for reflectable structs. On the interface library, not the printer: the struct is
+# formatted on the microcontroller into an @TYPENAME(...) marker the printer already parses.
+find_or_fetch_package(
+    aglio
+    GIT_REPOSITORY
+    https://github.com/dominicpoeschko/aglio.git
+    GIT_TAG
+    v0.2.0
+    GIT_BRANCH
+    master)
+
 add_library(uc_log INTERFACE)
 target_include_directories(uc_log INTERFACE src)
-target_link_libraries(uc_log INTERFACE rtt::rtt remote_fmt::remote_fmt)
+target_link_libraries(uc_log INTERFACE rtt::rtt remote_fmt::remote_fmt aglio::aglio)
 
 add_library(uc_log::uc_log ALIAS uc_log)
 
 if(UC_LOG_BUILD_PRINTER)
-
-    include(FetchContent)
-    FetchContent_Declare(
-        cmake_helpers
-        GIT_REPOSITORY https://github.com/dominicpoeschko/cmake_helpers.git
-        GIT_TAG master)
-    FetchContent_MakeAvailable(cmake_helpers)
 
     if(NOT CMAKE_CROSSCOMPILING)
 
@@ -85,7 +111,6 @@ if(UC_LOG_BUILD_PRINTER)
             LANGUAGES CXX)
 
         include(${cmake_helpers_SOURCE_DIR}/BuildOptions.cmake)
-        include(${cmake_helpers_SOURCE_DIR}/FindOrFetch.cmake)
 
         if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
             # -Weverything enables -Wthread-safety-negative, which requires negative capability annotations on every
@@ -160,17 +185,6 @@ if(UC_LOG_BUILD_PRINTER)
             0.4.0
             GIT_BRANCH
             main)
-
-        find_or_fetch_package(
-            glaze
-            GIT_REPOSITORY
-            https://github.com/stephenberry/glaze.git
-            GIT_TAG
-            v7.8.3
-            GIT_BRANCH
-            main
-            PATCH_FILE
-            ${CMAKE_CURRENT_LIST_DIR}/glaze.patch)
 
         add_subdirectory(jlink)
 

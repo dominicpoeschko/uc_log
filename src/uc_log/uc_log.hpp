@@ -3,12 +3,16 @@
 #include "ComBackend.hpp"
 #include "LogClock.hpp"
 #include "LogLevel.hpp"
+#include "Tag.hpp"
 #include "detail/LevelBoundBackend.hpp"
 #include "metric.hpp"
 #include "remote_fmt/remote_fmt.hpp"
 #include "rtt/rtt.hpp"
 
-#include <algorithm>
+// Formats reflectable structs. Not left to the user: it is a formatter specialization, so including it after a log
+// call site that uses the type would be an ODR violation.
+#include "aglio/remote_fmt.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -21,9 +25,9 @@ namespace uc_log { namespace detail {
         std::string_view sv;
 
         consteval auto basename(std::string_view f) {
-            auto it = std::ranges::find(f, '/');
-            if(it == f.end()) { return f; }
-            return std::string_view{++it, f.end()};
+            auto const pos = f.find('/');
+            if(pos == std::string_view::npos) { return f; }
+            return f.substr(pos + 1);
         }
 
     public:
