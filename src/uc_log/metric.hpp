@@ -1,3 +1,5 @@
+#pragma once
+
 #include "remote_fmt/remote_fmt.hpp"
 
 #include <array>
@@ -139,6 +141,22 @@ namespace detail {
     }
 }   // namespace detail
 }   // namespace uc_log
+
+namespace remote_fmt { namespace detail {
+
+// A Metric is transparent on the wire, so its spec is checked against ValueType. Without this fmt
+// finds no formatter for Metric and the argument is silently left unchecked.
+#if REMOTE_FMT_USE_FMT_CHECK
+    template<typename ValueType,
+             sc::StringConstant Name,
+             sc::StringConstant Unit,
+             sc::StringConstant Scope>
+    struct host_type<uc_log::Metric<ValueType, Name, Unit, Scope>> {
+        using type = host_type_t<ValueType>;
+    };
+#endif
+
+}}   // namespace remote_fmt::detail
 
 namespace remote_fmt {
 
