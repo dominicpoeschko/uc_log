@@ -69,21 +69,9 @@ include(${cmake_helpers_SOURCE_DIR}/FindOrFetch.cmake)
 add_subdirectory(rtt)
 add_subdirectory(remote_fmt)
 
-# Not in the printer section below: aglio needs it too, and fetching it first makes aglio skip its own (identically
-# pinned and patched) fetch, so target and host share one copy.
-find_or_fetch_package(
-    glaze
-    GIT_REPOSITORY
-    https://github.com/stephenberry/glaze.git
-    GIT_TAG
-    v7.8.3
-    GIT_BRANCH
-    main
-    PATCH_FILE
-    ${CMAKE_CURRENT_LIST_DIR}/glaze.patch)
-
 # Supplies the remote_fmt formatter for reflectable structs. On the interface library, not the printer: the struct is
-# formatted on the microcontroller into an @TYPENAME(...) marker the printer already parses.
+# formatted on the microcontroller into an @TYPENAME(...) marker the printer already parses. Also owns glaze (version
+# and patch); never link glaze::glaze by name, it may be an imported target scoped to aglio's directory.
 find_or_fetch_package(
     aglio
     GIT_REPOSITORY
@@ -173,7 +161,7 @@ if(UC_LOG_BUILD_PRINTER)
             GIT_REPOSITORY
             https://github.com/ArthurSonzogni/ftxui
             GIT_TAG
-            v7.0.0
+            v7.0.1
             GIT_BRANCH
             main)
 
@@ -204,8 +192,7 @@ if(UC_LOG_BUILD_PRINTER)
                     ftxui::screen
                     ftxui::dom
                     ftxui::component
-                    enchantum::enchantum
-                    glaze::glaze)
+                    enchantum::enchantum)
 
         target_compile_definitions(uc_log_printer PRIVATE CXXOPTS_NO_RTTI)
         target_add_default_build_options(uc_log_printer PRIVATE)
@@ -223,8 +210,7 @@ if(UC_LOG_BUILD_PRINTER)
                 ftxui::screen
                 ftxui::dom
                 ftxui::component
-                enchantum::enchantum
-                glaze::glaze)
+                enchantum::enchantum)
 
             target_add_default_build_options(uc_log_gui_test PUBLIC)
         endif()

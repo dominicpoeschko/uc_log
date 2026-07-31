@@ -12,8 +12,7 @@ function(uc_log_add_test name)
                 ftxui::screen
                 ftxui::dom
                 ftxui::component
-                enchantum::enchantum
-                glaze::glaze)
+                enchantum::enchantum)
     target_add_default_build_options(${name} PRIVATE)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
