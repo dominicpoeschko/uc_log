@@ -161,7 +161,7 @@ if(UC_LOG_BUILD_PRINTER)
             GIT_REPOSITORY
             https://github.com/ArthurSonzogni/ftxui
             GIT_TAG
-            v7.0.1
+            v7.0.2
             GIT_BRANCH
             main)
 

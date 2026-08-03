@@ -394,10 +394,10 @@ namespace uc_log { namespace FTXUIGui {
         std::string      noLogTimeoutStr{"15"};
         ftxui::Component noLogTimeoutInput;
 
-        // Cross-thread redraw request. ftxui's PostEvent is NOT thread-safe (the event
-        // buffer has no internal synchronization), so producers only set this flag; the
-        // UI loop posts the actual event to itself once per iteration. Latency is bounded
-        // by GUI_Constants::UpdateInterval, same as the loop granularity.
+        // Cross-thread redraw request. PostEvent is thread-safe since ftxui v7.0.2, but
+        // producers still only set this flag: the UI loop posts a single event per
+        // iteration, coalescing redraw bursts. Latency is bounded by
+        // GUI_Constants::UpdateInterval, same as the loop granularity.
         void requestRedrawFromAnywhere() { redrawPending.store(true, std::memory_order_relaxed); }
 
         // Register a text input (including its decorators) for the hotkey focus guard.
@@ -3364,8 +3364,8 @@ namespace uc_log { namespace FTXUIGui {
                         lastSettingsRefresh = now;
                         redrawPending.store(true, std::memory_order_relaxed);
                     }
-                    // producers cannot post ftxui events (not thread-safe); relay their
-                    // coalesced request from the UI thread
+                    // relay the producers' coalesced redraw request as a single event
+                    // per iteration
                     if(redrawPending.exchange(false, std::memory_order_relaxed)) {
                         screen.PostEvent(ftxui::Event::Custom);
                     }
