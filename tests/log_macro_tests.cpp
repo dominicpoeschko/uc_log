@@ -9,7 +9,10 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -85,6 +88,30 @@ struct Item {
     std::string_view name;
 };
 
+// Trivially copyable arguments are taken by value, so members of a packed struct - whose
+// addresses may be misaligned - are loggable directly.
+struct __attribute__((packed)) PackedFrame {
+    std::uint8_t  header;
+    std::uint32_t counter;
+    float         value;
+};
+
+static_assert(alignof(PackedFrame) == 1);
+
+struct Flags {
+    std::uint8_t ready : 1;
+    std::uint8_t error : 3;
+};
+
+// Mirrors chip's CDC-ACM LineCoding: a static inline packed object whose members are logged
+// from inside a template, i.e. a dependent context.
+struct __attribute__((packed)) LineCodingLike {
+    std::uint32_t dwDTERate{9600};
+    std::uint8_t  bCharFormat{};
+    std::uint8_t  bParityType{};
+    std::uint8_t  bDataBits{8};
+};
+
 namespace {
 
 std::unordered_map<std::uint16_t,
@@ -133,6 +160,115 @@ std::optional<uc_log::detail::LogEntry> logNestedStruct() {
                Color::green,
                "sensor"
     });
+    return takeEntry();
+}
+
+std::optional<uc_log::detail::LogEntry> logPackedMembers() {
+    PackedFrame const frame{0xAA, 1234567, 2.5f};
+    UC_LOG_I("counter {} value {}", frame.counter, frame.value);
+    return takeEntry();
+}
+
+// Counts allocations, so the test below can prove that logging a non-trivially-copyable
+// container never copies it: a copy of a non-empty vector must allocate.
+int countingAllocations = 0;
+
+template<typename T>
+struct CountingAllocator {
+    using value_type = T;
+
+    CountingAllocator() = default;
+
+    template<typename U>
+    constexpr CountingAllocator(CountingAllocator<U> const&) {}
+
+    T* allocate(std::size_t n) {
+        ++countingAllocations;
+        return std::allocator<T>{}.allocate(n);
+    }
+
+    void deallocate(T*          p,
+                    std::size_t n) {
+        std::allocator<T>{}.deallocate(p, n);
+    }
+
+    friend bool operator==(CountingAllocator,
+                           CountingAllocator) {
+        return true;
+    }
+};
+
+// Returns nullopt if the entry did not round trip, false if logging copied the vector.
+std::optional<bool> logVectorWithoutCopy(std::optional<uc_log::detail::LogEntry>& entry) {
+    std::vector<int, CountingAllocator<int>> const values{1, 2, 3};
+    int const                                      allocationsBefore = countingAllocations;
+    UC_LOG_I("values {}", values);
+    bool const copyFree = countingAllocations == allocationsBefore;
+    entry               = takeEntry();
+    if(!entry) { return std::nullopt; }
+    return copyFree;
+}
+
+// Nested braces, commas inside template arguments and inside initializers - the torture test
+// for the macro's handling of __VA_ARGS__ (only parentheses protect commas from the
+// preprocessor, so the expansion must never split the argument list).
+std::optional<uc_log::detail::LogEntry> logBracedMap() {
+    UC_LOG_I("map {}",
+             std::map<int, int>{
+               {1, 2},
+               {3, 4}
+    });
+    return takeEntry();
+}
+
+template<typename>
+struct MixinLike {
+    static inline LineCodingLike lineCoding{};
+
+    static std::optional<uc_log::detail::LogEntry> log() {
+        lineCoding.dwDTERate = 115200;
+        UC_LOG_I("baud {} bits {}", lineCoding.dwDTERate, lineCoding.bDataBits);
+        return takeEntry();
+    }
+};
+
+std::optional<uc_log::detail::LogEntry> logBitfieldMembers() {
+    Flags const flags{1, 5};
+    UC_LOG_I("ready {} error {}", flags.ready, flags.error);
+    return takeEntry();
+}
+
+std::optional<uc_log::detail::LogEntry> logVolatileValue() {
+    // stands in for a memory-mapped register read; the by-value copy drops the qualifier
+    std::uint32_t volatile reg = 7;
+    UC_LOG_I("reg {}", reg);
+    return takeEntry();
+}
+
+std::optional<uc_log::detail::LogEntry> logCharBufferWithoutNul() {
+    // no nul terminator anywhere: only formatter<char[N]>'s N-1 semantics can log this safely
+    // (a strlen-based path would run off the end); the last element is not printed
+    char const buf[5]{'h', 'e', 'l', 'l', 'o'};
+    UC_LOG_I("buf {}", buf);
+    return takeEntry();
+}
+
+std::optional<uc_log::detail::LogEntry> logByteArray() {
+    std::uint8_t const mac[4]{1, 2, 3, 4};
+    UC_LOG_I("mac {}", mac);
+    return takeEntry();
+}
+
+std::optional<uc_log::detail::LogEntry> logWordArray() {
+    std::uint32_t const values[3]{10, 20, 30};
+    UC_LOG_I("values {}", values);
+    return takeEntry();
+}
+
+std::optional<uc_log::detail::LogEntry> logVoidPointer() {
+    // the shape kvasir's ubsan minimal runtime logs: an address, as void*
+    void const* const address = reinterpret_cast<void const*>(std::uintptr_t{0x1234});
+    UC_LOG_C("at {}", address);
     return takeEntry();
 }
 
@@ -249,6 +385,127 @@ int main() {
                      std::string{"item @TYPENAME(Item){position: @TYPENAME(Point){x: -3, y: 0.5}, "
                                  "color: green, name: sensor}"},
                      "nested struct message");
+        }
+    }
+
+    // char arrays keep their compile-time length: N-1 bytes, no nul needed
+    {
+        auto const entry = logCharBufferWithoutNul();
+        if(!entry) {
+            std::printf("FAIL: char buffer did not round trip\n");
+            ++failures;
+        } else {
+            CHECK(entry->parsedOk, "char buffer entry parses");
+            CHECK_EQ(entry->logMsg, std::string{"buf hell"}, "char buffer message");
+        }
+    }
+
+    // the CDC-ACM shape: packed members of a static inline object, logged from a template
+    {
+        auto const entry = MixinLike<int>::log();
+        if(!entry) {
+            std::printf("FAIL: line coding did not round trip\n");
+            ++failures;
+        } else {
+            CHECK(entry->parsedOk, "line coding entry parses");
+            CHECK_EQ(entry->logMsg, std::string{"baud 115200 bits 8"}, "line coding message");
+        }
+    }
+
+    // arrays log as ranges
+    {
+        auto const entry = logByteArray();
+        if(!entry) {
+            std::printf("FAIL: byte array did not round trip\n");
+            ++failures;
+        } else {
+            CHECK(entry->parsedOk, "byte array entry parses");
+            CHECK_EQ(entry->logMsg, std::string{"mac [1, 2, 3, 4]"}, "byte array message");
+        }
+    }
+    {
+        auto const entry = logWordArray();
+        if(!entry) {
+            std::printf("FAIL: word array did not round trip\n");
+            ++failures;
+        } else {
+            CHECK(entry->parsedOk, "word array entry parses");
+            CHECK_EQ(entry->logMsg, std::string{"values [10, 20, 30]"}, "word array message");
+        }
+    }
+
+    // void pointers log as addresses (what kvasir's ubsan runtime relies on)
+    {
+        auto const entry = logVoidPointer();
+        if(!entry) {
+            std::printf("FAIL: void pointer did not round trip\n");
+            ++failures;
+        } else {
+            CHECK(entry->parsedOk, "void pointer entry parses");
+            CHECK_EQ(entry->logMsg, std::string{"at 0x1234"}, "void pointer");
+        }
+    }
+
+    // packed struct members: taken by value (trivially copyable), so no reference ever binds
+    // to the misaligned address and the load at the call site is well-defined
+    {
+        auto const entry = logPackedMembers();
+        if(!entry) {
+            std::printf("FAIL: packed members did not round trip\n");
+            ++failures;
+        } else {
+            CHECK(entry->parsedOk, "packed member entry parses");
+            CHECK_EQ(entry->logMsg, std::string{"counter 1234567 value 2.5"}, "packed members");
+        }
+    }
+
+    // a non-trivially-copyable container is passed by reference: correct output, zero copies
+    {
+        std::optional<uc_log::detail::LogEntry> entry;
+        auto const                              copyFree = logVectorWithoutCopy(entry);
+        if(!copyFree) {
+            std::printf("FAIL: vector did not round trip\n");
+            ++failures;
+        } else {
+            CHECK(*copyFree, "logging the vector must not copy it");
+            CHECK(entry->parsedOk, "vector entry parses");
+            CHECK_EQ(entry->logMsg, std::string{"values [1, 2, 3]"}, "vector message");
+        }
+    }
+
+    // braces and commas nested every which way must survive the macro expansion
+    {
+        auto const entry = logBracedMap();
+        if(!entry) {
+            std::printf("FAIL: braced map did not round trip\n");
+            ++failures;
+        } else {
+            CHECK(entry->parsedOk, "braced map entry parses");
+            CHECK_EQ(entry->logMsg, std::string{"map {1: 2, 3: 4}"}, "braced map message");
+        }
+    }
+
+    // bit-field members: not addressable at all, but fine to log as values
+    {
+        auto const entry = logBitfieldMembers();
+        if(!entry) {
+            std::printf("FAIL: bit-field members did not round trip\n");
+            ++failures;
+        } else {
+            CHECK(entry->parsedOk, "bit-field entry parses");
+            CHECK_EQ(entry->logMsg, std::string{"ready 1 error 5"}, "bit-field members");
+        }
+    }
+
+    // volatile lvalues: the copy reads once and logs the plain value
+    {
+        auto const entry = logVolatileValue();
+        if(!entry) {
+            std::printf("FAIL: volatile value did not round trip\n");
+            ++failures;
+        } else {
+            CHECK(entry->parsedOk, "volatile entry parses");
+            CHECK_EQ(entry->logMsg, std::string{"reg 7"}, "volatile value");
         }
     }
 
