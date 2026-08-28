@@ -107,6 +107,18 @@ namespace uc_log { namespace detail {
 
 }}   // namespace uc_log::detail
 
+// Compile-time level floor: call sites below it expand to nothing at all -- no code,
+// no format string in the catalog. Set by LogLevel enumerator name so the build system
+// needs no copy of the numbering (-DUC_LOG_MIN_LEVEL=warn keeps warn/error/crit); an
+// unknown name fails on the line below. The discarded branch is still semantically
+// checked, so an unloggable argument is an error at every level.
+#ifndef UC_LOG_MIN_LEVEL
+    #define UC_LOG_MIN_LEVEL trace
+#endif
+
+namespace uc_log {
+    inline constexpr LogLevel minLevel = LogLevel::UC_LOG_MIN_LEVEL; }   // namespace uc_log
+
 #ifdef USE_UC_LOG
     // Shared assembly of the compile-time header string; expects
     // UC_LOG_DO_NOT_USE_FUNCTION_NAME and the sc literal namespaces in scope.
@@ -123,21 +135,25 @@ namespace uc_log { namespace detail {
 
     // The argument list appears twice: unevaluated to harvest the types, then as the real
     // call; nothing is evaluated twice.
-    #define UC_LOG_IMPL(level, line, filename, fmt, ...)                                         \
-        do {                                                                                     \
-            if(!std::is_constant_evaluated()) {                                                  \
-                constexpr auto UC_LOG_DO_NOT_USE_FUNCTION_NAME = __FUNCTION__;                   \
-                using namespace ::remote_fmt::detail;                                            \
-                using namespace ::sc::literals;                                                  \
-                ::uc_log::detail::Log<decltype(::uc_log::detail::logArgumentTypes(               \
-                  ::uc_log::detail::LogArgumentsPreferred{},                                     \
-                  ::uc_log::LogClock<::uc_log::Tag::User>::now() __VA_OPT__(, ) __VA_ARGS__))>:: \
-                  template log<                                                                  \
-                    ::uc_log::detail::ResolveBackend<::uc_log::Tag::User,                        \
-                                                     static_cast<::uc_log::LogLevel>(level)>>(   \
-                    UC_LOG_DETAIL_FMT(level, line, filename, fmt),                               \
-                    ::uc_log::LogClock<::uc_log::Tag::User>::now() __VA_OPT__(, ) __VA_ARGS__);  \
-            }                                                                                    \
+    #define UC_LOG_IMPL(level, line, filename, fmt, ...)                                           \
+        do {                                                                                       \
+            if constexpr(static_cast<::uc_log::LogLevel>(level) >= ::uc_log::minLevel) {           \
+                if(!std::is_constant_evaluated()) {                                                \
+                    constexpr auto UC_LOG_DO_NOT_USE_FUNCTION_NAME = __FUNCTION__;                 \
+                    using namespace ::remote_fmt::detail;                                          \
+                    using namespace ::sc::literals;                                                \
+                    ::uc_log::detail::Log<decltype(::uc_log::detail::logArgumentTypes(             \
+                      ::uc_log::detail::LogArgumentsPreferred{},                                   \
+                      ::uc_log::LogClock<::uc_log::Tag::User>::now() __VA_OPT__(, )                \
+                        __VA_ARGS__))>::                                                           \
+                      template log<                                                                \
+                        ::uc_log::detail::ResolveBackend<::uc_log::Tag::User,                      \
+                                                         static_cast<::uc_log::LogLevel>(level)>>( \
+                        UC_LOG_DETAIL_FMT(level, line, filename, fmt),                             \
+                        ::uc_log::LogClock<::uc_log::Tag::User>::now() __VA_OPT__(, )              \
+                          __VA_ARGS__);                                                            \
+                }                                                                                  \
+            }                                                                                      \
         } while(false)
 #else
     #define UC_LOG_IMPL(level, line, filename, fmt, ...) (void)0

@@ -28,6 +28,11 @@ uc_log_add_test(uc_log_test_log_macro log_macro_tests.cpp)
 # pass over the target's objects, which a host test cannot run; without it the format strings go on the wire inline.
 target_compile_definitions(uc_log_test_log_macro PRIVATE USE_UC_LOG REMOTE_FMT_USE_CATALOG=false)
 
+# Same macros with a compile-time level floor (warn) and a backend exposing the optional transfer hooks.
+uc_log_add_test(uc_log_test_log_min_level log_min_level_tests.cpp)
+target_compile_definitions(uc_log_test_log_min_level PRIVATE USE_UC_LOG REMOTE_FMT_USE_CATALOG=false
+                                                             UC_LOG_MIN_LEVEL=warn)
+
 # Arguments the UC_LOG macros must NOT accept. A rejection is a hard compile error that cannot be observed as a bool, so
 # each case is its own excluded target and the test is "building it fails". Keep in step with log_macro_fail.cpp.
 set(log_macro_fail_cases 1 2)
