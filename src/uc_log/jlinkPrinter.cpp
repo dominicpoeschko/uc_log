@@ -22,6 +22,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <vector>
 // clang-format off
 #ifdef __clang__
 #  pragma clang diagnostic push
@@ -58,38 +60,77 @@ parseMapFileForControlBlockInfo(std::filesystem::path const& mapFile) {
     content.resize(fileSize);
     file.read(content.data(), std::ssize(content));
 
-    auto addressLines = content | std::views::split('\n')
-                      | std::views::transform([](auto&& rng) { return std::string_view{rng}; })
-                      | std::views::filter([](auto&& line) { return line.contains(needle); });
+    // Three map-file shapes: lld puts "<vma> <lma> <size> <align> <name>" on one symbol line;
+    // GNU ld puts only the address on the symbol line, with the size on the preceding
+    // input-section line; GNU ld with LTO localises the symbol, leaving only the input-section
+    // line with the mangled name, followed by address and size.
+    auto lines = content | std::views::split('\n')
+               | std::views::transform([](auto&& rng) { return std::string_view{rng}; });
 
-    for(auto addressLine : addressLines) {
-        auto const lineEnd = std::next(std::data(addressLine), std::ssize(addressLine));
+    auto const parseHex = [](std::string_view sv, std::uint32_t& out) -> std::string_view {
+        auto const begin = std::find_if_not(sv.begin(), sv.end(), [](char c) { return c == ' '; });
+        std::string_view rest{begin, sv.end()};
+        if(rest.starts_with("0x")) { rest.remove_prefix(2); }
+        auto const* end = std::to_address(rest.end());
+        auto [ptr, ec]  = std::from_chars(rest.data(), end, out, 16);
+        if(ec != std::errc{}) { return {}; }
+        return std::string_view{ptr, end};
+    };
+    auto const plausible = [&](std::uint32_t size) {
+        return size >= controlBlockHeaderSize
+            && (size - controlBlockHeaderSize) % bufferControlBlockSize == 0;
+    };
 
-        // parse: "<address> <lma> <size> ..."
+    static constexpr std::string_view mangledNeedle{"rttControlBlockE"};
+
+    std::vector<std::string_view> all{lines.begin(), lines.end()};
+    std::vector<std::string_view> candidates{};
+    for(std::size_t i = 0; i < all.size(); ++i) {
+        auto const    line = all[i];
+        std::uint32_t probe{};
+        // lld's input-section line also contains the mangled name but always starts with an
+        // address; the GNU ld section line never does. Reading it as the GNU ld shape would
+        // mistake the LMA for the size.
+        bool const startsWithAddress = !parseHex(line, probe).empty();
+        bool const demangled         = line.contains(needle);
+        bool const section = !demangled && !startsWithAddress && line.contains(mangledNeedle);
+        if(!demangled && !section) { continue; }
+        candidates.push_back(line);
+
         std::uint32_t address{};
-        auto [afterAddr, ec1] = std::from_chars(std::data(addressLine), lineEnd, address, 16);
-        if(ec1 != std::errc{}) { continue; }
-
-        // skip whitespace + LMA field
-        afterAddr = std::find_if_not(afterAddr, lineEnd, [](char c) { return c == ' '; });
-        std::uint32_t lma{};
-        auto [afterLma, ec2] = std::from_chars(afterAddr, lineEnd, lma, 16);
-        if(ec2 != std::errc{}) { continue; }
-
-        // skip whitespace + parse size field
-        afterLma = std::find_if_not(afterLma, lineEnd, [](char c) { return c == ' '; });
         std::uint32_t size{};
-        auto [afterSize, ec3] = std::from_chars(afterLma, lineEnd, size, 16);
-        if(ec3 != std::errc{}) { continue; }
-
-        if(size >= controlBlockHeaderSize
-           && (size - controlBlockHeaderSize) % bufferControlBlockSize == 0)
-        {
-            std::uint32_t const totalBuffers
-              = (size - controlBlockHeaderSize) / bufferControlBlockSize;
-            return RttBlockInfo{address, totalBuffers};
+        if(section) {
+            // "<name> <addr> <size> <file>" on one line, or the numbers on the next
+            auto const nameEnd = line.find(mangledNeedle) + mangledNeedle.size();
+            auto       rest    = parseHex(line.substr(nameEnd), address);
+            if(rest.empty() && i + 1 < all.size()) { rest = parseHex(all[i + 1], address); }
+            if(!rest.empty() && !parseHex(rest, size).empty() && plausible(size)) {
+                return RttBlockInfo{address,
+                                    (size - controlBlockHeaderSize) / bufferControlBlockSize};
+            }
+            continue;
+        }
+        auto rest = parseHex(line, address);
+        if(rest.empty()) { continue; }
+        // lld: two more hex columns, the third is the size
+        std::uint32_t lma{};
+        auto          r2 = parseHex(rest, lma);
+        if(!r2.empty() && !parseHex(r2, size).empty() && plausible(size)) {
+            return RttBlockInfo{address, (size - controlBlockHeaderSize) / bufferControlBlockSize};
+        }
+        // GNU ld without LTO: "<addr> <size> <file>" on the line before, same address
+        std::uint32_t prevAddress{};
+        if(i > 0) {
+            auto p1 = parseHex(all[i - 1], prevAddress);
+            if(!p1.empty() && prevAddress == address && !parseHex(p1, size).empty()
+               && plausible(size))
+            {
+                return RttBlockInfo{address,
+                                    (size - controlBlockHeaderSize) / bufferControlBlockSize};
+            }
         }
     }
+    auto addressLines = candidates;
 
     return std::unexpected(
       fmt::format("failed to parse address from file: {:?} lines: {::?}", mapFile, addressLines));

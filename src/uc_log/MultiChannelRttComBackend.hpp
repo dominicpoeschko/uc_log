@@ -42,7 +42,9 @@ private:
     using RttConfig     = typename ConfigBuilder::Config;
     using RttType       = rtt::ControlBlock<RttConfig>;
 
-    [[gnu::section(".noInit")]] static inline constinit typename RttType::Storage_t rttStorage;
+    // gnu::used: gcc LTO otherwise drops the section attribute and the buffer lands in .bss
+    [[gnu::section(".noInit"), gnu::used]] static inline constinit
+      typename RttType::Storage_t rttStorage;
 
     static inline constinit RttType rttControlBlock{rttStorage};
 
