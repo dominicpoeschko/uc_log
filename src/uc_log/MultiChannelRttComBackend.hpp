@@ -49,6 +49,11 @@ private:
     static inline constinit RttType rttControlBlock{rttStorage};
 
 public:
+    // Listed in an application's Startup by convention (the log transport belongs next to
+    // the peripherals), with nothing for Startup to run: this is what tells Startup's
+    // "every entry is a peripheral" rule that the listing is deliberate.
+    static constexpr bool isStartupEntry = true;
+
     static constexpr std::size_t NumDuplexChannels = ConfigBuilder::NumDuplexChannels;
 
     template<LogLevel Level>

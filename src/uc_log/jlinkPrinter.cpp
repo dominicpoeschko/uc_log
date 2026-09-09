@@ -237,6 +237,7 @@ int main(int    argc,
     std::string   hexFile{};
     std::string   stringConstantsFile{};
     std::string   host{};
+    std::string   probe{};
     std::string   logDir{};
     std::string   buildCommand{};
     std::string   bindAddressString{};
@@ -267,6 +268,10 @@ int main(int    argc,
           cxxopts::value<std::string>())("host",
                                          "jlink host",
                                          cxxopts::value<std::string>()->default_value(""))(
+          "probe",
+          "jlink by serial number or nickname, on usb or on the network; required when "
+          "more than one is on usb",
+          cxxopts::value<std::string>()->default_value(""))(
           "bind_address",
           "address the tcp servers (metrics + duplex) bind to; the duplex ports give raw "
           "unauthenticated access to the target, so anything but loopback exposes that "
@@ -284,6 +289,7 @@ int main(int    argc,
         stringConstantsFile = result["string_constants_file"].as<std::string>();
         logDir              = result["log_dir"].as<std::string>();
         host                = result["host"].as<std::string>();
+        probe               = result["probe"].as<std::string>();
         bindAddressString   = result["bind_address"].as<std::string>();
         disableUi           = result.count("disable_ui") > 0;
     } catch(cxxopts::exceptions::exception const& e) {
@@ -300,6 +306,7 @@ int main(int    argc,
     }
 
     uc_log::FTXUIGui::Gui gui{};
+    gui.setEchoToStderr(disableUi);
     gui.setNetworkBindAddress(bindAddressString);
     LogFilePrinter              logFilePrinter{gui, logDir};
     uc_log::detail::AsioContext asioContext;
@@ -363,6 +370,7 @@ int main(int    argc,
       host,
       device,
       speed,
+      probe,
       [&mapFile, &gui]() {
           auto const result = parseMapFileForControlBlockInfo(mapFile);
           if(!result.has_value()) { gui.fatalError(result.error()); }
@@ -394,7 +402,7 @@ int main(int    argc,
     };
 
     if(!disableUi) {
-        return gui.run(rttReader, buildCommand, host);
+        return gui.run(rttReader, buildCommand, host, probe);
     } else {
         static std::atomic<bool> shutdown_requested(false);
         std::signal(SIGINT, [](int signal) {

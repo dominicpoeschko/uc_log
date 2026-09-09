@@ -10,6 +10,8 @@
 #include "uc_log/metric_utils.hpp"
 #include "uc_log/theme.hpp"
 
+#include <fmt/format.h>
+
 #ifdef __GNUC__
     #pragma GCC diagnostic push
     #pragma GCC diagnostic ignored "-Wredundant-decls"
@@ -391,8 +393,17 @@ namespace uc_log { namespace FTXUIGui {
         int              connectionTypeSelection{0};   // 0 = USB, 1 = IP
         std::string      ipAddressInput{};
         ftxui::Component ipAddressInputComponent;
-        std::string      noLogTimeoutStr{"15"};
-        ftxui::Component noLogTimeoutInput;
+        // Probe picker: the probes the reader last listed, one radio entry each behind
+        // "any", and the name that is actually sent (serial number or nickname; typed or
+        // filled in by picking an entry).
+        std::string              probeInput{};
+        ftxui::Component         probeInputComponent;
+        std::vector<std::string> probeEntries{"any (the only J-Link on USB)"};
+        std::vector<std::string> probeNames{""};
+        int                      probeSelection{0};
+        std::uint64_t            probesVersionSeen{0};
+        std::string              noLogTimeoutStr{"15"};
+        ftxui::Component         noLogTimeoutInput;
 
         // Cross-thread redraw request. PostEvent is thread-safe since ftxui v7.0.2, but
         // producers still only set this flag: the UI loop posts a single event per
@@ -2771,6 +2782,38 @@ namespace uc_log { namespace FTXUIGui {
                })});
         }
 
+        // Rebuild the probe radio entries when the reader has a newer list. The current
+        // name is kept; the radio follows it when it is one of the listed probes.
+        template<typename Reader>
+        void syncProbeEntries(Reader& rttReader) {
+            auto const version = rttReader.getProbesVersion();
+            if(version == probesVersionSeen) { return; }
+            probesVersionSeen = version;
+
+            auto const probes = rttReader.getProbes();
+            probeEntries.assign({"any (the only J-Link on USB)"});
+            probeNames.assign({""});
+            for(auto const& p : probes) {
+                std::string entry = p.onUsb ? "USB " : "IP  ";
+                if(!p.product.empty()) { entry += p.product + " "; }
+                entry += std::to_string(p.serialNumber);
+                if(!p.nickName.empty()) { entry += " \"" + p.nickName + "\""; }
+                if(!p.onUsb) { entry += " (by serial number)"; }
+                probeEntries.push_back(std::move(entry));
+                probeNames.push_back(std::to_string(p.serialNumber));
+            }
+
+            probeSelection = 0;
+            for(std::size_t i = 1; i < probeNames.size(); ++i) {
+                auto const& p = probes[i - 1];
+                if(probeInput == probeNames[i] || (!p.nickName.empty() && probeInput == p.nickName))
+                {
+                    probeSelection = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+
         template<typename Reader>
         ftxui::Component getDebuggerComponent(Reader& rttReader) {
             auto resetTargetBtn = ftxui::Button(
@@ -2867,10 +2910,54 @@ namespace uc_log { namespace FTXUIGui {
             auto ipInputMaybe = ftxui::Maybe(ipAddressInputComponent | ftxui::flex,
                                              [this]() { return connectionTypeSelection == 1; });
 
+            // Picking a listed probe fills the name field; typing keeps working for a
+            // probe that is not listed (yet).
+            ftxui::RadioboxOption probeRadioOpts;
+            probeRadioOpts.on_change = [this]() {
+                if(probeSelection >= 0
+                   && static_cast<std::size_t>(probeSelection) < probeNames.size())
+                {
+                    probeInput = probeNames[static_cast<std::size_t>(probeSelection)];
+                }
+            };
+            auto probeRadio = ftxui::Radiobox(&probeEntries, &probeSelection, probeRadioOpts);
+
+            ftxui::InputOption probeOpts;
+            probeOpts.multiline = false;
+            probeInputComponent
+              = trackInput(ftxui::Input(&probeInput, "serial number or nickname", probeOpts));
+
+            auto refreshProbesBtn = ftxui::Button(
+              "🔍 List Probes",
+              [&rttReader]() { rttReader.refreshProbes(); },
+              createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
+
+            auto probePanel
+              = ftxui::Container::Vertical(
+                  {ftxui::Renderer([]() {
+                       return ftxui::text("Probe") | ftxui::bold
+                            | ftxui::color(Theme::Header::accent());
+                   }),
+                   probeRadio,
+                   ftxui::Container::Horizontal({probeInputComponent | ftxui::flex})
+                     | ftxui::Renderer([](ftxui::Element inner) {
+                           return ftxui::hbox(
+                             {ftxui::text("Name: ") | ftxui::color(Theme::Status::info()),
+                              std::move(inner) | ftxui::flex});
+                       }),
+                   refreshProbesBtn})
+              | ftxui::Renderer([this, &rttReader](ftxui::Element inner) {
+                    syncProbeEntries(rttReader);
+                    return inner;
+                });
+            auto probePanelMaybe
+              = ftxui::Maybe(probePanel, [this]() { return connectionTypeSelection == 0; });
+
             auto applyConnBtn = ftxui::Button(
               "Apply Connection",
               [this, &rttReader]() {
-                  rttReader.setHost(connectionTypeSelection == 0 ? "" : ipAddressInput);
+                  rttReader.setConnection({connectionTypeSelection == 0 ? "" : ipAddressInput,
+                                           connectionTypeSelection == 0 ? probeInput : ""});
               },
               createButtonStyle(Theme::Button::Background::settings(), Theme::Button::text()));
 
@@ -2881,6 +2968,7 @@ namespace uc_log { namespace FTXUIGui {
                                             }),
                                             connTypeRadio,
                                             ipInputMaybe,
+                                            probePanelMaybe,
                                             applyConnBtn})
               | ftxui::border;
 
@@ -3172,7 +3260,13 @@ namespace uc_log { namespace FTXUIGui {
             store.addEntry(recv_time, entry);
         }
 
+        // headless runs (--disable_ui) have no message panel: echo everything to stderr instead
+        bool echoToStderr{false};
+
+        void setEchoToStderr(bool enabled) { echoToStderr = enabled; }
+
         void fatalError(std::string_view msg) {
+            if(echoToStderr) { fmt::print(stderr, "[fatal] {}\n", msg); }
             std::lock_guard<std::mutex> const lock{mutex};
             statusMessages.emplace_back(MessageEntry::Level::Fatal,
                                         std::chrono::system_clock::now(),
@@ -3181,6 +3275,7 @@ namespace uc_log { namespace FTXUIGui {
         }
 
         void statusMessage(std::string_view msg) {
+            if(echoToStderr) { fmt::print(stderr, "[status] {}\n", msg); }
             std::lock_guard<std::mutex> const lock{mutex};
             statusMessages.emplace_back(MessageEntry::Level::Status,
                                         std::chrono::system_clock::now(),
@@ -3189,6 +3284,7 @@ namespace uc_log { namespace FTXUIGui {
         }
 
         void errorMessage(std::string_view msg) {
+            if(echoToStderr) { fmt::print(stderr, "[error] {}\n", msg); }
             std::lock_guard<std::mutex> const lock{mutex};
             statusMessages.emplace_back(MessageEntry::Level::Error,
                                         std::chrono::system_clock::now(),
@@ -3197,6 +3293,7 @@ namespace uc_log { namespace FTXUIGui {
         }
 
         void toolStatusMessage(std::string_view msg) {
+            if(echoToStderr) { fmt::print(stderr, "[tool] {}\n", msg); }
             std::lock_guard<std::mutex> const lock{mutex};
             statusMessages.emplace_back(MessageEntry::Level::ToolStatus,
                                         std::chrono::system_clock::now(),
@@ -3205,6 +3302,7 @@ namespace uc_log { namespace FTXUIGui {
         }
 
         void toolErrorMessage(std::string_view msg) {
+            if(echoToStderr) { fmt::print(stderr, "[tool error] {}\n", msg); }
             std::lock_guard<std::mutex> const lock{mutex};
             statusMessages.emplace_back(MessageEntry::Level::ToolError,
                                         std::chrono::system_clock::now(),
@@ -3293,9 +3391,11 @@ namespace uc_log { namespace FTXUIGui {
         template<typename Reader>
         int run(Reader&            rttReader,
                 std::string const& buildCommand,
-                std::string const& initialHost = "") {
+                std::string const& initialHost  = "",
+                std::string const& initialProbe = "") {
             connectionTypeSelection = initialHost.empty() ? 0 : 1;
             ipAddressInput          = initialHost;
+            probeInput              = initialProbe;
             buildRunner.initialize(buildCommand);
 
             auto screen = ftxui::ScreenInteractive::Fullscreen();

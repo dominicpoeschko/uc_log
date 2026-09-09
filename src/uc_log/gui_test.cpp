@@ -4,8 +4,10 @@
 #include <cstdlib>
 #include <functional>
 #include <random>
+#include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 struct Status {
     std::uint32_t numBytesTransferred{};
@@ -72,9 +74,40 @@ struct Reader {
         if(msg) { msg("Set reset type: " + std::to_string(static_cast<int>(type))); }
     }
 
-    void setHost(std::string const& host) {
-        if(msg) { msg("Set host: " + host); }
+    struct Probe {
+        std::uint32_t serialNumber{};
+        std::string   product{};
+        std::string   nickName{};
+        bool          onUsb{};
+    };
+
+    struct ConnectionSettings {
+        std::string host{};
+        std::string probe{};
+    };
+
+    std::uint64_t probesVersion{0};
+
+    void setConnection(ConnectionSettings const& settings) {
+        if(msg) {
+            msg("Set connection: host \"" + settings.host + "\" probe \"" + settings.probe + "\"");
+        }
     }
+
+    void refreshProbes() {
+        if(msg) { msg("Refresh probes"); }
+        ++probesVersion;
+    }
+
+    std::vector<Probe> getProbes() {
+        return {
+          Probe{123456, "J-Link EDU Mini", "board-a",  true},
+          Probe{654321,     "J-Link PLUS",        "",  true},
+          Probe{111222,      "J-Link PRO",     "lab", false}
+        };
+    }
+
+    std::uint64_t getProbesVersion() const { return probesVersion; }
 
     void setNoLogTimeout(std::uint32_t seconds) {
         if(msg) { msg("Set no-log timeout: " + std::to_string(seconds)); }
@@ -203,5 +236,5 @@ int main() {
         }
     });
 
-    return gui.run(reader, "make");
+    return gui.run(reader, "make", "", "board-a");
 }

@@ -27,6 +27,18 @@ private:
     using Clock  = std::chrono::steady_clock;
     using Status = typename TransportT::Status;
 
+public:
+    using Probe = typename TransportT::Probe;
+
+    // What the transport is told to open: `host` non-empty means J-Link over IP at that
+    // address, otherwise `probe` names a J-Link by serial number or nickname (empty: the
+    // only one on USB).
+    struct ConnectionSettings {
+        std::string host{};
+        std::string probe{};
+    };
+
+private:
     static constexpr std::size_t RttBufferChunkSize = 32768;
     static constexpr auto        HaltGracePeriod    = std::chrono::seconds{60};
 
@@ -61,6 +73,24 @@ private:
         }
     }
 
+    // The DLL is only ever driven from this thread, so the probe list the GUI asked for is
+    // produced here too. A failed listing is reported, never a reason to reconnect.
+    void serviceProbeListRequest() {
+        if(!probeListRequest.exchange(false)) { return; }
+        try {
+            auto found = TransportT::listProbes();
+            toolMessageCallback(
+              fmt::format("found {} J-Link probe{}", found.size(), found.size() == 1 ? "" : "s"));
+            {
+                std::lock_guard<std::mutex> lock{probesMutex};
+                probes_ = std::move(found);
+            }
+            probesVersion_.fetch_add(1, std::memory_order_release);
+        } catch(std::exception const& e) {
+            toolErrorMessageCallback(fmt::format("listing J-Link probes failed: {}", e.what()));
+        }
+    }
+
     void run(std::stop_token stoken) {
         auto setStatusNotRunning = [&]() {
             Status local_status{};
@@ -72,26 +102,22 @@ private:
             toolMessageCallback("start jlink");
             try {
                 {
-                    std::lock_guard<std::mutex> lock{hostMutex};
-                    if(pendingHost) {
-                        host = std::move(*pendingHost);
-                        pendingHost.reset();
+                    std::lock_guard<std::mutex> lock{connectionMutex};
+                    if(pendingConnection) {
+                        host  = std::move(pendingConnection->host);
+                        probe = std::move(pendingConnection->probe);
+                        pendingConnection.reset();
                     }
                 }
-                jlinkResetFlag   = false;
-                TransportT jlink = [&]() {
-                    if(host.empty()) {
-                        return TransportT{device,
-                                          speed,
-                                          toolMessageCallback,
-                                          toolErrorMessageCallback};
-                    }
-                    return TransportT{device,
-                                      speed,
-                                      host,
-                                      toolMessageCallback,
-                                      toolErrorMessageCallback};
-                }();
+                jlinkResetFlag = false;
+                serviceProbeListRequest();
+                TransportT jlink{
+                  device,
+                  speed,
+                  typename TransportT::Connection{host, 19020, probe},
+                  toolMessageCallback,
+                  toolErrorMessageCallback
+                };
                 jlink.setResetType(pendingResetType.load(std::memory_order_relaxed));
                 bool restart = false;
 
@@ -214,6 +240,7 @@ private:
                     if(hasResetTypeChange.exchange(false, std::memory_order_acquire)) {
                         jlink.setResetType(pendingResetType.load(std::memory_order_relaxed));
                     }
+                    serviceProbeListRequest();
                 }
             } catch(std::exception const& e) {
                 toolErrorMessageCallback(fmt::format("caught {}", e.what()));
@@ -231,6 +258,7 @@ private:
     std::string   host;
     std::string   device;
     std::uint32_t speed;
+    std::string   probe;   // by serial number or nickname; empty = the only one on USB
 
     std::function<RttBlockInfo(void)>                                   blockInfoCallback;
     std::function<std::string(void)>                                    hexFileNameCallback;
@@ -242,19 +270,23 @@ private:
     std::function<void(std::string_view)>                               toolErrorMessageCallback;
     uc_log::detail::DuplexBridge                                        duplexBridge;
 
-    std::atomic<Status>        status;
-    std::atomic<std::uint32_t> noLogTimeoutSeconds_{15};
-    std::atomic<bool>          targetResetFlag;
-    std::atomic<bool>          targetContinueFlag;
-    std::atomic<bool>          targetHaltFlag;
-    std::atomic<bool>          targetClearBreakPointsFlag;
-    std::atomic<bool>          jlinkResetFlag;
-    std::atomic<bool>          flashFlag;
-    std::atomic<std::uint8_t>  pendingResetType;
-    std::atomic<bool>          hasResetTypeChange;
-    std::mutex                 hostMutex;
-    std::optional<std::string> pendingHost;
-    std::jthread               thread;
+    std::atomic<Status>               status;
+    std::atomic<std::uint32_t>        noLogTimeoutSeconds_{15};
+    std::atomic<bool>                 targetResetFlag;
+    std::atomic<bool>                 targetContinueFlag;
+    std::atomic<bool>                 targetHaltFlag;
+    std::atomic<bool>                 targetClearBreakPointsFlag;
+    std::atomic<bool>                 jlinkResetFlag;
+    std::atomic<bool>                 flashFlag;
+    std::atomic<std::uint8_t>         pendingResetType;
+    std::atomic<bool>                 hasResetTypeChange;
+    std::mutex                        connectionMutex;
+    std::optional<ConnectionSettings> pendingConnection;
+    std::atomic<bool>                 probeListRequest{false};
+    std::mutex                        probesMutex;
+    std::vector<Probe>                probes_;
+    std::atomic<std::uint64_t>        probesVersion_{0};
+    std::jthread                      thread;
 
 public:
     template<typename BlockInfoF,
@@ -268,6 +300,7 @@ public:
     BasicJLinkRttReader(std::string                  host_,
                         std::string                  device_,
                         std::uint32_t                speed_,
+                        std::string                  probe_,
                         BlockInfoF&&                 blockInfof,
                         HexFileNameF&&               hexFileNamef,
                         CatalogMapF&&                catalogMapf,
@@ -280,6 +313,7 @@ public:
       : host{std::move(host_)}
       , device{std::move(device_)}
       , speed{speed_}
+      , probe{std::move(probe_)}
       , blockInfoCallback{std::forward<BlockInfoF>(blockInfof)}
       , hexFileNameCallback{std::forward<HexFileNameF>(hexFileNamef)}
       , catalogMapCallback{std::forward<CatalogMapF>(catalogMapf)}
@@ -295,17 +329,31 @@ public:
 
     void resetJLink() { jlinkResetFlag = true; }
 
-    void setHost(std::string newHost) {
+    // Reconnect with a different host / probe.
+    void setConnection(ConnectionSettings settings) {
         {
-            std::lock_guard<std::mutex> lock{hostMutex};
-            pendingHost = std::move(newHost);
+            std::lock_guard<std::mutex> lock{connectionMutex};
+            pendingConnection = std::move(settings);
         }
         jlinkResetFlag = true;
     }
 
-    std::string getHost() {
-        std::lock_guard<std::mutex> lock{hostMutex};
-        return pendingHost.value_or(host);
+    ConnectionSettings getConnection() {
+        std::lock_guard<std::mutex> lock{connectionMutex};
+        return pendingConnection.value_or(ConnectionSettings{host, probe});
+    }
+
+    // Ask the reader thread to list the probes; getProbes() has the result once
+    // getProbesVersion() changed.
+    void refreshProbes() { probeListRequest = true; }
+
+    std::vector<Probe> getProbes() {
+        std::lock_guard<std::mutex> lock{probesMutex};
+        return probes_;
+    }
+
+    std::uint64_t getProbesVersion() const {
+        return probesVersion_.load(std::memory_order_acquire);
     }
 
     void resetTarget() { targetResetFlag = true; }

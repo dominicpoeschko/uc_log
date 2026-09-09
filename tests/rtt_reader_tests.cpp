@@ -59,21 +59,30 @@ struct FakeTransport {
 
     static inline Shared* shared = nullptr;
 
-    template<typename MessageF,
-             typename ErrorF>
-    FakeTransport(std::string const&,
-                  std::uint32_t,
-                  MessageF&&,
-                  ErrorF&&) {
-        ++shared->constructions;
-        checkConnected();
+    struct Connection {
+        std::string   host{};
+        std::uint16_t port{19020};
+        std::string   probe{};
+    };
+
+    struct Probe {
+        std::uint32_t serialNumber{};
+        std::string   product{};
+        std::string   nickName{};
+        bool          onUsb{};
+    };
+
+    static std::vector<Probe> listProbes() {
+        return {
+          Probe{1, "fake", "fake", true}
+        };
     }
 
     template<typename MessageF,
              typename ErrorF>
     FakeTransport(std::string const&,
                   std::uint32_t,
-                  std::string const&,
+                  Connection const&,
                   MessageF&&,
                   ErrorF&&) {
         ++shared->constructions;
@@ -183,6 +192,7 @@ int main() {
       "",
       "fake",
       4000,
+      "",
       []() { return RttBlockInfo{0, 1}; },
       []() { return std::string{"fake.hex"}; },
       []() {

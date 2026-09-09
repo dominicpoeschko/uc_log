@@ -232,6 +232,7 @@ function(target_add_uc_log_rtt_jlink targetname)
         TARGET_MPU
         SWD_SPEED
         JLINK_IP
+        JLINK_PROBE
         MAP_FILE
         PREFIX
         METRICS_PORT
@@ -343,6 +344,10 @@ function(target_add_uc_log_rtt_jlink targetname)
         endif()
 
         list(APPEND command --host ${JLINK_IP_EXPANDED})
+    endif()
+
+    if(PARSED_ARGS_JLINK_PROBE AND NOT PARSED_ARGS_JLINK_PROBE STREQUAL "")
+        list(APPEND command --probe "${PARSED_ARGS_JLINK_PROBE}")
     endif()
 
     add_custom_target(
