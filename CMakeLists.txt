@@ -222,6 +222,9 @@ if(UC_LOG_BUILD_PRINTER)
     else()
         include(${cmake_helpers_SOURCE_DIR}/HostBuild.cmake)
         configure_host_build(uc_log_printer)
+        # configure_host_build() makes a plain custom target, which is excluded from ALL. No firmware target drags the
+        # printer in any more, so put it in ALL here to keep a bare `cmake --build .` building the tool.
+        set_property(TARGET uc_log_printer PROPERTY EXCLUDE_FROM_ALL FALSE)
     endif()
 
 endif() # UC_LOG_BUILD_PRINTER
@@ -354,10 +357,13 @@ function(target_add_uc_log_rtt_jlink targetname)
         ${PARSED_ARGS_PREFIX}${targetname}
         COMMENT "start logging ${targetname}"
         USES_TERMINAL
-        COMMAND ${command}
-        DEPENDS ${targetname} uc_log_printer ${uc_log_printer_bin})
+        COMMAND ${command})
 
-    add_dependencies(${targetname} uc_log_printer)
+    # The printer is a host tool the firmware never uses, so the dependency belongs on the log_ target, not on the elf -
+    # hanging it on the elf made every firmware build walk the whole nested host build (boost, ftxui, fmt, jlink).
+    # Target-level, not a DEPENDS on ${uc_log_printer_bin}: the host-build shim is a custom target that always runs, so
+    # a file dependency buys nothing and breaks parsing whenever the binary is not on disk yet.
+    add_dependencies(${PARSED_ARGS_PREFIX}${targetname} ${targetname} uc_log_printer)
 
 endfunction()
 

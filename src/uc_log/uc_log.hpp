@@ -122,15 +122,23 @@ namespace uc_log {
 #ifdef USE_UC_LOG
     // Shared assembly of the compile-time header string; expects
     // UC_LOG_DO_NOT_USE_FUNCTION_NAME and the sc literal namespaces in scope.
-    #define UC_LOG_DETAIL_FMT(level, line, filename, fmt)                       \
-        "(\""_sc + SC_LIFT(::uc_log::detail::FileName{filename}) + "\", "_sc    \
-          + ::sc::detail::format<static_cast<std::uint32_t>(line),              \
-                                 static_cast<std::uint8_t>(level)>("{}, {}"_sc) \
-          + ", {}, \"\"\""_sc                                                   \
-          + ::sc::escape(                                                       \
-            SC_LIFT(UC_LOG_DO_NOT_USE_FUNCTION_NAME),                           \
-            [](auto c) { return c == '{' || c == '}'; },                        \
-            [](auto c) { return c; })                                           \
+    //
+    // Every name this macro introduces carries the UC_LOG_DO_NOT_USE_ prefix, because a macro
+    // expands into the caller's scope and anything shorter will eventually shadow one of their
+    // locals. The lambda parameters below were `c`, which shadowed a perfectly reasonable
+    // `auto& c` at a call site and produced -Wshadow warnings pointing into this header
+    // rather than at anything the caller could see was wrong.
+    #define UC_LOG_DETAIL_FMT(level, line, filename, fmt)                              \
+        "(\""_sc + SC_LIFT(::uc_log::detail::FileName{filename}) + "\", "_sc           \
+          + ::sc::detail::format<static_cast<std::uint32_t>(line),                     \
+                                 static_cast<std::uint8_t>(level)>("{}, {}"_sc)        \
+          + ", {}, \"\"\""_sc                                                          \
+          + ::sc::escape(                                                              \
+            SC_LIFT(UC_LOG_DO_NOT_USE_FUNCTION_NAME),                                  \
+            [](auto UC_LOG_DO_NOT_USE_CHAR) {                                          \
+                return UC_LOG_DO_NOT_USE_CHAR == '{' || UC_LOG_DO_NOT_USE_CHAR == '}'; \
+            },                                                                         \
+            [](auto UC_LOG_DO_NOT_USE_CHAR) { return UC_LOG_DO_NOT_USE_CHAR; })        \
           + "\"\"\")"_sc + SC_LIFT(fmt)
 
     // The argument list appears twice: unevaluated to harvest the types, then as the real
