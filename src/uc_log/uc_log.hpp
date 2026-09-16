@@ -38,6 +38,14 @@ namespace uc_log { namespace detail {
         constexpr operator std::string_view() const { return sv; }
     };
 
+    // The no-log build's stand-in for a log call, named in the dead arm of a constant-false
+    // conditional: nothing is evaluated or emitted, but the arguments count as used, so no
+    // unused warnings. Const references so bit-fields bind; returns int so the arms agree.
+    template<typename... Ts>
+    constexpr int touch(Ts const&...) noexcept {
+        return 0;
+    }
+
     // Validates every log argument. Arrays pass (char[N] keeps formatter<char[N]>'s N-1
     // semantics, other arrays log as ranges). Of pointers only void* passes, logged as an
     // address; char pointers are rejected because their length would need strlen, which a
@@ -100,6 +108,9 @@ namespace uc_log { namespace detail {
                  char... chars>
         static constexpr void log(sc::StringConstant<chars...> fmt,
                                   LogArgument_t<Args>... args) {
+            // Held for the whole record, not each write() it is made of; empty unless the
+            // backend names one (detail/LevelBoundBackend.hpp).
+            [[maybe_unused]] typename ComBackend::RecordGuard const guard{};
             remote_fmt::Printer<ComBackend>::staticPrint(injectMetricFmtString(fmt, args...),
                                                          normalizeLogArgument(args)...);
         }
@@ -164,15 +175,19 @@ namespace uc_log {
             }                                                                                      \
         } while(false)
 #else
-    #define UC_LOG_IMPL(level, line, filename, fmt, ...) (void)0
+    // Same arguments and literal scope as the real call, never evaluated (detail::touch).
+    #define UC_LOG_IMPL(level, line, filename, fmt, ...)                                          \
+        do {                                                                                      \
+            using namespace ::sc::literals;                                                       \
+            static_cast<void>(false                                                               \
+                                ? ::uc_log::detail::touch(static_cast<::uc_log::LogLevel>(level), \
+                                                          fmt __VA_OPT__(, ) __VA_ARGS__)         \
+                                : 0);                                                             \
+        } while(false)
 #endif
 
-#ifdef USE_UC_LOG
-    #define UC_LOG(level, fmt, ...)                                                 \
-        UC_LOG_IMPL(level, __LINE__, __FILE_NAME__, fmt __VA_OPT__(, ) __VA_ARGS__)
-#else
-    #define UC_LOG(level, fmt, ...) (void)0
-#endif
+#define UC_LOG(level, fmt, ...)                                                 \
+    UC_LOG_IMPL(level, __LINE__, __FILE_NAME__, fmt __VA_OPT__(, ) __VA_ARGS__)
 
 #define UC_LOG_T(...) UC_LOG(::uc_log::LogLevel::trace, __VA_ARGS__)
 #define UC_LOG_D(...) UC_LOG(::uc_log::LogLevel::debug, __VA_ARGS__)

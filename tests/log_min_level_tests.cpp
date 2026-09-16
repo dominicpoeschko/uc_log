@@ -5,6 +5,8 @@
 //    form is preferred, the plain form is the fallback, and a backend with neither still
 //    builds. The Printer brackets each entry with them, so the observable order is
 //    init, write..., finalize.
+//  * The backend's RecordGuard is held by Log::log around the whole record: constructed
+//    before initTransfer, destroyed after finalizeTransfer.
 #include "uc_log/detail/LevelBoundBackend.hpp"
 #include "uc_log/uc_log.hpp"
 
@@ -40,9 +42,19 @@ std::vector<std::string>& events() {
 
 namespace uc_log {
 
-// The macro backend: level-templated hooks, so the recorded level tells which call site fired.
+// The macro backend: level-templated hooks, so the recorded level tells which call site fired,
+// and a guard that records its own lifetime.
 template<>
 struct ComBackend<Tag::User> {
+    struct RecordGuard {
+        RecordGuard() { events().push_back("guard-begin"); }
+
+        ~RecordGuard() { events().push_back("guard-end"); }
+
+        RecordGuard(RecordGuard const&)            = delete;
+        RecordGuard& operator=(RecordGuard const&) = delete;
+    };
+
     template<LogLevel Level>
     static void initTransfer() {
         events().push_back("init" + std::to_string(static_cast<int>(Level)));
@@ -99,22 +111,26 @@ int main() {
     UC_LOG_I("info {}", 3);
     CHECK(events().empty(), "levels below UC_LOG_MIN_LEVEL emit nothing");
 
-    // At the floor: one bracketed entry with the level-templated hooks.
+    // At the floor: one bracketed entry with the level-templated hooks, inside the guard.
     events().clear();
     UC_LOG_W("warn {}", 4);
     CHECK(wroteSomething(), "warn writes");
-    CHECK(!events().empty() && events().front() == "init3", "warn: initTransfer<warn> first");
-    CHECK(!events().empty() && events().back() == "fini3", "warn: finalizeTransfer<warn> last");
+    CHECK(events().size() >= 4 && events()[0] == "guard-begin" && events()[1] == "init3",
+          "warn: the guard is taken before initTransfer<warn>");
+    CHECK(events().size() >= 4 && events()[events().size() - 2] == "fini3"
+            && events().back() == "guard-end",
+          "warn: the guard is released after finalizeTransfer<warn>");
 
     events().clear();
     UC_LOG_E("error");
     CHECK(wroteSomething(), "error writes");
-    CHECK(!events().empty() && events().front() == "init4", "error: initTransfer<error> first");
+    CHECK(events().size() >= 2 && events()[1] == "init4", "error: initTransfer<error> first");
 
     events().clear();
     UC_LOG_C("crit");
     CHECK(wroteSomething(), "crit writes");
-    CHECK(!events().empty() && events().back() == "fini5", "crit: finalizeTransfer<crit> last");
+    CHECK(events().size() >= 2 && events()[events().size() - 2] == "fini5",
+          "crit: finalizeTransfer<crit> last");
 
     // Plain (non-templated) hooks are forwarded.
     events().clear();

@@ -1,9 +1,12 @@
 #pragma once
 
+#include "AlwaysAttached.hpp"
 #include "ComBackend.hpp"
 #include "DuplexChannel.hpp"
+#include "IsrPolicy.hpp"
 #include "LogLevel.hpp"
 #include "Tag.hpp"
+#include "detail/LogRing.hpp"
 #include "detail/RttConfigBuilder.hpp"
 #include "rtt/rtt.hpp"
 
@@ -17,26 +20,34 @@ namespace uc_log {
 template<std::size_t... Sizes>
 struct ChannelSizes {};
 
+// Per logical channel (Router) one thread ring, then Policy::NumIsrRings ISR rings
+// (IsrPolicy.hpp).
 template<typename DebuggerPresentFunction,
          typename Router,
          rtt::BufferMode Mode,
          typename SizeConfig,
-         typename DuplexChannelConfigs = DuplexChannels<>>
+         typename DuplexChannelConfigs = DuplexChannels<>,
+         typename Policy               = IsrPolicy::SingleLevel<>>
 struct MultiChannelRttComBackend;
 
 template<typename DebuggerPresentFunction,
          typename Router,
          rtt::BufferMode Mode,
          std::size_t... Sizes,
-         typename DuplexChannelConfigs>
+         typename DuplexChannelConfigs,
+         typename Policy>
 struct MultiChannelRttComBackend<DebuggerPresentFunction,
                                  Router,
                                  Mode,
                                  ChannelSizes<Sizes...>,
-                                 DuplexChannelConfigs> {
+                                 DuplexChannelConfigs,
+                                 Policy> : Policy {
 private:
-    static_assert(sizeof...(Sizes) == Router::NumLogicalChannels * 2,
-                  "Provide thread + ISR buffer size for each logical channel");
+    static constexpr std::size_t RingsPerChannel = 1 + Policy::NumIsrRings;
+
+    static_assert(sizeof...(Sizes) == Router::NumLogicalChannels * RingsPerChannel,
+                  "Provide a thread buffer size and one ISR buffer size per ISR ring "
+                  "(IsrPolicy::NumIsrRings) for each logical channel");
 
     using ConfigBuilder = detail::RttConfigBuilder<Mode, DuplexChannelConfigs, Sizes...>;
     using RttConfig     = typename ConfigBuilder::Config;
@@ -59,19 +70,10 @@ public:
     template<LogLevel Level>
     static void write(std::span<std::byte const> span) {
         if(__builtin_expect(DebuggerPresentFunction{}(), true)) {
-            constexpr std::size_t threadBuf = Router::template logicalChannel<Level> * 2;
-            constexpr std::size_t isrBuf    = threadBuf + 1;
-
-            auto get_IPSR = []() {
-                std::uint32_t result{};
-                asm("mrs %0, ipsr" : "=r"(result));
-                return result;
-            };
-            if(get_IPSR() == 0) {
-                rttControlBlock.template write<threadBuf>(span);
-            } else {
-                rttControlBlock.template write<isrBuf>(span);
-            }
+            constexpr std::size_t base = Router::template logicalChannel<Level> * RingsPerChannel;
+            std::size_t const     ring = detail::logRing<Policy>(base);
+            if(ring == detail::noLogRing) { return; }
+            detail::writeLogRing<ConfigBuilder::NumLogUpBuffers>(rttControlBlock, ring, span);
         }
     }
 

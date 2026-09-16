@@ -1,8 +1,11 @@
 #pragma once
 
+#include "AlwaysAttached.hpp"
 #include "ComBackend.hpp"
 #include "DuplexChannel.hpp"
+#include "IsrPolicy.hpp"
 #include "Tag.hpp"
+#include "detail/LogRing.hpp"
 #include "detail/RttConfigBuilder.hpp"
 #include "rtt/rtt.hpp"
 
@@ -10,18 +13,30 @@
 #include <cstdint>
 #include <span>
 #include <string_view>
+#include <utility>
 
 namespace uc_log {
 
+// One thread ring of MainBufferSize, then Policy::NumIsrRings ISR rings of IsrBufferSize
+// each (IsrPolicy.hpp).
 template<typename DebuggerPresentFunction,
          std::size_t     MainBufferSize,
          std::size_t     IsrBufferSize = MainBufferSize,
          rtt::BufferMode Mode          = rtt::BufferMode::block,
-         typename DuplexChannelConfigs = DuplexChannels<>>
-struct DefaultRttComBackend {
+         typename DuplexChannelConfigs = DuplexChannels<>,
+         typename Policy               = IsrPolicy::SingleLevel<>>
+struct DefaultRttComBackend : Policy {
 private:
+    template<std::size_t... Is>
+    static auto makeConfigBuilder(std::index_sequence<Is...>)
+      -> detail::RttConfigBuilder<Mode,
+                                  DuplexChannelConfigs,
+                                  MainBufferSize,
+                                  detail::repeatSize<IsrBufferSize,
+                                                     Is>...>;
+
     using ConfigBuilder
-      = detail::RttConfigBuilder<Mode, DuplexChannelConfigs, MainBufferSize, IsrBufferSize>;
+      = decltype(makeConfigBuilder(std::make_index_sequence<Policy::NumIsrRings>{}));
     using RttConfig = typename ConfigBuilder::Config;
     using RttType   = rtt::ControlBlock<RttConfig>;
 
@@ -34,23 +49,17 @@ private:
 public:
     // Listed in an application's Startup by convention (the log transport belongs next to
     // the peripherals), with nothing for Startup to run: this is what tells Startup's
-    // "every entry is a peripheral" rule that the listing is deliberate.
+    // "every entry is a peripheral" rule that the listing is deliberate. Startup also checks
+    // the policy's contract members against the enabled interrupts.
     static constexpr bool isStartupEntry = true;
 
     static constexpr std::size_t NumDuplexChannels = ConfigBuilder::NumDuplexChannels;
 
     static void write(std::span<std::byte const> span) {
         if(__builtin_expect(DebuggerPresentFunction{}(), true)) {
-            auto get_IPSR = []() {
-                std::uint32_t result{};
-                asm("mrs %0, ipsr" : "=r"(result));
-                return result;
-            };
-            if(get_IPSR() == 0) {
-                rttControlBlock.template write<0>(span);
-            } else {
-                rttControlBlock.template write<1>(span);
-            }
+            std::size_t const ring = detail::logRing<Policy>(0);
+            if(ring == detail::noLogRing) { return; }
+            detail::writeLogRing<ConfigBuilder::NumLogUpBuffers>(rttControlBlock, ring, span);
         }
     }
 

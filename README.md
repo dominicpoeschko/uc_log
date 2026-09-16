@@ -75,6 +75,29 @@ example a queue that drops entries as a unit) can tell where an entry starts and
 be templated on the `LogLevel` (`template<LogLevel> static void initTransfer()`), in which case that form is
 preferred over the plain one. A backend without them works unchanged.
 
+## Building without `USE_UC_LOG`
+
+Without `USE_UC_LOG` every `UC_LOG_*` call site still names its arguments, behind a constant-false condition: nothing
+is evaluated and no code is emitted, but a value or helper that exists only to be logged counts as used, so it raises no
+unused warning. Two things follow for code that has only ever been built without logging:
+
+- every argument must compile in that build too: a variable declared under `#ifdef USE_UC_LOG` is an error;
+- a `UC_LOG_*` call is a statement, not an expression, as it always was with `USE_UC_LOG`.
+
+## ISR log rings
+
+The RTT backends (`DefaultRttComBackend`, `MultiChannelRttComBackend`, `MulticoreRttComBackend`) take an ISR policy as
+their last template argument. It decides how the records of interrupts at different priority levels are kept apart
+(`src/uc_log/IsrPolicy.hpp`):
+
+- `IsrPolicy::SingleLevel<SilentLevels<...>>`, the default: one ISR ring, and every interrupt that may log runs at one
+  level.
+- `IsrPolicy::PerLevel<ActivePriority, Levels<...>, SilentLevels<...>>`: one ISR ring per listed level.
+- `IsrPolicy::MaskedRecord`: one ISR ring, and each record from an ISR is written with interrupts masked.
+
+With the Kvasir SDK, Startup checks the policy against the priorities the init steps set and fails the build when they
+do not fit, so an application whose logging interrupts use more than one level has to choose a policy.
+
 ## Contributing
 
 "If you'd like to contribute, please fork the repository and use a feature

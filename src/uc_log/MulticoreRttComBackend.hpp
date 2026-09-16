@@ -1,9 +1,12 @@
 #pragma once
 
+#include "AlwaysAttached.hpp"
 #include "ComBackend.hpp"
 #include "DuplexChannel.hpp"
+#include "IsrPolicy.hpp"
 #include "MultiChannelRttComBackend.hpp"
 #include "Tag.hpp"
+#include "detail/LogRing.hpp"
 #include "detail/RttConfigBuilder.hpp"
 #include "rtt/rtt.hpp"
 
@@ -14,36 +17,44 @@
 
 namespace uc_log {
 
-// One RTT up buffer per (core, context) on a dual-core target: core 0 thread, core 0 ISR,
-// core 1 thread, core 1 ISR, in that order. A log line is many small write() calls, and the
-// only thing that keeps them from interleaving is that every ring has exactly one producer.
-// The IPSR split gives that on one core; a second core needs its own pair, which is all this
-// backend adds. No lock, no barrier, nothing on the hot path but one extra register read.
+// One group of RTT up buffers per core on a dual-core target: core 0's thread ring and its
+// ISR rings, then core 1's (with the default policy: core 0 thread, core 0 ISR, core 1
+// thread, core 1 ISR). A log line is many small write() calls, which must not interleave on
+// a ring: the IPSR split separates the thread from the exceptions, the policy (IsrPolicy.hpp)
+// keeps the exceptions apart, and a second core gets its own group, which is all this backend
+// adds. No lock, no barrier, nothing on the hot path but one extra register read.
 //
 // The host printer treats every unpaired up buffer as a log channel and shows its index on
-// each line, so core 1's lines arrive labelled 2 (thread) and 3 (ISR) with no host change.
+// each line, so core 1's lines arrive labelled with the indexes after core 0's group (2 for
+// the thread and 3 for the ISR with the default policy) with no host change.
 //
 // CoreIdFunction: a functor returning 0 or 1 (Kvasir::Sio::CpuId on the RP2350).
 template<typename DebuggerPresentFunction,
          typename CoreIdFunction,
          rtt::BufferMode Mode,
          typename SizeConfig,
-         typename DuplexChannelConfigs = DuplexChannels<>>
+         typename DuplexChannelConfigs = DuplexChannels<>,
+         typename Policy               = IsrPolicy::SingleLevel<>>
 struct MulticoreRttComBackend;
 
 template<typename DebuggerPresentFunction,
          typename CoreIdFunction,
          rtt::BufferMode Mode,
          std::size_t... Sizes,
-         typename DuplexChannelConfigs>
+         typename DuplexChannelConfigs,
+         typename Policy>
 struct MulticoreRttComBackend<DebuggerPresentFunction,
                               CoreIdFunction,
                               Mode,
                               ChannelSizes<Sizes...>,
-                              DuplexChannelConfigs> {
+                              DuplexChannelConfigs,
+                              Policy> : Policy {
 private:
-    static_assert(sizeof...(Sizes) == 4,
-                  "four buffer sizes: core 0 thread, core 0 ISR, core 1 thread, core 1 ISR");
+    static constexpr std::size_t RingsPerCore = 1 + Policy::NumIsrRings;
+
+    static_assert(sizeof...(Sizes) == 2 * RingsPerCore,
+                  "per core a thread buffer size and one ISR buffer size per ISR ring "
+                  "(IsrPolicy::NumIsrRings): core 0's group, then core 1's");
 
     using ConfigBuilder = detail::RttConfigBuilder<Mode, DuplexChannelConfigs, Sizes...>;
     using RttConfig     = typename ConfigBuilder::Config;
@@ -61,23 +72,19 @@ public:
     // "every entry is a peripheral" rule that the listing is deliberate.
     static constexpr bool isStartupEntry = true;
 
+    // Each core writes to its own group of rings, so an ISR on one core never preempts a record
+    // on the other's: Startup holds the policy's contract to each core's interrupts on their
+    // own (ListRules::IsrContractHolds).
+    static constexpr bool perCoreIsrContexts = true;
+
     static constexpr std::size_t NumDuplexChannels = ConfigBuilder::NumDuplexChannels;
 
     static void write(std::span<std::byte const> span) {
         if(__builtin_expect(DebuggerPresentFunction{}(), true)) {
-            auto get_IPSR = []() {
-                std::uint32_t result{};
-                asm("mrs %0, ipsr" : "=r"(result));
-                return result;
-            };
-            std::uint32_t const core = CoreIdFunction{}() != 0 ? 2 : 0;
-            std::uint32_t const isr  = get_IPSR() != 0 ? 1 : 0;
-            switch(core + isr) {
-            case 0:  rttControlBlock.template write<0>(span); break;
-            case 1:  rttControlBlock.template write<1>(span); break;
-            case 2:  rttControlBlock.template write<2>(span); break;
-            default: rttControlBlock.template write<3>(span); break;
-            }
+            std::size_t const base = CoreIdFunction{}() != 0 ? RingsPerCore : 0;
+            std::size_t const ring = detail::logRing<Policy>(base);
+            if(ring == detail::noLogRing) { return; }
+            detail::writeLogRing<ConfigBuilder::NumLogUpBuffers>(rttControlBlock, ring, span);
         }
     }
 

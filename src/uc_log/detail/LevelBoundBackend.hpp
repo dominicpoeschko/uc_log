@@ -8,8 +8,21 @@
 
 namespace uc_log::detail {
 
+// The backend's record guard, forwarded for uc_log::detail::Log, which sees the backend only
+// through LevelBoundBackend; a backend without one gets an empty guard.
+template<typename Backend>
+struct RecordGuardOf {
+    struct RecordGuard {};
+};
+
+template<typename Backend>
+    requires requires { typename Backend::RecordGuard; }
+struct RecordGuardOf<Backend> {
+    using RecordGuard = typename Backend::RecordGuard;
+};
+
 template<typename Backend, LogLevel Level>
-struct LevelBoundBackend {
+struct LevelBoundBackend : RecordGuardOf<Backend> {
     static void write(std::span<std::byte const> span) {
         if constexpr(requires { Backend::template write<Level>(span); }) {
             Backend::template write<Level>(span);

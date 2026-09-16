@@ -1,7 +1,8 @@
 // Argument forms the UC_LOG macros must reject; one per UC_LOG_FAIL_CASE, each a hard compile
 // error (the static_assert in normalizeLogArgument), so CMakeLists.txt builds every case as its
 // own excluded target with WILL_FAIL. The backend stubs match log_macro_tests.cpp so that the
-// only thing failing to compile is the argument under test. Keep both lists in step.
+// only thing failing to compile is the argument under test, and case 0 is the control that
+// must build: it proves the stubs and includes are sound. Keep both lists in step.
 #include "uc_log/uc_log.hpp"
 
 #include <chrono>
@@ -26,7 +27,12 @@ struct LogClock<Tag::User> {
 void failCase();
 
 void failCase() {
-#if UC_LOG_FAIL_CASE == 1
+#if UC_LOG_FAIL_CASE == 0
+    // the control: a loggable argument
+    int value = 42;
+    UC_LOG_I("{}", value);
+
+#elif UC_LOG_FAIL_CASE == 1
     // a pointer has no loggable value
     int value = 42;
     UC_LOG_I("{}", &value);
