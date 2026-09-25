@@ -62,6 +62,11 @@ int main() {
     UC_LOG_E("{} {}", vol, Point{1, 2});
     UC_LOG_C("{}", counted());
 
+    UC_LOG_ENV(UC_LOG_MODULE("disabled"), ::uc_log::setting::MinLevel<::uc_log::LogLevel::warn>);
+    UC_LOG_WITH_ENV(::uc_log::setting::MinLevel<::uc_log::LogLevel::error>) {
+        UC_LOG_E("{}", counted());
+    }
+
     if(evaluations != 0) {
         std::printf("FAIL: a disabled log call evaluated its argument\n");
         return 1;

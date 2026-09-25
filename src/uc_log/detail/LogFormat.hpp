@@ -4,6 +4,8 @@
 
 #include <chrono>
 #include <ostream>
+#include <string>
+#include <string_view>
 
 namespace uc_log::detail::logformat {
 
@@ -17,23 +19,48 @@ inline std::string toIso8601Utc(std::chrono::system_clock::time_point tp) {
     return fmt::format("{:%FT%H:%M}:{:02}.{:03}Z", utc, sec.count(), ms.count());
 }
 
+// An RFC 4180 field on one line: `"` doubled, everything else escaped as fmt's `{:?}` does.
+inline std::string csvField(std::string_view text) {
+    std::string const debug = fmt::format("{:?}", text);   // "...", C escapes
+    std::string       out;
+    out.reserve(debug.size() + 2);
+    out.push_back('"');
+    for(std::size_t i = 1; i + 1 < debug.size(); ++i) {
+        if(debug[i] == '\\' && i + 2 < debug.size()) {
+            if(debug[i + 1] == '"') {
+                out += "\"\"";
+            } else {
+                out.push_back('\\');
+                out.push_back(debug[i + 1]);
+            }
+            ++i;
+        } else {
+            out.push_back(debug[i]);
+        }
+    }
+    out.push_back('"');
+    return out;
+}
+
+// `module` is last: scripts index the first eight columns by position.
 inline void writeHeader(std::ostream& out) {
-    fmt::print(out, "recv_time_utc,channel,file,line,function,log_level,uc_time,message\n");
+    fmt::print(out, "recv_time_utc,channel,file,line,function,log_level,uc_time,message,module\n");
 }
 
 inline void writeEntry(std::ostream&                         out,
                        std::chrono::system_clock::time_point recv_time,
                        uc_log::detail::LogEntry const&       entry) {
     fmt::print(out,
-               "{},{},{:?},{},{:?},{:#},{},{:?}\n",
+               "{},{},{},{},{},{:#},{},{},{}\n",
                toIso8601Utc(recv_time),
                entry.channel.channel,
-               entry.fileName,
+               csvField(entry.fileName),
                entry.line,
-               entry.functionName,
+               csvField(entry.functionName),
                entry.logLevel,
                entry.ucTime.time,
-               entry.logMsg);
+               csvField(entry.logMsg),
+               csvField(entry.module));
 }
 
 }   // namespace uc_log::detail::logformat

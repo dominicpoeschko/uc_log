@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -38,7 +39,9 @@ struct Sink {
     std::vector<std::string> errors;
 
     auto printF() {
-        return [this](std::size_t, std::string_view msg) { messages.emplace_back(msg); };
+        return [this](std::size_t, std::string_view msg, std::optional<remote_fmt::catalog_id>) {
+            messages.emplace_back(msg);
+        };
     }
 
     auto errorF() {

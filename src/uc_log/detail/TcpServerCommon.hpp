@@ -41,23 +41,97 @@
     #pragma clang diagnostic pop
 #endif
 
+#include "remote_fmt/fmt_wrapper.hpp"
 #include "uc_log/detail/TcpPortStatus.hpp"
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <fmt/format.h>
+#include <expected>
+#include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stop_token>
+#include <string>
 #include <string_view>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <system_error>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace uc_log { namespace detail {
+
+    using StreamProtocol = boost::asio::generic::stream_protocol;
+    using StreamSocket   = StreamProtocol::socket;
+
+    /// Where socket paths too long for sun_path go; only its owner may enter it.
+    inline std::filesystem::path unixSocketTmpDir() {
+        return std::filesystem::path{"/tmp"} / fmt::format("uc_log_{}", ::getuid());
+    }
+
+    /// unixSocketTmpDir()/<FNV-1a>.<name> when too long for sun_path; uc_log_client.py must match.
+    inline std::filesystem::path unixSocketPath(std::filesystem::path const& logDir,
+                                                std::string_view             name) {
+        auto absolute = std::filesystem::absolute(logDir).lexically_normal();
+        if(!absolute.has_filename() && absolute.has_parent_path()) {
+            absolute = absolute.parent_path();   // "dir/" hashes like "dir", as in os.path.abspath
+        }
+        auto const direct = absolute / name;
+        if(direct.native().size() < sizeof(sockaddr_un{}.sun_path)) { return direct; }
+        std::uint64_t hash = 0xcbf29ce484222325ULL;
+        for(char const c : absolute.native()) {
+            hash ^= static_cast<unsigned char>(c);
+            hash *= 0x100000001b3ULL;
+        }
+        return unixSocketTmpDir() / fmt::format("{:016x}.{}", hash, name);
+    }
+
+    /// Named after the ordinal: RTT buffer names are not always readable.
+    inline std::string duplexSocketName(std::size_t ordinal) {
+        return fmt::format("duplex.{}.sock", ordinal);
+    }
+
+    /// Removes a stale socket file; refuses a live one or anything that is not a socket.
+    inline std::expected<void,
+                         std::string>
+    claimUnixSocketPath(std::filesystem::path const& path) {
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+        if(path.parent_path() == unixSocketTmpDir()) {
+            // shared /tmp: another user may have made the directory first, to take the socket over
+            struct stat dir{};
+            if(::lstat(path.parent_path().c_str(), &dir) != 0 || !S_ISDIR(dir.st_mode)
+               || dir.st_uid != ::getuid())
+            {
+                return std::unexpected{
+                  fmt::format("{} is not a directory of this user", path.parent_path().native())};
+            }
+            if((dir.st_mode & 077U) != 0 && ::chmod(path.parent_path().c_str(), 0700) != 0) {
+                return std::unexpected{
+                  fmt::format("{} cannot be made private", path.parent_path().native())};
+            }
+        }
+        auto const st = std::filesystem::symlink_status(path, ec);
+        if(!std::filesystem::exists(st)) { return {}; }
+        if(!std::filesystem::is_socket(st)) {
+            return std::unexpected{std::string{"the path exists and is not a socket"}};
+        }
+        boost::asio::io_context                     io;
+        boost::asio::local::stream_protocol::socket probe{io};
+        boost::system::error_code                   connectError;
+        probe.connect(boost::asio::local::stream_protocol::endpoint{path.native()}, connectError);
+        if(!connectError) {
+            return std::unexpected{std::string{"another printer already serves it"}};
+        }
+        std::filesystem::remove(path, ec);
+        return {};
+    }
 
     // io_context shared by all tcp servers. Split from AsioContextRunner so users of the
     // context can be declared between the two: the runner is joined before the users are
@@ -81,19 +155,19 @@ namespace uc_log { namespace detail {
           }} {}
     };
 
-    // one accepted connection. Socket and send queue are owned by the io_context thread;
-    // other threads enter only through trySend()/resumeRead()/close(), which post onto the
-    // socket's executor. The bounded send queue makes a stalled client drop data instead of
-    // growing host memory without bound.
+    // One accepted connection (TCP or unix socket). Socket and send queue are owned by the
+    // io_context thread; other threads enter only through trySend()/resumeRead()/close()/
+    // closeWhenSent(), which post onto the socket's executor. The bounded send queue makes a
+    // stalled client drop data instead of growing host memory without bound.
     struct TcpSession : std::enable_shared_from_this<TcpSession> {
         // onData: called on the io_context thread, return false to pause reading
         // (resumeRead() re-arms). onGone: called once on the io_context thread when the
-        // connection failed or the peer closed it; not called for owner-initiated close().
+        // connection failed, or on EOF unless onEof is set; not for owner-initiated close().
         using DataF
           = std::function<bool(std::span<std::byte const>, std::shared_ptr<TcpSession> const&)>;
         using GoneF = std::function<void(std::shared_ptr<TcpSession> const&)>;
 
-        boost::asio::ip::tcp::socket          socket;
+        StreamSocket                          socket;
         std::size_t                           sendQueueCap;
         std::function<void(std::string_view)> errorf;
         DataF                                 onData;
@@ -102,20 +176,29 @@ namespace uc_log { namespace detail {
         std::deque<std::shared_ptr<std::vector<std::byte>>> sendQueue;        // ioc thread only
         bool                                                sending{false};   // ioc thread only
         bool                                                gone{false};      // ioc thread only
-        std::atomic<std::size_t>                            queuedBytes{0};
-        std::vector<std::byte>                              recvData;
+        bool closeWhenDone{false};   // ioc thread only: close once the send queue is empty
+        // Set before startRead(): EOF is a half-close, the peer may still read.
+        GoneF                    onEof;
+        std::atomic<std::size_t> queuedBytes{0};
+        std::vector<std::byte>   recvData;
 
         template<typename ErrorF>
-        TcpSession(boost::asio::ip::tcp::socket socket_,
-                   std::size_t                  sendQueueCap_,
-                   ErrorF&&                     errorf_,
-                   DataF                        onData_,
-                   GoneF                        onGone_)
+        TcpSession(StreamSocket socket_,
+                   std::size_t  sendQueueCap_,
+                   ErrorF&&     errorf_,
+                   DataF        onData_,
+                   GoneF        onGone_)
           : socket{std::move(socket_)}
           , sendQueueCap{sendQueueCap_}
           , errorf{std::forward<ErrorF>(errorf_)}
           , onData{std::move(onData_)}
           , onGone{std::move(onGone_)} {}
+
+        // not an error worth reporting
+        static bool peerLeft(boost::system::error_code const& ec) {
+            return ec == boost::asio::error::eof || ec == boost::asio::error::broken_pipe
+                || ec == boost::asio::error::connection_reset;
+        }
 
         // any thread. Returns false when the queue is full and the data was dropped.
         bool trySend(std::span<std::byte const> data) {
@@ -151,8 +234,10 @@ namespace uc_log { namespace detail {
                       {
                           self->startRead();
                       }
+                  } else if(error_code == boost::asio::error::eof && self->onEof) {
+                      self->onEof(self);
                   } else if(error_code != boost::asio::error::operation_aborted) {
-                      if(error_code != boost::asio::error::eof && self->errorf) {
+                      if(!peerLeft(error_code) && self->errorf) {
                           self->errorf(fmt::format("recv error {}", error_code.message()));
                       }
                       self->handleGone();
@@ -167,6 +252,15 @@ namespace uc_log { namespace detail {
             });
         }
 
+        // any thread: close (and call onGone) once the send queue is empty
+        void closeWhenSent() {
+            boost::asio::post(socket.get_executor(), [self = shared_from_this()]() {
+                if(self->gone) { return; }
+                self->closeWhenDone = true;
+                if(!self->sending && self->sendQueue.empty()) { self->handleGone(); }
+            });
+        }
+
         // any thread, owner-initiated: closes without invoking onGone
         void close() {
             boost::asio::post(socket.get_executor(), [self = shared_from_this()]() {
@@ -174,7 +268,7 @@ namespace uc_log { namespace detail {
                 self->gone = true;
                 self->sendQueue.clear();
                 boost::system::error_code ec;
-                self->socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+                self->socket.shutdown(boost::asio::socket_base::shutdown_both, ec);
                 self->socket.close(ec);
             });
         }
@@ -196,9 +290,13 @@ namespace uc_log { namespace detail {
                   self->queuedBytes.fetch_sub(message->size(), std::memory_order_relaxed);
                   if(!error_code) {
                       self->sending = false;
-                      if(!self->sendQueue.empty() && !self->gone) { self->doSend(); }
+                      if(!self->sendQueue.empty() && !self->gone) {
+                          self->doSend();
+                      } else if(self->closeWhenDone) {
+                          self->handleGone();
+                      }
                   } else if(error_code != boost::asio::error::operation_aborted) {
-                      if(error_code != boost::asio::error::eof && self->errorf) {
+                      if(!peerLeft(error_code) && self->errorf) {
                           self->errorf(fmt::format("send error {}", error_code.message()));
                       }
                       self->handleGone();
@@ -212,7 +310,7 @@ namespace uc_log { namespace detail {
             gone = true;
             sendQueue.clear();
             boost::system::error_code ec;
-            socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+            socket.shutdown(boost::asio::socket_base::shutdown_both, ec);
             socket.close(ec);
             if(onGone) { onGone(shared_from_this()); }
         }
@@ -221,17 +319,24 @@ namespace uc_log { namespace detail {
     // bind/accept/rebind state machine. All acceptor state lives on the io_context thread;
     // start/restart/stop may be called from any thread. Accepted sockets get keepalive so
     // half-open peers are eventually detected even on quiet connections.
+    // With a socket path it listens there instead (owner-only, removed on close).
     struct TcpListener {
-        boost::asio::io_context&                          ioc;
-        boost::asio::ip::address                          bindAddress;
-        std::function<void(boost::asio::ip::tcp::socket)> onAccept;   // ioc thread
-        std::function<void(std::string_view)>             errorf;
-        std::function<void()>                             statusChangef;
+        using Acceptor = boost::asio::basic_socket_acceptor<StreamProtocol>;
 
-        std::optional<boost::asio::ip::tcp::acceptor> acceptor;             // ioc thread only
-        std::optional<std::uint16_t>                  pendingRestartPort;   // ioc thread only
-        std::atomic<TcpPortStatus>                    status{TcpPortStatus::NotStarted};
-        std::atomic<std::uint16_t>                    currentPort{0};
+        boost::asio::io_context&              ioc;
+        boost::asio::ip::address              bindAddress;
+        std::function<void(StreamSocket)>     onAccept;   // ioc thread
+        std::function<void(std::string_view)> errorf;
+        std::function<void()>                 statusChangef;
+        mutable std::mutex                    pathMutex;
+        std::filesystem::path                 socketPath;   // empty: TCP; guarded by pathMutex
+        std::filesystem::path                 boundPath;    // ioc thread (and the destructor)
+
+        std::optional<Acceptor>      acceptor;             // ioc thread only
+        std::optional<std::uint16_t> pendingRestartPort;   // ioc thread only
+        std::atomic<TcpPortStatus>   status{TcpPortStatus::NotStarted};
+        std::atomic<std::uint16_t>   currentPort{0};
+        std::atomic<bool>            ownsSocketFile{false};
 
         template<typename AcceptF,
                  typename ErrorF,
@@ -240,12 +345,44 @@ namespace uc_log { namespace detail {
                     boost::asio::ip::address bindAddress_,
                     AcceptF&&                onAccept_,
                     ErrorF&&                 errorf_,
-                    StatusChangeF&&          statusChangef_)
+                    StatusChangeF&&          statusChangef_,
+                    std::filesystem::path    socketPath_ = {})
           : ioc{ioc_}
           , bindAddress{std::move(bindAddress_)}
           , onAccept{std::forward<AcceptF>(onAccept_)}
           , errorf{std::forward<ErrorF>(errorf_)}
-          , statusChangef{std::forward<StatusChangeF>(statusChangef_)} {}
+          , statusChangef{std::forward<StatusChangeF>(statusChangef_)}
+          , socketPath{std::move(socketPath_)} {}
+
+        // the owner has stopped the io_context thread by now
+        ~TcpListener() { removeSocketFile(); }
+
+        TcpListener(TcpListener const&)            = delete;
+        TcpListener& operator=(TcpListener const&) = delete;
+
+        /// Empty while on TCP.
+        std::filesystem::path getSocketPath() const {
+            std::lock_guard<std::mutex> const lock{pathMutex};
+            return socketPath;
+        }
+
+        // Empty: TCP. Re-applied at once if listening.
+        void setSocketPath(std::filesystem::path newPath) {
+            boost::asio::post(ioc, [this, path = std::move(newPath)]() {
+                {
+                    std::lock_guard<std::mutex> const lock{pathMutex};
+                    socketPath = path;
+                }
+                if(acceptor.has_value()) {
+                    pendingRestartPort = currentPort.load();
+                    releaseNow();
+                } else if(status == TcpPortStatus::PortOccupied) {
+                    tryBind(currentPort.load());   // the new place may be free
+                } else if(statusChangef) {
+                    statusChangef();
+                }
+            });
+        }
 
         void start(std::uint16_t port) {
             currentPort = port;
@@ -286,8 +423,7 @@ namespace uc_log { namespace detail {
                 if(preStop) { preStop(); }
                 if(acceptor.has_value()) {
                     pendingRestartPort = std::nullopt;
-                    boost::system::error_code ec;
-                    acceptor->cancel(ec);
+                    releaseNow();
                 } else {
                     status = TcpPortStatus::NotStarted;
                     if(statusChangef) { statusChangef(); }
@@ -296,15 +432,61 @@ namespace uc_log { namespace detail {
         }
 
     private:
+        // Frees the address before anything posted after this runs (another listener may bind
+        // it next); the pending accept still completes with operation_aborted and finishes up.
+        void releaseNow() {
+            boost::system::error_code ec;
+            acceptor->close(ec);
+            removeSocketFile();
+        }
+
+        void removeSocketFile() {
+            if(ownsSocketFile.exchange(false)) {
+                std::error_code ec;
+                std::filesystem::remove(boundPath, ec);
+            }
+        }
+
         void tryBind(std::uint16_t port) {
+            auto const path = getSocketPath();
             try {
-                acceptor.emplace(ioc, boost::asio::ip::tcp::endpoint{bindAddress, port});
+                acceptor.emplace(ioc);
+                if(path.empty()) {
+                    boost::asio::ip::tcp::endpoint const endpoint{bindAddress, port};
+                    acceptor->open(endpoint.protocol());
+                    acceptor->set_option(boost::asio::socket_base::reuse_address{true});
+                    acceptor->bind(endpoint);
+                } else {
+                    if(auto const claimed = claimUnixSocketPath(path); !claimed) {
+                        throw boost::system::system_error{boost::asio::error::address_in_use,
+                                                          claimed.error()};
+                    }
+                    boost::asio::local::stream_protocol::endpoint const endpoint{path.native()};
+                    acceptor->open(endpoint.protocol());
+                    acceptor->bind(endpoint);
+                    boundPath      = path;
+                    ownsSocketFile = true;
+                    std::error_code ec;
+                    std::filesystem::permissions(path,
+                                                 std::filesystem::perms::owner_read
+                                                   | std::filesystem::perms::owner_write,
+                                                 ec);
+                }
+                acceptor->listen();
                 status      = TcpPortStatus::Active;
                 currentPort = port;
                 if(statusChangef) { statusChangef(); }
                 asyncAcceptOne();
             } catch(boost::system::system_error const& e) {
-                errorf(fmt::format("TCP port {} in use: {}", port, e.what()));
+                boost::system::error_code ec;
+                if(acceptor.has_value()) { acceptor->close(ec); }
+                acceptor.reset();
+                removeSocketFile();
+                if(path.empty()) {
+                    errorf(fmt::format("TCP port {}: {}", port, e.what()));
+                } else {
+                    errorf(fmt::format("socket {}: {}", path.native(), e.what()));
+                }
                 status      = TcpPortStatus::PortOccupied;
                 currentPort = port;
                 if(statusChangef) { statusChangef(); }
@@ -314,7 +496,7 @@ namespace uc_log { namespace detail {
         void asyncAcceptOne() {
             if(!acceptor.has_value()) { return; }
             acceptor->async_accept(
-              [this](boost::system::error_code error_code, boost::asio::ip::tcp::socket socket) {
+              [this](boost::system::error_code error_code, StreamSocket socket) {
                   if(!error_code) {
                       boost::system::error_code ec;
                       socket.set_option(boost::asio::socket_base::keep_alive{true}, ec);
@@ -324,6 +506,7 @@ namespace uc_log { namespace detail {
                       boost::system::error_code ec;
                       if(acceptor.has_value()) { acceptor->close(ec); }
                       acceptor.reset();
+                      removeSocketFile();
                       if(pendingRestartPort.has_value()) {
                           auto const port = *pendingRestartPort;
                           pendingRestartPort.reset();

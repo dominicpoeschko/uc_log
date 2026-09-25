@@ -232,16 +232,20 @@ endif() # UC_LOG_BUILD_PRINTER
 function(target_add_uc_log_rtt_jlink targetname)
     set(options VERBOSE)
     set(oneValueArgs
+        LOG_FILTER
         TARGET_MPU
         SWD_SPEED
         JLINK_IP
         JLINK_PROBE
         MAP_FILE
         PREFIX
+        CONTROL_PORT
         METRICS_PORT
         DUPLEX_BASE_PORT
+        TRANSPORT
         HEX_FILE)
-    set(multiValueArgs)
+    # PRE_RESET_COMMANDS: `w4 <address> <value>` lines written before every reset and download (e.g. RP core 1 parking).
+    set(multiValueArgs PRE_RESET_COMMANDS)
 
     cmake_parse_arguments(PARSE_ARGV 1 PARSED_ARGS "${options}" "${oneValueArgs}" "${multiValueArgs}")
 
@@ -275,10 +279,16 @@ function(target_add_uc_log_rtt_jlink targetname)
         set(PARSED_ARGS_PREFIX "log_")
     endif()
 
-    if(NOT PARSED_ARGS_METRICS_PORT)
-        set(PARSED_ARGS_METRICS_PORT 34565)
-    elseif(${PARSED_ARGS_METRICS_PORT} LESS 1024 OR PARSED_ARGS_METRICS_PORT GREATER 65535)
-        message(WARNING "METRICS_PORT ${PARSED_ARGS_METRICS_PORT} may be out of valid range (1024-65535)")
+    if(PARSED_ARGS_METRICS_PORT)
+        message(DEPRECATION "target_add_uc_log_rtt_jlink: METRICS_PORT is deprecated, use CONTROL_PORT")
+        if(NOT PARSED_ARGS_CONTROL_PORT)
+            set(PARSED_ARGS_CONTROL_PORT ${PARSED_ARGS_METRICS_PORT})
+        endif()
+    endif()
+    if(NOT PARSED_ARGS_CONTROL_PORT)
+        set(PARSED_ARGS_CONTROL_PORT 34565)
+    elseif(${PARSED_ARGS_CONTROL_PORT} LESS 1024 OR PARSED_ARGS_CONTROL_PORT GREATER 65535)
+        message(WARNING "CONTROL_PORT ${PARSED_ARGS_CONTROL_PORT} may be out of valid range (1024-65535)")
     endif()
 
     if(NOT PARSED_ARGS_DUPLEX_BASE_PORT)
@@ -287,8 +297,14 @@ function(target_add_uc_log_rtt_jlink targetname)
         message(WARNING "DUPLEX_BASE_PORT ${PARSED_ARGS_DUPLEX_BASE_PORT} may be out of valid range (1024-65535)")
     endif()
 
+    # unix: sockets in the log directory, the ports unused; tcp: CONTROL_PORT and DUPLEX_BASE_PORT + n.
+    if(NOT PARSED_ARGS_TRANSPORT)
+        set(PARSED_ARGS_TRANSPORT unix)
+    elseif(NOT PARSED_ARGS_TRANSPORT MATCHES "^(unix|tcp)$")
+        message(FATAL_ERROR "target_add_uc_log_rtt_jlink: TRANSPORT is unix or tcp, not ${PARSED_ARGS_TRANSPORT}")
+    endif()
+
     target_generate_string_constants(${targetname})
-    target_generate_ssproj(${targetname})
 
     if(NOT UC_LOG_BUILD_PRINTER)
         return()
@@ -317,10 +333,12 @@ function(target_add_uc_log_rtt_jlink targetname)
 
     set(command
         ${uc_log_printer_bin}
-        --metrics_port
-        ${PARSED_ARGS_METRICS_PORT}
+        --control_port
+        ${PARSED_ARGS_CONTROL_PORT}
         --duplex_base_port
         ${PARSED_ARGS_DUPLEX_BASE_PORT}
+        --transport
+        ${PARSED_ARGS_TRANSPORT}
         --device
         ${PARSED_ARGS_TARGET_MPU}
         --speed
@@ -353,11 +371,21 @@ function(target_add_uc_log_rtt_jlink targetname)
         list(APPEND command --probe "${PARSED_ARGS_JLINK_PROBE}")
     endif()
 
+    foreach(pre_reset_command IN LISTS PARSED_ARGS_PRE_RESET_COMMANDS)
+        list(APPEND command --pre_reset_command "${pre_reset_command}")
+    endforeach()
+
+    # the compile-time log filter the firmware was built with (LogFilter.hpp), for the printer to show
+    if(PARSED_ARGS_LOG_FILTER)
+        list(APPEND command --log_filter "${PARSED_ARGS_LOG_FILTER}")
+    endif()
+
     add_custom_target(
         ${PARSED_ARGS_PREFIX}${targetname}
         COMMENT "start logging ${targetname}"
         USES_TERMINAL
-        COMMAND ${command})
+        COMMAND ${command}
+        VERBATIM)
 
     # The printer is a host tool the firmware never uses, so the dependency belongs on the log_ target, not on the elf -
     # hanging it on the elf made every firmware build walk the whole nested host build (boost, ftxui, fmt, jlink).
@@ -365,30 +393,4 @@ function(target_add_uc_log_rtt_jlink targetname)
     # a file dependency buys nothing and breaks parsing whenever the binary is not on disk yet.
     add_dependencies(${PARSED_ARGS_PREFIX}${targetname} ${targetname} uc_log_printer)
 
-endfunction()
-
-function(target_generate_ssproj targetname)
-    get_target_property(bin_dir ${targetname} BINARY_DIR)
-
-    find_package(
-        Python3
-        COMPONENTS Interpreter
-        REQUIRED)
-    set(command ${Python3_EXECUTABLE} ${uc_log_dir}/tools/generate_ssproj.py --input
-                ${bin_dir}/${targetname}_string_constants.json --output ${bin_dir}/${targetname}.ssproj)
-
-    add_custom_command(
-        TARGET ${targetname}
-        POST_BUILD
-        COMMAND ${command}
-        BYPRODUCTS ${bin_dir}/${targetname}.ssproj)
-
-    set_property(
-        TARGET ${targetname}
-        APPEND
-        PROPERTY LINK_DEPENDS ${uc_log_dir}/tools/generate_ssproj.py)
-    set_property(
-        TARGET ${targetname}
-        APPEND
-        PROPERTY ADDITIONAL_CLEAN_FILES ${bin_dir}/${targetname}.ssproj)
 endfunction()

@@ -1,0 +1,17 @@
+[
+  {
+    "log_dir": "/home/user/firmware/build/rtt_log/sanitize",
+    "name": "control.sock",
+    "path": "/home/user/firmware/build/rtt_log/sanitize/control.sock"
+  },
+  {
+    "log_dir": "/a/b/../c/rtt_log/t",
+    "name": "control.sock",
+    "path": "/a/c/rtt_log/t/control.sock"
+  },
+  {
+    "log_dir": "/home/user/some/deeper/firmware/checkout/build_pico2/rtt_log/a_target_name_long_enough_to_push_the_socket_path_past_108_bytes",
+    "name": "control.sock",
+    "path": "/tmp/uc_log_{uid}/98722a487ad1c690.control.sock"
+  }
+]

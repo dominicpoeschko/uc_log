@@ -38,12 +38,15 @@ namespace uc_log { namespace FTXUIGui {
     // Immutable data shared by all display lines of one original log message. File and
     // function names live in the store's interning pools (referenced by id), so millions
     // of entries do not repeat the same strings.
+    inline constexpr std::uint32_t NoModuleId = std::numeric_limits<std::uint32_t>::max();
+
     struct EntryCommon {
         std::chrono::system_clock::time_point recvTime;
         uc_log::detail::LogEntry::UcTime      ucTime;
         std::uint64_t                         locationKey;   // fileId << 32 | line
         std::size_t                           multilineGroupId;
         std::uint32_t                         functionId;
+        std::uint32_t                         moduleId;   // NoModuleId outside a module scope
         std::uint8_t                          channel;
         uc_log::LogLevel                      logLevel;
         bool                                  parsedOk;
@@ -229,9 +232,24 @@ namespace uc_log { namespace FTXUIGui {
         std::set<std::size_t>      enabledChannels;
         std::set<SourceLocation>   includedLocations;
         std::set<SourceLocation>   excludedLocations;
+        // each hides its submodules too; an exclude list, so modules seen later are shown
+        std::set<std::string> excludedModules;
 
         bool operator==(FilterState const&) const = default;
     };
+
+    // "i2c.bus" is under "i2c" and itself, not under "i2"
+    inline bool moduleIsUnder(std::string_view module,
+                              std::string_view prefix) {
+        return module.starts_with(prefix)
+            && (module.size() == prefix.size() || module[prefix.size()] == '.');
+    }
+
+    inline bool moduleHiddenBy(std::string_view             module,
+                               std::set<std::string> const& excluded) {
+        return std::ranges::any_of(excluded,
+                                   [&](std::string const& p) { return moduleIsUnder(module, p); });
+    }
 
     // FilterState compiled to integer form: location strings interned to keys
     // (fileId << 32 | line), sets to bitmasks/sorted vectors. passes() does no
@@ -243,11 +261,21 @@ namespace uc_log { namespace FTXUIGui {
         bool                       channelFilterActive{false};
         std::uint8_t               levelMask{0};
         std::uint8_t               channelMask{0};
-        std::vector<std::uint64_t> includedKeys;   // sorted; file-wide keys have line == 0
-        std::vector<std::uint64_t> excludedKeys;   // sorted
-        bool                       ucTimeEnabled{false};
-        double                     minUcTimeSec{0.0};
-        double                     maxUcTimeSec{std::numeric_limits<double>::infinity()};
+        std::vector<std::uint64_t> includedKeys;        // sorted; file-wide keys have line == 0
+        std::vector<std::uint64_t> excludedKeys;        // sorted
+        std::vector<bool>          excludedModuleIds;   // by module id; ids past the end pass
+        std::set<std::string>      excludedModules;     // for a module interned after compiling
+
+        void noteModule(std::uint32_t    id,
+                        std::string_view module) {
+            if(excludedModules.empty() || !moduleHiddenBy(module, excludedModules)) { return; }
+            if(excludedModuleIds.size() <= id) { excludedModuleIds.resize(id + 1, false); }
+            excludedModuleIds[id] = true;
+        }
+
+        bool   ucTimeEnabled{false};
+        double minUcTimeSec{0.0};
+        double maxUcTimeSec{std::numeric_limits<double>::infinity()};
 
         // text search over the whole (multiline) message: lower-cased needle for
         // case-insensitive substring, or a pre-compiled regex ("re:" prefix in the input)
@@ -273,6 +301,9 @@ namespace uc_log { namespace FTXUIGui {
             if(channelFilterActive) {
                 auto const channel = common.channel;
                 if(channel >= 8 || (channelMask & (1U << channel)) == 0) { return false; }
+            }
+            if(common.moduleId < excludedModuleIds.size() && excludedModuleIds[common.moduleId]) {
+                return false;
             }
             if(ucTimeEnabled) {
                 auto const s = std::chrono::duration<double>(common.ucTime.time).count();
@@ -328,8 +359,12 @@ namespace uc_log { namespace FTXUIGui {
         // interning pools, guarded by mutex; the ById vectors only ever grow
         std::map<std::string, std::uint32_t, std::less<>> fileIds;
         std::vector<std::string>                          fileNamesById;
+        // keyed by short name and signature: instantiations that abbreviate alike stay apart
         std::map<std::string, std::uint32_t, std::less<>> functionIds;
         std::vector<std::string>                          functionNamesById;
+        std::vector<std::string>                          functionSignaturesById;
+        std::map<std::string, std::uint32_t, std::less<>> moduleIds;
+        std::vector<std::string>                          moduleNamesById;
 
         std::map<SourceLocation, std::size_t> allSourceLocations;
         std::uint64_t                         locationsVersion{0};
@@ -390,14 +425,32 @@ namespace uc_log { namespace FTXUIGui {
             return it->second;
         }
 
-        std::uint32_t internFunctionLocked(std::string_view function) {
-            auto it = functionIds.find(function);
+        std::uint32_t internFunctionLocked(std::string_view function,
+                                           std::string_view signature) {
+            std::string key{function};
+            key += '\0';
+            key += signature;
+            auto it = functionIds.find(key);
             if(it == functionIds.end()) {
                 it = functionIds
-                       .emplace(std::string{function},
-                                static_cast<std::uint32_t>(functionIds.size()))
+                       .emplace(std::move(key), static_cast<std::uint32_t>(functionIds.size()))
                        .first;
                 functionNamesById.emplace_back(function);
+                functionSignaturesById.emplace_back(signature);
+            }
+            return it->second;
+        }
+
+        std::uint32_t internModuleLocked(std::string_view module) {
+            if(module.empty()) { return NoModuleId; }
+            auto it = moduleIds.find(module);
+            if(it == moduleIds.end()) {
+                it = moduleIds
+                       .emplace(std::string{module}, static_cast<std::uint32_t>(moduleIds.size()))
+                       .first;
+                moduleNamesById.emplace_back(module);
+                displayedFilter.noteModule(it->second, module);
+                pendingFilter.noteModule(it->second, module);
             }
             return it->second;
         }
@@ -428,6 +481,10 @@ namespace uc_log { namespace FTXUIGui {
             }
             std::ranges::sort(f.includedKeys);
             std::ranges::sort(f.excludedKeys);
+            f.excludedModules = activeFilterState.excludedModules;
+            for(std::uint32_t id = 0; id < moduleNamesById.size(); ++id) {
+                f.noteModule(id, moduleNamesById[id]);
+            }
             f.ucTimeEnabled = ucTimeFilterEnabled;
             f.minUcTimeSec  = minUcTimeSec;
             f.maxUcTimeSec  = maxUcTimeSec;
@@ -571,11 +628,12 @@ namespace uc_log { namespace FTXUIGui {
                 common->ucTime           = entry.ucTime;
                 common->locationKey      = internLocationKeyLocked(entry.fileName, entry.line);
                 common->multilineGroupId = ++nextMultilineGroupId;
-                common->functionId       = internFunctionLocked(entry.functionName);
-                common->channel          = static_cast<std::uint8_t>(entry.channel.channel);
-                common->logLevel         = entry.logLevel;
-                common->parsedOk         = entry.parsedOk;
-                common->message          = entry.logMsg;
+                common->functionId = internFunctionLocked(entry.functionName, entry.signature);
+                common->moduleId   = internModuleLocked(entry.module);
+                common->channel    = static_cast<std::uint8_t>(entry.channel.channel);
+                common->logLevel   = entry.logLevel;
+                common->parsedOk   = entry.parsedOk;
+                common->message    = entry.logMsg;
 
                 std::shared_ptr<EntryCommon const> const shared = std::move(common);
 
@@ -689,6 +747,9 @@ namespace uc_log { namespace FTXUIGui {
 
             std::vector<std::string> fileNamesById;
             std::vector<std::string> functionNamesById;
+            std::vector<std::string> functionSignaturesById;
+            // every module seen, even if all its lines are filtered out
+            std::vector<std::string> moduleNamesById;
 
             std::vector<std::pair<SourceLocation, std::size_t>> locationList;
             std::vector<std::string>                            locationLabels;
@@ -708,6 +769,17 @@ namespace uc_log { namespace FTXUIGui {
 
             std::string functionNameOf(std::uint32_t id) const {
                 return id < functionNamesById.size() ? functionNamesById[id] : std::string{"?"};
+            }
+
+            std::string functionSignatureOf(std::uint32_t id) const {
+                if(id < functionSignaturesById.size() && !functionSignaturesById[id].empty()) {
+                    return functionSignaturesById[id];
+                }
+                return functionNameOf(id);
+            }
+
+            std::string moduleNameOf(std::uint32_t id) const {
+                return id < moduleNamesById.size() ? moduleNamesById[id] : std::string{};
             }
         };
 
@@ -739,8 +811,13 @@ namespace uc_log { namespace FTXUIGui {
                     m.fileNamesById = fileNamesById;
                 }
                 if(m.functionNamesById.size() != functionNamesById.size()) {
-                    m.functionNamesById = functionNamesById;
+                    m.functionNamesById      = functionNamesById;
+                    m.functionSignaturesById = functionSignaturesById;
                 }
+            }
+
+            if(m.moduleNamesById.size() != moduleNamesById.size()) {
+                m.moduleNamesById = moduleNamesById;
             }
 
             if(m.seenLocationsVersion != locationsVersion) {
@@ -839,7 +916,7 @@ namespace uc_log { namespace FTXUIGui {
                     return;
                 }
                 auto const gen    = refilterGeneration.load(std::memory_order_relaxed);
-                auto const filter = pendingFilter;
+                auto       filter = pendingFilter;
                 auto const snap   = allEntries.snapshot();
                 refilterTotal     = snap.size();
                 refilterScanned   = 0;
@@ -879,6 +956,10 @@ namespace uc_log { namespace FTXUIGui {
                 lock.lock();
                 if(stoken.stop_requested()) { return; }
                 if(!cancelled && refilterGeneration.load(std::memory_order_relaxed) == gen) {
+                    // modules first seen during the scan went to pendingFilter, not this copy
+                    for(std::uint32_t id = 0; id < moduleNamesById.size(); ++id) {
+                        filter.noteModule(id, moduleNamesById[id]);
+                    }
                     // Catch-up: entries appended by addEntry during the scan. Appends never
                     // shift indices and erases would have bumped the generation, so
                     // [snap.size(), allEntries.size()) is exactly the appended suffix.

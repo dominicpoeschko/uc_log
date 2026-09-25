@@ -1,6 +1,7 @@
 #pragma once
 
 #include "uc_log/FTXUI_Utils.hpp"
+#include "uc_log/LogFilter.hpp"
 #include "uc_log/detail/BuildRunner.hpp"
 #include "uc_log/detail/DuplexChannelInfo.hpp"
 #include "uc_log/detail/GuiEntryStore.hpp"
@@ -149,6 +150,8 @@ struct from<JSON, std::set<std::pair<K, V>>> {
 
 namespace uc_log { namespace FTXUIGui {
 
+    enum class FirmwareState : std::uint8_t { unchecked, match, different };
+
     struct Gui {
         Gui() {
             store.requestRedraw         = [this]() { requestRedrawFromAnywhere(); };
@@ -268,9 +271,16 @@ namespace uc_log { namespace FTXUIGui {
         int                      exportFormatSelection{0};   // 0 = .rttlog, 1 = .txt
 
         bool showSysTime{true};
+        // the firmware's compile-time log filter (--log_filter), shown in the module tree
+        uc_log::detail::FilterTable compiledFilter{};
+        std::size_t                 compiledFilterVersion{0};
+
         bool showFunctionName{false};
+        // copies and .txt exports take the whole signature too
+        bool showFullSignature{false};
         bool showUcTime{true};
         bool showLocation{true};
+        bool showModule{false};
         bool showChannel{true};
         bool showLogLevel{true};
         bool showMetricString{false};
@@ -295,6 +305,22 @@ namespace uc_log { namespace FTXUIGui {
         MetricInfo  lastSelectedInfo;
 
         std::vector<MessageEntry> statusMessages;
+
+        // lines lost to a format string the host could not apply; reset by every flash
+        std::size_t formatErrorCount{0};
+        bool        lastFlashing{false};
+
+        std::size_t statusErrorCount{0};
+
+        FirmwareState firmwareState{FirmwareState::unchecked};
+        std::size_t   firmwareMismatchCount{0};
+
+        // the prefixes of remote_fmt parser.hpp's format-string errors: a new one goes here too
+        static bool isFormatError(std::string_view msg) {
+            return msg.starts_with("bad format for replacement field")
+                || msg.starts_with("malformed format string")
+                || msg.starts_with("replacement field ");
+        }
 
         // build execution lives behind its own mutex in the runner; the UI renders from
         // the versioned snapshot below
@@ -344,6 +370,10 @@ namespace uc_log { namespace FTXUIGui {
 
         TcpPortStatus                      tcpPortStatus{TcpPortStatus::NotStarted};
         std::uint16_t                      tcpCurrentPort{0};
+        std::string                        controlSocketPath;       // not empty: a unix socket
+        int                                transportSelection{0};   // 0 unix, 1 TCP
+        std::vector<std::string>           transportEntries{" unix sockets ", " TCP "};
+        std::function<void(bool)>          onTransportChange;   // true: unix
         std::string                        tcpPortInput;
         std::function<void(std::uint16_t)> onTcpPortChange;
         std::function<std::size_t()>       tcpClientCountGetter;
@@ -500,6 +530,10 @@ namespace uc_log { namespace FTXUIGui {
 
             statistics.lastJLinkState = currentJLinkState;
 
+            bool const flashing = rttReader.isFlashing();
+            if(lastFlashing && !flashing) { formatErrorCount = 0; }
+            lastFlashing = flashing;
+
             // Update max values
             if(rttStatus.numBytesRead > statistics.maxBytesRead) {
                 statistics.maxBytesRead = rttStatus.numBytesRead;
@@ -517,24 +551,15 @@ namespace uc_log { namespace FTXUIGui {
             // Process @METRIC(...) markers
             if(!showMetricString) {
                 pos = 0;
-                while((pos = processedMsg.find("@METRIC(", pos)) != std::string::npos) {
-                    std::size_t const start_pos = pos;
-                    pos += 8;
-
-                    std::size_t const end_pos = processedMsg.find(')', pos);
-                    if(end_pos == std::string::npos) { break; }
-
-                    std::string_view const metric_content
-                      = std::string_view{processedMsg}.substr(pos, end_pos - pos);
-
-                    std::size_t const equals_pos = metric_content.find('=');
-                    if(equals_pos != std::string_view::npos) {
-                        std::string const value{metric_content.substr(equals_pos + 1)};
-                        processedMsg.replace(start_pos, end_pos - start_pos + 1, value);
-                        pos = start_pos + value.length();
-                    } else {
-                        pos = end_pos + 1;
+                while(auto const marker = nextMetricMarker(processedMsg, pos)) {
+                    std::string shown{marker->value};
+                    if(!marker->unit.empty()) {
+                        shown += ' ';
+                        shown += marker->unit;
                     }
+                    std::size_t const begin = marker->begin;
+                    processedMsg.replace(begin, marker->end - begin, shown);
+                    pos = begin + shown.size();
                 }
             }
 
@@ -644,6 +669,12 @@ namespace uc_log { namespace FTXUIGui {
             ftxui::Element metadataElement;
             if(showMetadata) {
                 ftxui::Elements metadata;
+                auto const      module = display.moduleNameOf(common.moduleId);
+                if(showModule && !module.empty()) {
+                    metadata.push_back(ftxui::text(fmt::format("[{}]", module))
+                                       | ftxui::color(Theme::Text::module()));
+                    if(showFunctionName || showLocation) { metadata.push_back(ftxui::text(" ")); }
+                }
                 if(showFunctionName) {
                     metadata.push_back(ftxui::text(display.functionNameOf(common.functionId))
                                        | ftxui::color(Theme::Text::functionName()));
@@ -717,15 +748,16 @@ namespace uc_log { namespace FTXUIGui {
                 auto const& c = *e.common;
                 if(asPlainText) {
                     fmt::print(f,
-                               "{} {} {} {:<5}| {} ({}:{} {})\n",
+                               "{} {} {} {:<5}| {} ({}{}:{} {})\n",
                                to_time_string_with_milliseconds(c.recvTime),
                                c.channel,
                                c.ucTime,
                                enchantum::to_string(c.logLevel),
                                e.lineText(),
+                               modulePrefix(c.moduleId),
                                display.fileNameOf(c.locationKey),
                                GuiEntryStore::Mirror::lineOf(c.locationKey),
-                               display.functionNameOf(c.functionId));
+                               functionTextOf(display, c.functionId));
                     continue;
                 }
                 uc_log::detail::LogEntry line{c.channel, {}};
@@ -734,6 +766,7 @@ namespace uc_log { namespace FTXUIGui {
                 line.line         = GuiEntryStore::Mirror::lineOf(c.locationKey);
                 line.logLevel     = c.logLevel;
                 line.functionName = display.functionNameOf(c.functionId);
+                line.module       = display.moduleNameOf(c.moduleId);
                 line.logMsg       = std::string{e.lineText()};
                 line.parsedOk     = c.parsedOk;
                 lf::writeEntry(f, c.recvTime, line);
@@ -912,19 +945,31 @@ namespace uc_log { namespace FTXUIGui {
             return out;
         }
 
+        std::string functionTextOf(GuiEntryStore::Mirror const& mirror,
+                                   std::uint32_t                functionId) const {
+            return showFullSignature ? mirror.functionSignatureOf(functionId)
+                                     : mirror.functionNameOf(functionId);
+        }
+
+        std::string modulePrefix(std::uint32_t moduleId) const {
+            auto const module = display.moduleNameOf(moduleId);
+            return module.empty() ? std::string{} : fmt::format("[{}] ", module);
+        }
+
         void yankEntryToClipboard(std::size_t index) {
             if(index >= display.entries.size()) { return; }
             auto const& e    = display.entries[index];
             auto const& c    = *e.common;
-            auto        text = fmt::format("{} {} {} {}| {} ({}:{} {})",
+            auto        text = fmt::format("{} {} {} {}| {} ({}{}:{} {})",
                                            to_time_string_with_milliseconds(c.recvTime),
                                            c.channel,
                                            c.ucTime,
                                            enchantum::to_string(c.logLevel),
                                            e.lineText(),
+                                           modulePrefix(c.moduleId),
                                            display.fileNameOf(c.locationKey),
                                            GuiEntryStore::Mirror::lineOf(c.locationKey),
-                                           display.functionNameOf(c.functionId));
+                                           functionTextOf(display, c.functionId));
             // OSC 52 goes to the same terminal ftxui renders on, but only after the frame
             // is done (pendingActions run outside RunOnce), so it cannot interleave with
             // ftxui's own escape output
@@ -982,9 +1027,21 @@ namespace uc_log { namespace FTXUIGui {
             // hidden until '/' focuses it (or text is present), so it costs no space while idle
             auto searchRowVisible
               = [this]() { return searchRowShown || !searchStr.empty() || !jumpToStr.empty(); };
+            // under the log, not in the row: a signature can run to kilobytes
+            auto signaturePanel = ftxui::Renderer([this, scroller]() {
+                auto const  index = static_cast<std::size_t>(std::max(0, scroller->selectedIndex));
+                std::string signature = "(no line)";
+                if(index < display.entries.size()) {
+                    signature
+                      = display.functionSignatureOf(display.entries[index].common->functionId);
+                }
+                return ftxui::paragraph(signature) | ftxui::color(Theme::Text::functionName())
+                     | ftxui::border | ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 12);
+            });
             auto logsTab
               = ftxui::Container::Vertical({ftxui::Maybe(searchRow, std::move(searchRowVisible)),
-                                            ftxui::Component{scroller} | ftxui::flex});
+                                            ftxui::Component{scroller} | ftxui::flex,
+                                            ftxui::Maybe(signaturePanel, &showFullSignature)});
 
             // Esc leaves the search/jump inputs, hides the row (unless a filter is
             // active) and returns to the log list, so the hotkeys (y, q, ...) work
@@ -1005,7 +1062,12 @@ namespace uc_log { namespace FTXUIGui {
         ftxui::Component getStatusComponent() {
             auto clearButton = ftxui::Button(
               "🗑️ Clear messages",
-              [this]() { statusMessages.clear(); },
+              [this]() {
+                  statusMessages.clear();
+                  formatErrorCount      = 0;
+                  statusErrorCount      = 0;
+                  firmwareMismatchCount = 0;
+              },
               createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
 
             return ftxui::Container::Vertical(
@@ -1391,6 +1453,105 @@ namespace uc_log { namespace FTXUIGui {
 
             return ftxui::Container::Vertical(channel_components) | ftxui::border;
         }
+
+        // Unchecking a node hides its subtree; a hidden ancestor must be re-checked first.
+        class ModuleFilterBase : public ftxui::ComponentBase {
+        public:
+            explicit ModuleFilterBase(Gui& gui_) : gui{gui_} {
+                list = ftxui::Container::Vertical({});
+                Add(ftxui::Container::Vertical(
+                  {ftxui::Button(
+                     "🧩 Show All Modules",
+                     [this]() {
+                         gui.editedFilterState.excludedModules.clear();
+                         gui.updateCurrentFilter();
+                     },
+                     createButtonStyle(Theme::Button::Background::build(), Theme::Button::text())),
+                   list}));
+            }
+
+            ftxui::Element OnRender() override {
+                auto const& names = gui.display.moduleNamesById;
+                if(built != names.size() || builtFilter != gui.compiledFilterVersion) {
+                    rebuild(names);
+                }
+                auto content = ChildAt(0)->Render();
+                if(gui.compiledFilter.global != 0) {
+                    content = ftxui::vbox(
+                      {ftxui::text(
+                         "compiled: every line ≥ "
+                         + std::string{uc_log::detail::filterLevelName(gui.compiledFilter.global)})
+                         | ftxui::color(Theme::Text::metadata()),
+                       content});
+                }
+                if(names.empty() && !gui.compiledFilter.hasModuleRules()) {
+                    content = ftxui::vbox(
+                      {content,
+                       ftxui::text("no module yet") | ftxui::color(Theme::Text::metadata())});
+                }
+                return content | ftxui::border;
+            }
+
+        private:
+            void rebuild(std::vector<std::string> const& names) {
+                built       = names.size();
+                builtFilter = gui.compiledFilterVersion;
+                // the filter file's modules too: a compiled-out one has no lines
+                std::vector<std::string> all{names};
+                for(std::size_t i = 0; i < gui.compiledFilter.count; ++i) {
+                    all.emplace_back(gui.compiledFilter.rules[i].name());
+                }
+                std::set<std::string> nodes;
+                for(auto const& name : all) {
+                    for(std::size_t dot = name.find('.'); dot != std::string::npos;
+                        dot             = name.find('.', dot + 1))
+                    {
+                        nodes.insert(name.substr(0, dot));
+                    }
+                    nodes.insert(name);
+                }
+                list->DetachAllChildren();
+                for(auto const& node : nodes) {
+                    auto const  depth = static_cast<std::size_t>(std::ranges::count(node, '.'));
+                    auto const  last  = node.rfind('.');
+                    std::string label = std::string(depth * 2, ' ')
+                                      + (last == std::string::npos ? node : node.substr(last + 1));
+                    for(std::size_t i = 0; i < gui.compiledFilter.count; ++i) {
+                        auto const& rule = gui.compiledFilter.rules[i];
+                        if(rule.name() != node) { continue; }
+                        label += rule.level == uc_log::detail::LevelOff
+                                 ? std::string{"  ⛔ compiled out"}
+                                 : "  compiled ≥ "
+                                     + std::string{uc_log::detail::filterLevelName(rule.level)};
+                    }
+                    list->Add(FunctionCheckbox(
+                      std::move(label),
+                      [this, node]() {
+                          return !moduleHiddenBy(node, gui.editedFilterState.excludedModules);
+                      },
+                      [this, node]() {
+                          auto& excluded = gui.editedFilterState.excludedModules;
+                          if(excluded.erase(node) == 0) {
+                              if(moduleHiddenBy(node, excluded)) {
+                                  return;
+                              }   // an ancestor hides it
+                              std::erase_if(excluded, [&](std::string const& e) {
+                                  return moduleIsUnder(e, node);
+                              });
+                              excluded.insert(node);
+                          }
+                          gui.updateCurrentFilter();
+                      }));
+                }
+            }
+
+            Gui&             gui;
+            ftxui::Component list;
+            std::size_t      built{0};
+            std::size_t      builtFilter{0};
+        };
+
+        ftxui::Component getModuleFilterComponent() { return ftxui::Make<ModuleFilterBase>(*this); }
 
         ftxui::Component getLocationFilterComponent() {
             auto addIncludeEntry = [this](SourceLocation const& sourceLocation) {
@@ -1844,10 +2005,19 @@ namespace uc_log { namespace FTXUIGui {
             }));
             channelComponents.push_back(getChannelFilterComponent());
 
+            std::vector<ftxui::Component> moduleComponents;
+            moduleComponents.push_back(ftxui::Renderer([] {
+                return ftxui::text("🧩 Modules") | ftxui::bold
+                     | ftxui::color(Theme::Header::accent()) | ftxui::center;
+            }));
+            moduleComponents.push_back(getModuleFilterComponent());
+
             std::vector<ftxui::Component> horizontalComponents;
             horizontalComponents.push_back(ftxui::Container::Vertical(levelComponents)
                                            | ftxui::flex);
             horizontalComponents.push_back(ftxui::Container::Vertical(channelComponents)
+                                           | ftxui::flex);
+            horizontalComponents.push_back(ftxui::Container::Vertical(moduleComponents)
                                            | ftxui::flex);
 
             mainComponents.push_back(ftxui::Container::Horizontal(horizontalComponents));
@@ -2193,8 +2363,10 @@ namespace uc_log { namespace FTXUIGui {
               [this]() {
                   showSysTime        = true;
                   showFunctionName   = false;
+                  showFullSignature  = false;
                   showUcTime         = true;
                   showLocation       = true;
+                  showModule         = false;
                   showChannel        = true;
                   showLogLevel       = true;
                   showMetricString   = false;
@@ -2221,7 +2393,11 @@ namespace uc_log { namespace FTXUIGui {
                   ftxui::Checkbox("📍 Source Location", &showLocation) | checkboxWidth,
                   ftxui::Checkbox("🔍 Function Names", &showFunctionName) | checkboxWidth,
                   ftxui::Checkbox("📊 Metric Strings", &showMetricString) | checkboxWidth,
-                  ftxui::Checkbox("🔤 Typenames", &showTypenameString) | checkboxWidth})});
+                  ftxui::Checkbox("🔤 Typenames", &showTypenameString) | checkboxWidth,
+                  ftxui::Checkbox("🧩 Modules", &showModule) | checkboxWidth}),
+               ftxui::Container::Horizontal(
+                 {ftxui::Renderer([]() { return ftxui::text("  "); }),
+                  ftxui::Checkbox("📜 Full Signatures", &showFullSignature) | checkboxWidth})});
 
             // ── Section B: File Logging ───────────────────────────────────────────
             ftxui::InputOption logDirOpts;
@@ -2319,7 +2495,7 @@ namespace uc_log { namespace FTXUIGui {
               },
               createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
 
-            // ── Global socket bind address (metrics + all duplex channels) ────────
+            // ── Bind address ───────────────────────────────────────────────────────
             ftxui::InputOption bindAddrOpts;
             bindAddrOpts.multiline = false;
             bindAddressInputComponent
@@ -2416,11 +2592,13 @@ namespace uc_log { namespace FTXUIGui {
 
                    return ftxui::vbox(
                      {ftxui::hbox(
-                        {ftxui::text("🌐 TCP Metrics  ") | ftxui::bold
+                        {ftxui::text("🌐 Control  ") | ftxui::bold
                            | ftxui::color(Theme::Header::accent()),
                          ftxui::text(statusText) | ftxui::color(statusColor) | ftxui::bold,
                          ftxui::text("  "),
-                         tcpCurrentPort > 0
+                         !controlSocketPath.empty()
+                           ? ftxui::text(controlSocketPath) | ftxui::color(Theme::Status::info())
+                         : tcpCurrentPort > 0
                            ? ftxui::text(fmt::format("{}:{}", networkBindAddress, tcpCurrentPort))
                                | ftxui::color(Theme::Status::info())
                            : ftxui::text("—") | ftxui::color(Theme::Text::normal()),
@@ -2444,9 +2622,36 @@ namespace uc_log { namespace FTXUIGui {
                   ftxui::Renderer([]() { return ftxui::text("  "); }),
                   portApplyBtn})});
 
+            // ── Transport ───────────────────────────────────────────────────────────
+            ftxui::MenuOption transportOpts = ftxui::MenuOption::Toggle();
+            transportOpts.on_change         = [this]() {
+                // deferred: the callback re-enters through setControlSocketPath (gui mutex)
+                if(onTransportChange) {
+                    pendingActions.push_back(
+                      [this, unix = transportSelection == 0]() { onTransportChange(unix); });
+                }
+            };
+            auto transportToggle
+              = ftxui::Menu(&transportEntries, &transportSelection, transportOpts);
+            auto transportSection = ftxui::Container::Vertical(
+              {ftxui::Renderer([this]() {
+                   return ftxui::vbox(
+                     {ftxui::text("🔌 Transport") | ftxui::bold
+                        | ftxui::color(Theme::Header::accent()),
+                      ftxui::text(transportSelection == 0
+                                    ? "  control.sock and duplex.<n>.sock in the log directory"
+                                    : "  the control port and the duplex ports below, on the "
+                                      "bind address")
+                        | ftxui::color(Theme::Status::inactive())});
+               }),
+               ftxui::Container::Horizontal(
+                 {ftxui::Renderer([]() { return ftxui::text("  Serve on: "); }),
+                  transportToggle})});
+
             // ── Combine all sections, each in its own frame like the Debugger tab ─
             return ftxui::Container::Vertical({displaySection | ftxui::border,
                                                logSection | ftxui::border,
+                                               transportSection | ftxui::border,
                                                bindAddrSection | ftxui::border,
                                                netSection | ftxui::border,
                                                getDuplexSection() | ftxui::border});
@@ -2488,7 +2693,7 @@ namespace uc_log { namespace FTXUIGui {
                                     infos.empty()
                                       ? ftxui::text("none reported by the target")
                                           | ftxui::color(Theme::Text::normal())
-                                      : ftxui::text("one TCP client per channel, first wins")
+                                      : ftxui::text("one client per channel, first wins")
                                           | ftxui::color(Theme::Status::info())});
             });
 
@@ -2559,7 +2764,9 @@ namespace uc_log { namespace FTXUIGui {
                        ftxui::text("  "),
                        ftxui::text(statusText) | ftxui::color(statusColor) | ftxui::bold,
                        ftxui::text("  "),
-                       ftxui::text(fmt::format("{}:{}", networkBindAddress, info.port))
+                       ftxui::text(info.socketPath.empty()
+                                     ? fmt::format("{}:{}", networkBindAddress, info.port)
+                                     : info.socketPath)
                          | ftxui::color(Theme::Status::info()),
                        ftxui::text("  client ") | ftxui::bold,
                        ftxui::text(info.connected ? "●" : "○")
@@ -2641,6 +2848,12 @@ namespace uc_log { namespace FTXUIGui {
                    ftxui::text("  y                      - Copy selected line (OSC 52)"),
                    ftxui::text("  Search: plain text is case-insensitive, prefix with re:"),
                    ftxui::text("          for a regular expression; matches filter the view"),
+                   ftxui::text(""),
+                   ftxui::text("📝 in the status line") | ftxui::bold
+                     | ftxui::color(Theme::Header::accent()),
+                   ftxui::text("  ✘ N - N log lines were lost since the last flash because the"),
+                   ftxui::text("        host could not apply their format string; the Status tab"),
+                   ftxui::text("        says which field and why"),
                    ftxui::text(""),
                    ftxui::text("💡 Tips") | ftxui::bold | ftxui::color(Theme::Header::warning()),
                    ftxui::text("  • Use Tab/Shift+Tab to navigate between UI elements"),
@@ -3155,6 +3368,43 @@ namespace uc_log { namespace FTXUIGui {
                                              rttStatus.hostOverflowCount))))
                      | ftxui::color(rttStatus.hostOverflowCount == 0 ? Theme::Status::success()
                                                                      : Theme::Status::error()),
+                   ftxui::separator(),
+
+                   ftxui::text(formatErrorCount == 0
+                                 ? std::string{"📝 ○"}
+                                 : fmt::format("📝 ✘ {}",
+                                               FTXUIGui::formatNumber(
+                                                 static_cast<std::uint32_t>(formatErrorCount))))
+                     | ftxui::color(formatErrorCount == 0 ? Theme::Text::normal()
+                                                          : Theme::Status::error())
+                     | (formatErrorCount == 0 ? ftxui::nothing : ftxui::bold),
+                   ftxui::separator(),
+                   ftxui::text(statusErrorCount == 0
+                                 ? std::string{"⚠ 0"}
+                                 : fmt::format("⚠ {}",
+                                               FTXUIGui::formatNumber(
+                                                 static_cast<std::uint32_t>(statusErrorCount))))
+                     | ftxui::color(statusErrorCount == 0 ? Theme::Text::normal()
+                                                          : Theme::Status::error())
+                     | (statusErrorCount == 0 ? ftxui::nothing : ftxui::bold),
+                   ftxui::separator(),
+                   ftxui::text([this]() -> std::string {
+                       auto const n = firmwareMismatchCount == 0
+                                      ? std::string{}
+                                      : fmt::format(" ({}x)", firmwareMismatchCount);
+                       switch(firmwareState) {
+                       case FirmwareState::match:     return "FW ✔" + n;
+                       case FirmwareState::different: return "FW ✘ MISMATCH" + n;
+                       case FirmwareState::unchecked: return "FW ?" + n;
+                       }
+                       return "FW ?";
+                   }())
+                     | ftxui::color(
+                       firmwareState == FirmwareState::different ? Theme::Status::error()
+                       : firmwareMismatchCount != 0              ? Theme::Status::warning()
+                       : firmwareState == FirmwareState::match   ? Theme::Status::success()
+                                                                 : Theme::Text::normal())
+                     | (firmwareState == FirmwareState::different ? ftxui::bold : ftxui::nothing),
                    display.trimmedLogCount > 0 ? ftxui::separator() : ftxui::text(""),
                    display.trimmedLogCount > 0
                      ? ftxui::text(fmt::format("♻ TRIM {}",
@@ -3265,9 +3515,23 @@ namespace uc_log { namespace FTXUIGui {
 
         void setEchoToStderr(bool enabled) { echoToStderr = enabled; }
 
+        // Before the ui runs.
+        void setCompiledFilter(uc_log::detail::FilterTable const& table) {
+            compiledFilter = table;
+            ++compiledFilterVersion;
+        }
+
+        // Every Status tab message (level, text), called without the gui's mutex held.
+        using MessageSink = std::function<void(std::string_view, std::string_view)>;
+        MessageSink messageSink{};
+
+        void setMessageSink(MessageSink sink) { messageSink = std::move(sink); }
+
         void fatalError(std::string_view msg) {
             if(echoToStderr) { fmt::print(stderr, "[fatal] {}\n", msg); }
+            if(messageSink) { messageSink("fatal", msg); }
             std::lock_guard<std::mutex> const lock{mutex};
+            ++statusErrorCount;
             statusMessages.emplace_back(MessageEntry::Level::Fatal,
                                         std::chrono::system_clock::now(),
                                         std::string{msg});
@@ -3276,6 +3540,7 @@ namespace uc_log { namespace FTXUIGui {
 
         void statusMessage(std::string_view msg) {
             if(echoToStderr) { fmt::print(stderr, "[status] {}\n", msg); }
+            if(messageSink) { messageSink("status", msg); }
             std::lock_guard<std::mutex> const lock{mutex};
             statusMessages.emplace_back(MessageEntry::Level::Status,
                                         std::chrono::system_clock::now(),
@@ -3285,15 +3550,26 @@ namespace uc_log { namespace FTXUIGui {
 
         void errorMessage(std::string_view msg) {
             if(echoToStderr) { fmt::print(stderr, "[error] {}\n", msg); }
+            if(messageSink) { messageSink("error", msg); }
             std::lock_guard<std::mutex> const lock{mutex};
+            ++statusErrorCount;
+            if(isFormatError(msg)) { ++formatErrorCount; }
             statusMessages.emplace_back(MessageEntry::Level::Error,
                                         std::chrono::system_clock::now(),
                                         std::string{msg});
             requestRedrawFromAnywhere();
         }
 
+        void firmwareChecked(FirmwareState state) {
+            std::lock_guard<std::mutex> const lock{mutex};
+            firmwareState = state;
+            if(state == FirmwareState::different) { ++firmwareMismatchCount; }
+            requestRedrawFromAnywhere();
+        }
+
         void toolStatusMessage(std::string_view msg) {
             if(echoToStderr) { fmt::print(stderr, "[tool] {}\n", msg); }
+            if(messageSink) { messageSink("tool", msg); }
             std::lock_guard<std::mutex> const lock{mutex};
             statusMessages.emplace_back(MessageEntry::Level::ToolStatus,
                                         std::chrono::system_clock::now(),
@@ -3303,7 +3579,9 @@ namespace uc_log { namespace FTXUIGui {
 
         void toolErrorMessage(std::string_view msg) {
             if(echoToStderr) { fmt::print(stderr, "[tool error] {}\n", msg); }
+            if(messageSink) { messageSink("tool error", msg); }
             std::lock_guard<std::mutex> const lock{mutex};
+            ++statusErrorCount;
             statusMessages.emplace_back(MessageEntry::Level::ToolError,
                                         std::chrono::system_clock::now(),
                                         std::string{msg});
@@ -3317,6 +3595,20 @@ namespace uc_log { namespace FTXUIGui {
             tcpCurrentPort = p;
             if(tcpPortInput.empty()) { tcpPortInput = std::to_string(static_cast<unsigned>(p)); }
             requestRedrawFromAnywhere();
+        }
+
+        /// Empty: the control server is on TCP.
+        void setControlSocketPath(std::string path) {
+            std::lock_guard<std::mutex> const lock{mutex};
+            controlSocketPath  = std::move(path);
+            transportSelection = controlSocketPath.empty() ? 1 : 0;
+            requestRedrawFromAnywhere();
+        }
+
+        /// `true`: unix sockets.
+        void setOnTransportChange(std::function<void(bool)> cb) {
+            std::lock_guard<std::mutex> const lock{mutex};
+            onTransportChange = std::move(cb);
         }
 
         void setOnTcpPortChange(std::function<void(std::uint16_t)> cb) {

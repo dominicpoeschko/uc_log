@@ -8,11 +8,13 @@
 #include "uc_log/LogLevel.hpp"
 #include "uc_log/RttBlockInfo.hpp"
 #include "uc_log/TimeDelayedQueue.hpp"
+#include "uc_log/detail/ControlEvents.hpp"
+#include "uc_log/detail/ControlServer.hpp"
 #include "uc_log/detail/DuplexChannelServer.hpp"
+#include "uc_log/detail/HexImage.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 #include "uc_log/detail/LogFormat.hpp"
 #include "uc_log/detail/RttChannelMap.hpp"
-#include "uc_log/detail/TcpSender.hpp"
 #include "uc_log/detail/TcpServerCommon.hpp"
 #include "uc_log/metric_utils.hpp"
 
@@ -22,6 +24,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <vector>
 // clang-format off
@@ -42,7 +45,11 @@
 #include <expected>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <optional>
 #include <ranges>
+#include <stop_token>
+#include <thread>
 
 namespace {
 std::expected<RttBlockInfo,
@@ -143,14 +150,70 @@ struct LogFilePrinter {
     std::ofstream                                        logFile;
     bool                                                 errorShown{false};
     bool                                                 logFileEnabled{true};
+    bool                                                 logFileDirty{false};
     std::mutex                                           mutex;
+    // own mutex: add() reports errors through the gui (-> addStatus) while holding `mutex`
+    std::filesystem::path                                      statusFilePath;
+    std::ofstream                                              statusFile;
+    std::mutex                                                 statusMutex;
+    std::deque<uc_log::control::StatusMessage>                 statusLines;
+    std::size_t                                                statusErrors{};
+    std::function<void(uc_log::control::StatusMessage const&)> statusListener;
+    static constexpr std::size_t                               StatusLinesKept = 1000;
+    static constexpr auto FlushPeriod = std::chrono::milliseconds{100};
+
+    // scripts read the .rttlog while the printer runs: a line is on disk FlushPeriod later at most
+    std::jthread flusher{[this](std::stop_token const& stop) {
+        while(!stop.stop_requested()) {
+            std::this_thread::sleep_for(FlushPeriod);
+            std::lock_guard<std::mutex> const lock{mutex};
+            if(logFileDirty) {
+                logFile.flush();
+                logFileDirty = false;
+            }
+        }
+    }};
 
     LogFilePrinter(uc_log::FTXUIGui::Gui& gui,
                    std::string const&     logDir)
       : errorMessagef{[&gui](auto const& m) { gui.errorMessage(m); }}
       , statusChangef{[&gui](LogFileStatus    s,
                              std::string_view p) { gui.setLogFileStatus(s, p); }} {
+        gui.setMessageSink(
+          [this](std::string_view level, std::string_view msg) { addStatus(level, msg); });
         openFileUnlocked(logDir);
+    }
+
+    void addStatus(std::string_view level,
+                   std::string_view msg) {
+        std::lock_guard<std::mutex> const lock{statusMutex};
+        auto                              message
+          = uc_log::detail::toStatusMessage(std::chrono::system_clock::now(), level, msg);
+        if(level != "status" && level != "tool") { ++statusErrors; }
+        if(statusFile) {
+            statusFile << uc_log::detail::statusFileLine(message) << '\n';
+            statusFile.flush();
+        }
+        // under the lock: stream order = file order
+        if(statusListener) { statusListener(message); }
+        statusLines.push_back(std::move(message));
+        if(statusLines.size() > StatusLinesKept) { statusLines.pop_front(); }
+    }
+
+    void setStatusListener(std::function<void(uc_log::control::StatusMessage const&)> f) {
+        std::lock_guard<std::mutex> const lock{statusMutex};
+        statusListener = std::move(f);
+    }
+
+    std::vector<uc_log::control::StatusMessage> newestStatus(std::size_t count) {
+        std::lock_guard<std::mutex> const lock{statusMutex};
+        auto const                        n = std::min(count, statusLines.size());
+        return {statusLines.end() - static_cast<std::ptrdiff_t>(n), statusLines.end()};
+    }
+
+    std::size_t statusErrorCount() {
+        std::lock_guard<std::mutex> const lock{statusMutex};
+        return statusErrors;
     }
 
     void changeDir(std::string const& newDir) {
@@ -169,6 +232,7 @@ struct LogFilePrinter {
         if(!logFileEnabled) { return; }
         if(logFile) {
             uc_log::detail::logformat::writeEntry(logFile, recv_time, entry);
+            logFileDirty = true;   // flushed by `flusher`, not per line: a syscall per line
         } else {
             if(!errorShown) {
                 errorMessagef(fmt::format("error writing logFile: {:?}", logFilePath));
@@ -186,6 +250,14 @@ private:
           / fmt::format("{}.rttlog",
                         uc_log::detail::logformat::toIso8601Utc(std::chrono::system_clock::now()));
         logFile.open(logFilePath);
+        {
+            std::lock_guard<std::mutex> const lock{statusMutex};
+            statusFile.close();
+            statusFile.clear();
+            statusFilePath = logFilePath;
+            statusFilePath.replace_extension(".status.log");
+            statusFile.open(statusFilePath);
+        }
         if(!logFile.is_open()) {
             errorMessagef(fmt::format("failed to open logfile: {:?}", logFilePath));
             if(statusChangef) { statusChangef(LogFileStatus::Error, logFilePath.string()); }
@@ -196,90 +268,182 @@ private:
     }
 };
 
-struct TcpPrinter {
-    TCPSender tcpSender;
+// Does the board run the build whose strings decode the log? Checked at each session start.
+struct FirmwareCheck {
+    using State = uc_log::control::FirmwareState;
+    std::mutex                     mutex;
+    uc_log::control::FirmwareCheck summary{};
 
-    TcpPrinter(uc_log::FTXUIGui::Gui&   gui,
-               boost::asio::io_context& ioc,
-               boost::asio::ip::address bindAddress,
-               std::uint16_t            port)
-      : tcpSender{ioc,
-                  std::move(bindAddress),
-                  port,
-                  [&gui](auto const& msg) { gui.errorMessage(msg); },
-                  [&gui](TcpPortStatus s,
-                         std::uint16_t p) { gui.setTcpPortStatus(s, p); }} {}
-
-    void restart(std::uint16_t newPort) { tcpSender.restart(newPort); }
-
-    void add(std::chrono::system_clock::time_point recv_time,
-             uc_log::detail::LogEntry const&       entry) {
-        auto const metrics = uc_log::extractMetrics(recv_time, entry);
-        for(auto const& metric : metrics) {
-            tcpSender.send(
-              fmt::format(R"("/*{{"name":{:?},"scope":{:?},"unit":{:?},"time":{},"value":{}}}*/{})",
-                          metric.first.name,
-                          metric.first.scope,
-                          metric.first.unit,
-                          std::chrono::duration<double>(metric.second.uc_time.time).count(),
-                          metric.second.value,
-                          '\n'));
+    template<typename ReadF,
+             typename EmitF>
+    void run(std::string const& hexFile,
+             ReadF&&            read,
+             EmitF&&            emit) {
+        using uc_log::detail::ImageCheck;
+        std::string                    text;
+        uc_log::control::FirmwareCheck state{};
+        std::ifstream                  file{hexFile};
+        auto const image = file ? uc_log::detail::parseIntelHex(file)
+                                : std::unexpected{fmt::format("cannot open {:?}", hexFile)};
+        if(!image) {
+            text = fmt::format("firmware not checked: {}", image.error());
+        } else {
+            auto const      crc   = uc_log::detail::imageCrc(*image);
+            auto const      check = uc_log::detail::compareImage(*image, read);
+            std::error_code ec;
+            auto const      written = std::filesystem::last_write_time(hexFile, ec);
+            auto const      built
+              = ec ? std::string{"?"}
+                   : uc_log::detail::logformat::toIso8601Utc(
+                       std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                         std::chrono::file_clock::to_sys(written)));
+            if(check.result == ImageCheck::Result::match) {
+                state = {.state = State::match, .build = crc};
+                text
+                  = fmt::format("firmware matches {} (build {:08x}, {} bytes compared, built {})",
+                                hexFile,
+                                crc,
+                                check.comparedBytes,
+                                built);
+            } else if(check.result == ImageCheck::Result::different) {
+                state = {.state = State::different, .build = crc};
+                text  = fmt::format(
+                  "⚠ the target does NOT run {} (build {:08x}, built {}): first "
+                  "difference at {:#010x} - this log is decoded with the wrong "
+                  "strings; flash the target",
+                  hexFile,
+                  crc,
+                  built,
+                  check.firstDifference);
+            } else {
+                state = {.state = State::unchecked, .build = crc};
+                text  = fmt::format("firmware not checked: {}", check.error);
+            }
         }
+        {
+            std::lock_guard<std::mutex> const lock{mutex};
+            summary = state;
+        }
+        emit(checkState(state), text);
+    }
+
+    uc_log::control::FirmwareCheck get() {
+        std::lock_guard<std::mutex> const lock{mutex};
+        return summary;
+    }
+
+private:
+    static uc_log::FTXUIGui::FirmwareState checkState(uc_log::control::FirmwareCheck const& state) {
+        using S = uc_log::FTXUIGui::FirmwareState;
+        switch(state.state) {
+        case State::match:     return S::match;
+        case State::different: return S::different;
+        case State::unchecked: return S::unchecked;
+        }
+        return S::unchecked;
     }
 };
+
+struct OnScopeExit {
+    std::function<void()> f;
+
+    ~OnScopeExit() {
+        if(f) { f(); }
+    }
+};
+
 }   // namespace
 
 int main(int    argc,
          char** argv) {
-    std::uint32_t speed{};
-    std::string   device{};
-    std::string   mapFile{};
-    std::string   hexFile{};
-    std::string   stringConstantsFile{};
-    std::string   host{};
-    std::string   probe{};
-    std::string   logDir{};
-    std::string   buildCommand{};
-    std::string   bindAddressString{};
-    std::uint16_t port{};
-    std::uint16_t duplexBasePort{};
-    bool          disableUi{false};
+    std::uint32_t                   speed{};
+    std::string                     device{};
+    std::string                     mapFile{};
+    std::string                     hexFile{};
+    std::string                     stringConstantsFile{};
+    std::string                     host{};
+    std::string                     probe{};
+    std::string                     logDir{};
+    std::string                     buildCommand{};
+    std::string                     bindAddressString{};
+    std::uint16_t                   controlPort{};
+    std::uint16_t                   duplexBasePort{};
+    std::string                     controlSocket{};
+    std::string                     transport{};
+    bool                            disableUi{false};
+    std::vector<JLink::MemoryWrite> preResetCommands{};
+    std::string                     logFilterFile{};
+    std::size_t                     controlHistoryMb{};
+    auto const startedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
 
     cxxopts::Options options("uc_log_printer");
     try {
         options.add_options()(
+          "transport",
+          "control server and duplex channels: 'unix' (control.sock, duplex.<n>.sock in the log "
+          "directory) or 'tcp' (control_port, duplex_base_port + n on bind_address)",
+          cxxopts::value<std::string>()->default_value("unix"))(
           "duplex_base_port",
-          "first tcp port for duplex channels",
-          cxxopts::value<std::uint16_t>()->default_value(
-            "34600"))("metrics_port", "tcp for metrics", cxxopts::value<std::uint16_t>())(
-          "speed",
-          "swd speed",
-          cxxopts::value<std::uint32_t>())("device", "mpu device", cxxopts::value<std::string>())(
-          "build_command",
-          "build command",
-          cxxopts::value<std::string>())("map_file", "map file", cxxopts::value<std::string>())(
-          "hex_file",
-          "hex file",
-          cxxopts::value<std::string>())("string_constants_file",
-                                         "string constants map file",
+          "first tcp port for duplex channels (--transport tcp)",
+          cxxopts::value<std::uint16_t>()->default_value("34600"))(
+          "control_port",
+          "tcp port of the control server (--transport tcp)",
+          cxxopts::value<std::uint16_t>()->default_value("34565"))(
+          "control_history_mb",
+          "log history the control server keeps for subscribers asking for the past (MiB)",
+          cxxopts::value<std::size_t>()->default_value("128"))(
+          "metrics_port",
+          "deprecated: the metrics are a stream of the control server now; taken as "
+          "--control_port when that is not given",
+          cxxopts::value<std::uint16_t>())("speed", "swd speed", cxxopts::value<std::uint32_t>())(
+          "device",
+          "mpu device",
+          cxxopts::value<std::string>())("build_command",
+                                         "build command",
                                          cxxopts::value<std::string>())(
-          "log_dir",
-          "log file directory",
-          cxxopts::value<std::string>())("host",
-                                         "jlink host",
-                                         cxxopts::value<std::string>()->default_value(""))(
+          "map_file",
+          "map file",
+          cxxopts::value<std::string>())("hex_file", "hex file", cxxopts::value<std::string>())(
+          "string_constants_file",
+          "string constants map file",
+          cxxopts::value<std::string>())("log_dir",
+                                         "log file directory",
+                                         cxxopts::value<std::string>())(
+          "host",
+          "jlink host",
+          cxxopts::value<std::string>()->default_value(""))(
           "probe",
           "jlink by serial number or nickname, on usb or on the network; required when "
           "more than one is on usb",
           cxxopts::value<std::string>()->default_value(""))(
           "bind_address",
-          "address the tcp servers (metrics + duplex) bind to; the duplex ports give raw "
+          "address the tcp servers (control + duplex) bind to; the duplex ports give raw "
           "unauthenticated access to the target, so anything but loopback exposes that "
           "to the network",
+          cxxopts::value<std::string>()->default_value("127.0.0.1"))(
+          "log_filter",
+          "the uc_log_filter.txt the firmware was compiled with (LogFilter.hpp): shown in the "
+          "Filter tab's module tree, and a module it compiled out is named there",
+          cxxopts::value<std::string>()->default_value(""))(
+          "pre_reset_command",
+          "J-Link Commander line written to the target before every reset and download, "
+          "repeatable, in order; only 'w4 <address> <value>'. What a chip needs there (the RP "
+          "chips park core 1) comes from its package's TARGET_JLINK_CONNECT_COMMANDS",
+          cxxopts::value<std::vector<std::string>>())(
+          "control_socket",
+          "unix domain socket of the control server (--transport unix; JSON lines, "
+          "detail/ControlProtocol.hpp): 'auto' = control.sock in the log directory, where "
+          "tools/uc_log_client.py looks, 'off' = no control server",
           cxxopts::value<std::string>()->default_value(
-            "127.0.0.1"))("disable_ui", "disable ui and just log to file and tcp");
-        auto const result   = options.parse(argc, argv);
-        port                = result["metrics_port"].as<std::uint16_t>();
+            "auto"))("disable_ui", "disable ui and just log to file and the control server");
+        auto const result = options.parse(argc, argv);
+        controlPort       = result["control_port"].as<std::uint16_t>();
+        controlHistoryMb  = result["control_history_mb"].as<std::size_t>();
+        if(result.count("metrics_port") > 0 && result.count("control_port") == 0) {
+            controlPort = result["metrics_port"].as<std::uint16_t>();
+        }
         duplexBasePort      = result["duplex_base_port"].as<std::uint16_t>();
         speed               = result["speed"].as<std::uint32_t>();
         device              = result["device"].as<std::string>();
@@ -292,8 +456,23 @@ int main(int    argc,
         probe               = result["probe"].as<std::string>();
         bindAddressString   = result["bind_address"].as<std::string>();
         disableUi           = result.count("disable_ui") > 0;
+        controlSocket       = result["control_socket"].as<std::string>();
+        transport           = result["transport"].as<std::string>();
+        logFilterFile       = result["log_filter"].as<std::string>();
+        if(result.count("pre_reset_command") > 0) {
+            for(auto const& line : result["pre_reset_command"].as<std::vector<std::string>>()) {
+                preResetCommands.push_back(JLink::parseCommand(line));
+            }
+        }
+        if(transport != "unix" && transport != "tcp") {
+            fmt::print(stderr, "Error: --transport is 'unix' or 'tcp', not {:?}\n", transport);
+            return 1;
+        }
     } catch(cxxopts::exceptions::exception const& e) {
         fmt::print(stderr, "Error: {}\n{}\n", e.what(), options.help());
+        return 1;
+    } catch(std::runtime_error const& e) {
+        fmt::print(stderr, "Error: {}\n", e.what());
         return 1;
     }
 
@@ -307,21 +486,73 @@ int main(int    argc,
 
     uc_log::FTXUIGui::Gui gui{};
     gui.setEchoToStderr(disableUi);
+
+    if(!logFilterFile.empty()) {
+        std::ifstream     stream{logFilterFile};
+        std::string const text{std::istreambuf_iterator<char>{stream}, {}};
+        auto const        parsed = uc_log::detail::parseFilter(text);
+        if(!stream.is_open()) {
+            gui.errorMessage(fmt::format("log filter {}: cannot open it", logFilterFile));
+        } else if(!parsed.error.empty()) {
+            gui.errorMessage(
+              fmt::format("log filter {}:{}: {}", logFilterFile, parsed.line, parsed.error));
+        } else {
+            gui.setCompiledFilter(parsed.table);
+            gui.statusMessage(fmt::format("log filter {}: {} module rule(s), every line >= {}",
+                                          logFilterFile,
+                                          parsed.table.count,
+                                          uc_log::detail::filterLevelName(parsed.table.global)));
+        }
+    }
     gui.setNetworkBindAddress(bindAddressString);
     LogFilePrinter              logFilePrinter{gui, logDir};
     uc_log::detail::AsioContext asioContext;
-    TcpPrinter                  tcpPrinter{gui, asioContext.ioc, bindAddress, port};
-    gui.setOnTcpPortChange([&tcpPrinter](std::uint16_t newPort) { tcpPrinter.restart(newPort); });
-    gui.setTcpClientCountGetter([&tcpPrinter]() { return tcpPrinter.tcpSender.getClientCount(); });
+    bool const                  unixTransport    = transport == "unix";
+    auto const                  controlSocketFor = [&controlSocket, &logDir](bool unix) {
+        if(!unix) { return std::filesystem::path{}; }
+        return controlSocket == "auto" ? uc_log::detail::controlSocketPath(logDir)
+                                       : std::filesystem::path{controlSocket};
+    };
+
+    // a failed bind does not stop logging
+    std::optional<uc_log::detail::ControlServer> controlServer;
+    if(controlSocket != "off" && !controlSocket.empty()) {
+        auto const path = controlSocketFor(unixTransport);
+        controlServer.emplace(
+          bindAddress,
+          controlPort,
+          path,
+          [&gui](std::string_view msg) {
+              gui.toolErrorMessage(fmt::format("control server: {}", msg));
+          },
+          [&gui](TcpPortStatus s, std::uint16_t p) { gui.setTcpPortStatus(s, p); });
+        controlServer->setHistoryLimit(controlHistoryMb * 1024 * 1024);
+        gui.setControlSocketPath(path.native());
+        gui.toolStatusMessage(
+          path.empty() ? fmt::format("control server on {}:{}", bindAddressString, controlPort)
+                       : fmt::format("control socket {}", path.native()));
+        logFilePrinter.setStatusListener(
+          [&controlServer](uc_log::control::StatusMessage const& m) { controlServer->publish(m); });
+    }
+    // before the server goes: nothing publishes into it while it is torn down
+    OnScopeExit const stopStatusStream{[&logFilePrinter] { logFilePrinter.setStatusListener({}); }};
+
+    gui.setOnTcpPortChange([&controlServer](std::uint16_t newPort) {
+        if(controlServer) { controlServer->restart(newPort); }
+    });
+    gui.setTcpClientCountGetter([&controlServer]() -> std::size_t {
+        return controlServer ? controlServer->getClientCount() : 0;
+    });
     gui.setOnLogDirChange(
       [&logFilePrinter](std::string const& newDir) { logFilePrinter.changeDir(newDir); });
     gui.setOnLogFileEnable([&logFilePrinter](bool enabled) { logFilePrinter.setEnabled(enabled); });
-    gui.setOnTcpEnable([&tcpPrinter, port](bool enabled) {
+    gui.setOnTcpEnable([&controlServer, controlPort](bool enabled) {
+        if(!controlServer) { return; }
         if(enabled) {
-            auto const current = tcpPrinter.tcpSender.getPort();
-            tcpPrinter.restart(current != 0 ? current : port);
+            auto const current = controlServer->getPort();
+            controlServer->restart(current != 0 ? current : controlPort);
         } else {
-            tcpPrinter.tcpSender.stop();
+            controlServer->stop();
         }
     });
 
@@ -331,7 +562,8 @@ int main(int    argc,
       duplexBasePort,
       [&gui](std::string_view msg) { gui.errorMessage(msg); },
       [&gui](std::string_view msg) { gui.statusMessage(msg); },
-      [&gui]() { gui.triggerRedraw(); }};
+      [&gui]() { gui.triggerRedraw(); },
+      unixTransport ? std::filesystem::path{logDir} : std::filesystem::path{}};
     gui.setDuplexInfoGetter([&duplexHub]() { return duplexHub.info(); });
     gui.setOnDuplexPortChange([&duplexHub](std::size_t ordinal, std::uint16_t newPort) {
         duplexHub.setPort(ordinal, newPort);
@@ -342,13 +574,21 @@ int main(int    argc,
       [&duplexHub](std::uint16_t newBasePort) { duplexHub.setBasePort(newBasePort); });
     gui.setDuplexBasePort(duplexBasePort);
 
+    gui.setOnTransportChange(
+      [&gui, &controlServer, &controlSocketFor, &duplexHub, &logDir](bool unix) {
+          auto const controlPath = controlSocketFor(unix);
+          if(controlServer) { controlServer->setSocketPath(controlPath); }
+          duplexHub.setSocketDir(unix ? std::filesystem::path{logDir} : std::filesystem::path{});
+          gui.setControlSocketPath(controlServer ? controlPath.native() : std::string{});
+      });
+
     // let the operator rebind every socket at runtime; returns false on an unparsable
     // address so the gui can show it without applying anything
-    gui.setOnNetworkBindAddressChange([&tcpPrinter, &duplexHub](std::string const& s) {
+    gui.setOnNetworkBindAddressChange([&controlServer, &duplexHub](std::string const& s) {
         boost::system::error_code ec;
         auto const                address = boost::asio::ip::make_address(s, ec);
         if(ec) { return false; }
-        tcpPrinter.tcpSender.setBindAddress(address);
+        if(controlServer) { controlServer->setBindAddress(address); }
         duplexHub.setBindAddress(address);
         return true;
     });
@@ -358,13 +598,24 @@ int main(int    argc,
     uc_log::detail::AsioContextRunner asioRunner{asioContext};
 
     TimeDelayedQueue queue{
-      [](auto const& entry) { return entry.entry.ucTime; },
-      [&logFilePrinter, &tcpPrinter, &gui](std::chrono::system_clock::time_point recv_time,
-                                           uc_log::detail::LogEntry const&       entry) {
+      [](uc_log::detail::LogEntry const& entry) { return entry.ucTime; },
+      [](uc_log::detail::LogEntry const& entry) { return entry.channel.channel; },
+      [&logFilePrinter, &controlServer, &gui](std::chrono::system_clock::time_point recv_time,
+                                              uc_log::detail::LogEntry const&       entry) {
           logFilePrinter.add(recv_time, entry);
-          tcpPrinter.add(recv_time, entry);
+          if(controlServer) {
+              using uc_log::control::Stream;
+              controlServer->publish(uc_log::detail::toLogLine(recv_time, entry));
+              if(controlServer->wants(Stream::metrics)) {
+                  for(auto const& sample : uc_log::detail::toMetricSamples(recv_time, entry)) {
+                      controlServer->publish(sample);
+                  }
+              }
+          }
           gui.add(recv_time, entry);
       }};
+
+    uc_log::detail::SignatureTable signatures;
 
     JLinkRttReader rttReader{
       host,
@@ -377,13 +628,27 @@ int main(int    argc,
           return result.value_or(RttBlockInfo{});
                           },
       [&hexFile]() { return hexFile; },
-      [&stringConstantsFile, &gui]() {
+      [&stringConstantsFile, &gui, &signatures]() {
           auto const result = remote_fmt::parseStringConstantsFromJsonFile(stringConstantsFile);
           if(!result.has_value()) { gui.fatalError(result.error()); }
+          auto table = uc_log::detail::SignatureTable::fromJsonFile(stringConstantsFile);
+          if(table.has_value()) {
+              if(table->empty()) {
+                  gui.errorMessage("no call sites in " + stringConstantsFile
+                                   + ": every function shows as \"?\" (rebuild the target)");
+              }
+              signatures = std::move(*table);
+          } else {
+              gui.errorMessage(table.error());
+              signatures = {};
+          }
           return result.value_or({});
                           },
-      [&queue](std::size_t channel, std::string_view msg) {
-          queue.append(uc_log::detail::LogEntry{channel, msg});
+      // the same thread as the one above
+      [&queue, &signatures](std::size_t                           channel,
+                            std::string_view                      msg,
+                            std::optional<remote_fmt::catalog_id> id) {
+          queue.append(uc_log::detail::LogEntry{channel, msg, signatures.find(id)});
                           },
       [&gui](std::string_view msg) { gui.statusMessage(msg); },
       [&gui](std::string_view msg) { gui.errorMessage(msg); },
@@ -400,6 +665,62 @@ int main(int    argc,
             duplexHub.consumeFromClient(ordinal, n);
         }}
     };
+
+    rttReader.setPreResetCommands(preResetCommands);
+
+    FirmwareCheck firmwareCheck;
+    rttReader.setOnSessionStart([&](JLinkRttReader::DirectMemoryRead const& read) {
+        firmwareCheck.run(hexFile,
+                          read,
+                          [&gui](uc_log::FTXUIGui::FirmwareState state, std::string const& text) {
+                              gui.firmwareChecked(state);
+                              if(state == uc_log::FTXUIGui::FirmwareState::match) {
+                                  gui.statusMessage(text);
+                              } else {
+                                  gui.errorMessage(text);
+                              }
+                          });
+    });
+
+    // Cleared again before the reader goes: its requests run on the reader.
+    if(controlServer) {
+        controlServer->setTarget(uc_log::detail::ControlTarget{
+          .read =
+            [&rttReader](std::span<uc_log::control::Piece const> pieces) {
+                std::vector<JLinkRttReader::MemoryRead> reads;
+                reads.reserve(pieces.size());
+                for(auto const& p : pieces) { reads.push_back({p.address, p.size}); }
+                return rttReader.readMemory(reads);
+            },
+          .status =
+            [&rttReader, &firmwareCheck, &logFilePrinter, &controlServer, startedUs] {
+                return uc_log::control::StatusAnswer{
+                  .running    = rttReader.getStatus().isRunning != 0,
+                  .halted     = rttReader.isHalted(),
+                  .flashing   = rttReader.isFlashing(),
+                  .sessions   = static_cast<std::uint32_t>(rttReader.sessionCount()),
+                  .firmware   = firmwareCheck.get(),
+                  .errors     = logFilePrinter.statusErrorCount(),
+                  .log_seq    = controlServer->logSeq(),
+                  .started_us = startedUs};
+            },
+          .reset =
+            [&rttReader](std::function<bool()> const& cancelled) {
+                return rttReader.resetAndWait(std::chrono::seconds{20}, cancelled);
+            },
+          .flash =
+            [&rttReader](std::function<bool()> const& cancelled) {
+                return rttReader.flashAndWait(std::chrono::seconds{90}, cancelled);
+            },
+          .messages
+          = [&logFilePrinter](std::size_t count) { return logFilePrinter.newestStatus(count); },
+          .unixMicros   = {},
+          .steadyMicros = {},
+          .stop         = {}});
+    }
+    OnScopeExit const releaseTarget{[&controlServer] {
+        if(controlServer) { controlServer->clearTarget(); }
+    }};
 
     if(!disableUi) {
         return gui.run(rttReader, buildCommand, host, probe);

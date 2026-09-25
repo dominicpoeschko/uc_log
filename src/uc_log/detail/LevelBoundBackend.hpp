@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <span>
+#include <utility>
 
 namespace uc_log::detail {
 
@@ -51,7 +52,26 @@ struct LevelBoundBackend : RecordGuardOf<Backend> {
     }
 };
 
+template<typename Backend, LogLevel Level>
+concept TakesLevel
+  = requires(std::span<std::byte const> span) { Backend::template write<Level>(span); }
+ || requires { Backend::template initTransfer<Level>(); }
+ || requires { Backend::template finalizeTransfer<Level>(); };
+
+// A backend that ignores the level gets one instantiation for all levels. Every level is asked:
+// a backend may constrain its write<L> (requires L >= warn).
+template<typename Backend,
+         std::size_t... Ls>
+consteval bool takesAnyLevel(std::index_sequence<Ls...>) {
+    return (TakesLevel<Backend, static_cast<LogLevel>(Ls)> || ...);
+}
+
+template<typename Backend>
+concept LevelAware = takesAnyLevel<Backend>(
+  std::make_index_sequence<static_cast<std::size_t>(LogLevel::crit) + 1>{});
+
 template<typename Tag, LogLevel Level>
-using ResolveBackend = LevelBoundBackend<ComBackend<Tag>, Level>;
+using ResolveBackend
+  = LevelBoundBackend<ComBackend<Tag>, LevelAware<ComBackend<Tag>> ? Level : LogLevel::info>;
 
 }   // namespace uc_log::detail

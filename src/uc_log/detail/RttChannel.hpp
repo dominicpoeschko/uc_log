@@ -32,9 +32,9 @@ namespace uc_log { namespace detail {
             buffer.insert(buffer.end(), data.begin(), data.end());
         }
 
-        // drain all complete frames, one printF call per decoded message. haltedRecently
-        // gates the timeout-based resync (a halted target legitimately pauses mid-frame),
-        // the size cap does not. Returns true when at least one message was decoded.
+        // drain all complete frames, one printF(channel, message, catalog id) call per decoded
+        // message. haltedRecently gates the timeout-based resync (a halted target legitimately
+        // pauses mid-frame), the size cap does not. Returns true when at least one message was decoded.
         template<typename StopRequestedF,
                  typename PrintF,
                  typename ErrorMessageF>
@@ -54,14 +54,14 @@ namespace uc_log { namespace detail {
             std::size_t                unparsedTotal{};
             std::span<std::byte const> remaining{buffer};
             while(!stopRequested()) {
-                auto const [output_stream, subrange, unparsed_bytes]
-                  = remote_fmt::parse(remaining, stringConstantsMap, errorMessagef);
-                remaining = subrange;
-                unparsedTotal += unparsed_bytes;
-                if(output_stream) {
+                auto const parsed
+                  = remote_fmt::parseMessage(remaining, stringConstantsMap, errorMessagef);
+                remaining = parsed.remaining;
+                unparsedTotal += parsed.discarded;
+                if(parsed.message) {
                     lastValidRead = Clock::now();
                     gotMessage    = true;
-                    printF(channelId, *output_stream);
+                    printF(channelId, *parsed.message, parsed.catalogId);
                     continue;
                 }
                 break;

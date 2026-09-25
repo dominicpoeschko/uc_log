@@ -1,73 +1,124 @@
 #pragma once
 
 #include <algorithm>
-#include <concepts>
+#include <chrono>
 #include <condition_variable>
+#include <cstddef>
+#include <deque>
 #include <functional>
+#include <map>
 #include <mutex>
-#include <ranges>
-#include <set>
+#include <stop_token>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
-template<typename Entry, typename Projection, typename Function>
+// Merges the log lines of several channels into one time line, handed to `f` from its own thread:
+//  1. a channel's lines come out in the order they were appended;
+//  2. across channels the smallest target time goes first, after waiting `delay`;
+//  3. no line waits longer than `delay + maxHold` (channel clocks are not comparable);
+//  4. the destructor hands out everything still queued.
+template<typename Entry, typename TimeProjection, typename ChannelProjection, typename Function>
 struct TimeDelayedQueue {
 private:
     using Clock = std::chrono::steady_clock;
 
     struct QEntry {
-        Clock::time_point                     entryTime;
-        std::chrono::system_clock::time_point sys_entryTime;
+        Clock::time_point                     arrival;
+        std::chrono::system_clock::time_point sysArrival;
         Entry                                 entry;
     };
 
-    std::vector<QEntry>              q{};
-    [[no_unique_address]] Projection proj;
-    [[no_unique_address]] Function   f;
+    using ChannelKey = std::remove_cvref_t<std::invoke_result_t<ChannelProjection&, Entry const&>>;
 
-    std::condition_variable cv;
-    std::mutex              m;
-    std::jthread            thread{std::bind_front(&TimeDelayedQueue::run, this)};
+    std::map<ChannelKey, std::deque<QEntry>> channels{};
+    [[no_unique_address]] TimeProjection     time;
+    [[no_unique_address]] ChannelProjection  channelOf;
+    [[no_unique_address]] Function           f;
+    std::chrono::milliseconds                delay;
+    std::chrono::milliseconds                maxHold;
+    std::condition_variable_any              cv;
+    std::mutex                               m;
+    std::jthread                             thread;
+
+    // `all` ignores the waiting times
+    std::deque<QEntry>* next(Clock::time_point now,
+                             bool              all) {
+        std::deque<QEntry>* earliestTime    = nullptr;
+        std::deque<QEntry>* earliestArrival = nullptr;
+        auto const          before          = [this](QEntry const& a, QEntry const& b) {
+            auto const ta = std::invoke(time, a.entry);
+            auto const tb = std::invoke(time, b.entry);
+            return ta < tb || (!(tb < ta) && a.arrival < b.arrival);
+        };
+        for(auto& [key, q] : channels) {
+            if(q.empty()) { continue; }
+            if(earliestTime == nullptr || before(q.front(), earliestTime->front())) {
+                earliestTime = &q;
+            }
+            if(earliestArrival == nullptr || q.front().arrival < earliestArrival->front().arrival) {
+                earliestArrival = &q;
+            }
+        }
+        if(earliestTime == nullptr || all) { return earliestTime; }
+        if(earliestTime->front().arrival + delay <= now) { return earliestTime; }
+        if(earliestArrival->front().arrival + delay + maxHold <= now) { return earliestArrival; }
+        return nullptr;
+    }
+
+    void handOut(bool all) {
+        std::vector<QEntry> batch;
+        {
+            std::lock_guard<std::mutex> const lock{m};
+            auto const                        now = Clock::now();
+            while(auto* const q = next(now, all)) {
+                batch.push_back(std::move(q->front()));
+                q->pop_front();
+            }
+        }
+        for(auto const& e : batch) { f(e.sysArrival, e.entry); }
+    }
 
     void run(std::stop_token const& stoken) {
-        std::vector<QEntry> toHandle{};
         while(!stoken.stop_requested()) {
             {
                 std::unique_lock<std::mutex> lock{m};
-                cv.wait_for(lock, std::chrono::milliseconds{50});
-                std::ranges::sort(q, std::ranges::less{}, proj);
-                auto const deadline = Clock::now() - std::chrono::milliseconds{200};
-                auto const pos      = std::ranges::partition_point(
-                  q,
-                  [&](auto const& entryTime) { return entryTime >= deadline; },
-                  [](auto const& entry) { return entry.entryTime; });
-                toHandle.reserve(static_cast<std::size_t>(std::distance(pos, q.end())));
-                toHandle.assign(std::make_move_iterator(pos), std::make_move_iterator(q.end()));
-
-                q.erase(pos, q.end());
+                cv.wait_for(lock, stoken, std::chrono::milliseconds{50}, [] { return false; });
             }
-
-            for(auto const& entry : toHandle) {
-                f(entry.sys_entryTime, entry.entry);
-                if(stoken.stop_requested()) { return; }
-            }
-            toHandle.clear();
+            handOut(false);
         }
     }
 
 public:
-    TimeDelayedQueue(Projection&& projection,
-                     Function&&   func)
-      : proj{std::move(projection)}
-      , f{std::move(func)} {}
+    TimeDelayedQueue(TimeProjection&&          timeProjection,
+                     ChannelProjection&&       channelProjection,
+                     Function&&                func,
+                     std::chrono::milliseconds delay_   = std::chrono::milliseconds{200},
+                     std::chrono::milliseconds maxHold_ = std::chrono::milliseconds{1000})
+      : time{std::move(timeProjection)}
+      , channelOf{std::move(channelProjection)}
+      , f{std::move(func)}
+      , delay{delay_}
+      , maxHold{maxHold_}
+      , thread{std::bind_front(&TimeDelayedQueue::run,
+                               this)} {}
+
+    TimeDelayedQueue(TimeDelayedQueue const&)            = delete;
+    TimeDelayedQueue& operator=(TimeDelayedQueue const&) = delete;
+
+    ~TimeDelayedQueue() {
+        thread.request_stop();
+        thread.join();
+        handOut(true);   // rule 4
+    }
 
     template<typename E>
     void append(E&& entry) {
-        {
-            std::lock_guard<std::mutex> const lock{m};
-            q.emplace_back(Clock::now(), std::chrono::system_clock::now(), std::forward<E>(entry));
-        }
-        cv.notify_one();
+        std::lock_guard<std::mutex> const lock{m};
+        auto const                        key = std::invoke(channelOf, entry);
+        channels[key].push_back(
+          QEntry{Clock::now(), std::chrono::system_clock::now(), Entry(std::forward<E>(entry))});
     }
 };
 
@@ -104,9 +155,14 @@ using entry_type_t = typename function_traits<F>::entry_type;
 }   // namespace detail
 
 // Deduction guide: deduce Entry from Function's second parameter type
-template<typename P,
-         typename F>
-TimeDelayedQueue(P&&,
-                 F&&) -> TimeDelayedQueue<detail::entry_type_t<std::remove_cvref_t<F>>,
-                                          std::remove_cvref_t<P>,
-                                          std::remove_cvref_t<F>>;
+template<typename T,
+         typename C,
+         typename F,
+         typename... Durations>
+TimeDelayedQueue(T&&,
+                 C&&,
+                 F&&,
+                 Durations...) -> TimeDelayedQueue<detail::entry_type_t<std::remove_cvref_t<F>>,
+                                                   std::remove_cvref_t<T>,
+                                                   std::remove_cvref_t<C>,
+                                                   std::remove_cvref_t<F>>;

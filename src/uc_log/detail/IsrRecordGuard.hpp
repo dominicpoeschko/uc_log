@@ -9,27 +9,24 @@ namespace uc_log::detail {
 // the preempted one's. uc_log::detail::Log holds this around a record when the backend names
 // it as RecordGuard (IsrPolicy::MaskedRecord). NMI and HardFault are not masked by PRIMASK.
 // The cost is interrupt latency: every other interrupt waits for one ISR log record.
+// Branch-free on purpose: a flag member made clang emit every call site twice.
+// MRS/MSR: RP2040 data sheet 2.4.3.3.
 struct IsrRecordGuard {
     IsrRecordGuard() {
         std::uint32_t ipsr{};
         asm volatile("mrs %0, ipsr" : "=r"(ipsr));
-        if(ipsr == 0) { return; }
-        std::uint32_t primask{};
-        asm volatile("mrs %0, primask" : "=r"(primask)::"memory");
-        if(primask != 0) { return; }   // already masked: the caller unmasks
-        asm("cpsid i" : : : "memory");
-        masked_ = true;
+        asm volatile("mrs %0, primask" : "=r"(saved_)::"memory");
+        std::uint32_t const mask = saved_ | static_cast<std::uint32_t>(ipsr != 0);
+        asm volatile("msr primask, %0" : : "r"(mask) : "memory");
     }
 
-    ~IsrRecordGuard() {
-        if(masked_) { asm("cpsie i" : : : "memory"); }
-    }
+    ~IsrRecordGuard() { asm volatile("msr primask, %0" : : "r"(saved_) : "memory"); }
 
     IsrRecordGuard(IsrRecordGuard const&)            = delete;
     IsrRecordGuard& operator=(IsrRecordGuard const&) = delete;
 
 private:
-    bool masked_{false};
+    std::uint32_t saved_;
 };
 
 }   // namespace uc_log::detail

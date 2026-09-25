@@ -6,3 +6,11 @@ compile_commands.json
 .vscode
 .cache
 justfile
+
+# libFuzzer logs and findings, written to the working directory (tests/fuzz/README.md)
+/fuzz-*.log
+/crash-*
+/leak-*
+/timeout-*
+/oom-*
+__pycache__/

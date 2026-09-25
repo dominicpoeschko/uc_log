@@ -11,6 +11,7 @@ namespace uc_log { namespace detail {
     struct DuplexChannelInfo {
         std::size_t   ordinal{};
         std::string   name;
+        std::string   socketPath;   // not empty: a unix socket, the port is not in use
         std::uint16_t port{};
         TcpPortStatus status{TcpPortStatus::NotStarted};
         bool          enabled{true};

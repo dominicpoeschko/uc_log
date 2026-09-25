@@ -29,9 +29,12 @@ jobs:
 
         steps:
             - name: Set up C++ environment
+              # multilib: the 32-bit glibc and libgcc uc_log_test_rtt_ring links with -m32
+              # (the libc++ jobs skip it, there is no 32-bit libc++ package)
               run: |
+                sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
                 pacman -Syu --noconfirm
-                pacman -S --noconfirm git cmake base-devel ${{ matrix.compiler.cc == 'clang' && 'clang' || '' }} ${{ matrix.compiler.stdlib == 'libc++' && 'libc++ lld' || '' }}
+                pacman -S --noconfirm git cmake base-devel python lib32-glibc lib32-gcc-libs ${{ matrix.compiler.cc == 'clang' && 'clang llvm' || '' }} ${{ matrix.compiler.stdlib == 'libc++' && 'libc++ lld' || '' }}
 
             - name: Checkout repository
               uses: actions/checkout@v5

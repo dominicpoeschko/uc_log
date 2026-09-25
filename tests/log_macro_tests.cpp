@@ -2,10 +2,15 @@
 // remote_fmt::parse, check the result as a LogEntry - the printer's path minus the RTT transport.
 // Catches disagreements between the header the macros assemble, the wire encoding and the parser,
 // which tests on LogEntry alone cannot. USE_UC_LOG and REMOTE_FMT_USE_CATALOG come from the target.
+#include "remote_fmt/catalog_helpers.hpp"
 #include "remote_fmt/parser.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 #include "uc_log/metric_utils.hpp"
 #include "uc_log/uc_log.hpp"
+
+#if REMOTE_FMT_USE_MP_UNITS
+    #include <mp-units/systems/si.h>
+#endif
 
 #include <chrono>
 #include <cstddef>
@@ -73,6 +78,22 @@ struct LogClock<Tag::User> {
 
 }   // namespace uc_log
 
+// A backend counts as level-aware whatever level its write<> accepts.
+namespace level_aware {
+struct Plain {
+    static void write(std::span<std::byte const>) {}
+};
+
+struct WarnAndUp {
+    template<uc_log::LogLevel L>
+        requires(L >= uc_log::LogLevel::warn)
+    static void write(std::span<std::byte const>) {}
+};
+
+static_assert(!uc_log::detail::LevelAware<Plain>);
+static_assert(uc_log::detail::LevelAware<WarnAndUp>);
+}   // namespace level_aware
+
 // Reflectable types to log. At global scope on purpose: glaze's type_name, which the @TYPENAME
 // marker carries, includes the enclosing namespace, and the expectations below spell it out.
 enum class Color : std::uint8_t { red, green, blue };
@@ -114,24 +135,44 @@ struct __attribute__((packed)) LineCodingLike {
 
 namespace {
 
+// This binary's own catalog, written next to it by the post-build step.
 std::unordered_map<std::uint16_t,
                    std::string> const&
-emptyCatalog() {
+catalog() {
     // Leaked on purpose: avoids the global-constructor and exit-time-destructor warnings.
-    static auto const& catalog = *new std::unordered_map<std::uint16_t, std::string>{};
-    return catalog;
+    static auto const& map = *new std::unordered_map<std::uint16_t, std::string>{[] {
+        auto result = remote_fmt::parseStringConstantsFromJsonFile(UC_LOG_TEST_CATALOG_JSON);
+        if(!result) {
+            std::printf("FAIL: %s\n", result.error().c_str());
+            return std::unordered_map<std::uint16_t, std::string>{};
+        }
+        return *std::move(result);
+    }()};
+    return map;
+}
+
+uc_log::detail::SignatureTable const& signatures() {
+    static auto const& table = *new uc_log::detail::SignatureTable{[] {
+        auto result = uc_log::detail::SignatureTable::fromJsonFile(UC_LOG_TEST_CATALOG_JSON);
+        if(!result) {
+            std::printf("FAIL: %s\n", result.error().c_str());
+            return uc_log::detail::SignatureTable{};
+        }
+        return *std::move(result);
+    }()};
+    return table;
 }
 
 // Decodes everything the macros wrote since the last call and hands back the parsed entry.
 std::optional<uc_log::detail::LogEntry> takeEntry() {
-    auto const [message, remaining, discarded]
-      = remote_fmt::parse(std::span{captured()}, emptyCatalog(), [](std::string_view error) {
+    auto const parsed
+      = remote_fmt::parseMessage(std::span{captured()}, catalog(), [](std::string_view error) {
             std::printf("parser error: %.*s\n", static_cast<int>(error.size()), error.data());
         });
-    bool const clean = remaining.empty() && discarded == 0;
+    bool const clean = parsed.remaining.empty() && parsed.discarded == 0;
     captured().clear();
-    if(!message || !clean) { return std::nullopt; }
-    return uc_log::detail::LogEntry{0, *message};
+    if(!parsed.message || !clean) { return std::nullopt; }
+    return uc_log::detail::LogEntry{0, *parsed.message, signatures().find(parsed.catalogId)};
 }
 
 // Carries the log statement's own __LINE__ back to the check.
@@ -278,6 +319,19 @@ std::optional<uc_log::detail::LogEntry> logMetric() {
     return takeEntry();
 }
 
+#if REMOTE_FMT_USE_MP_UNITS
+std::optional<uc_log::detail::LogEntry> logQuantityMetric() {
+    using namespace sc::literals;
+    namespace si = mp_units::si;
+    UC_LOG_I("t {} rate {} water {}",
+             uc_log::metric<"temp"_sc, "board"_sc>(mp_units::delta<si::milli<si::kelvin>>(23500)),
+             uc_log::metric<"rate"_sc, "board"_sc>(mp_units::delta<si::milli<si::kelvin>>(-7)
+                                                   / (1 * si::second)),
+             uc_log::metric<"water"_sc>(mp_units::delta<si::deci<si::degree_Celsius>>(385)));
+    return takeEntry();
+}
+#endif
+
 template<uc_log::LogLevel Level>
 std::optional<uc_log::detail::LogEntry> logAtLevel();
 
@@ -330,7 +384,60 @@ void checkLevel(char const* what) {
     CHECK(entry->logMsg == "lvl", what);
 }
 
+// The firmware's filter derives the module from __PRETTY_FUNCTION__, the printer from the
+// demangled tag: the two must agree.
+std::string targetModule(std::string_view signature) {
+    return std::string{
+      uc_log::detail::moduleOf(uc_log::detail::scanSignature(signature), signature).view()};
+}
+
+namespace water_mix::control {
+    template<typename T>
+    struct Regulator {
+        static std::optional<uc_log::detail::LogEntry> step(T value) {
+            UC_LOG_I("step {}", value);
+            return takeEntry();
+        }
+
+        static std::string module() { return targetModule(__PRETTY_FUNCTION__); }
+    };
+}   // namespace water_mix::control
+
+namespace usb_driver {
+    UC_LOG_SCOPE_MODULE("usb");
+
+    std::optional<uc_log::detail::LogEntry> logInModule() {
+        UC_LOG_W("stall on ep {}", 3);
+        return takeEntry();
+    }
+
+    // an inner scope's module replaces the outer one; the other settings combine with it
+    std::optional<uc_log::detail::LogEntry> logInInnerModule() {
+        UC_LOG_ENV(UC_LOG_MODULE("usb/ep0"), ::uc_log::setting::MinLevel<uc_log::LogLevel::info>);
+        UC_LOG_I("setup {}", 8);
+        return takeEntry();
+    }
+}   // namespace usb_driver
+
 }   // namespace
+
+// clang glues the `*` of `static const char *valve::pointers::Table::name()` to the scope.
+namespace valve::pointers {
+struct Table {
+    static char const* name() {
+        UC_LOG_I("name");
+        return "valve";
+    }
+
+    static int& counter() {
+        static int value{};
+        UC_LOG_I("counter");
+        return value;
+    }
+
+    static std::string module() { return targetModule(__PRETTY_FUNCTION__); }
+};
+}   // namespace valve::pointers
 
 int main() {
     // full header round trip: file, line, level, uc time and function name all survive
@@ -348,6 +455,60 @@ int main() {
             CHECK(e.ucTime.time == LogTime, "uc time");
             CHECK_EQ(e.functionName, std::string{"logPlainMessage"}, "function name");
             CHECK_EQ(e.logMsg, std::string{"hello 42 world"}, "message");
+        }
+    }
+
+    {
+        auto const e = usb_driver::logInModule();
+        CHECK(e && e->parsedOk, "a module scope's line parses");
+        if(e) {
+            CHECK_EQ(e->module, std::string{"usb"}, "module");
+            CHECK_EQ(e->functionName,
+                     std::string{"usb_driver::logInModule"},
+                     "function after the module");
+            CHECK(e->logLevel == uc_log::LogLevel::warn, "level with a module");
+            CHECK_EQ(e->logMsg, std::string{"stall on ep 3"}, "message with a module");
+        }
+        auto const inner = usb_driver::logInInnerModule();
+        CHECK(inner && inner->parsedOk, "inner module parses");
+        if(inner) {
+            CHECK_EQ(inner->module, std::string{"usb/ep0"}, "inner module replaces outer");
+        }
+
+        auto const plain = logPlainMessage();
+        CHECK(plain && plain->entry.module.empty(),
+              "no module in an anonymous namespace at the top (nothing to derive)");
+
+        auto const derived = water_mix::control::Regulator<int>::step(5);
+        CHECK(derived && derived->parsedOk, "a derived module's line parses");
+        if(derived) {
+            CHECK_EQ(derived->module, std::string{"water_mix.control.regulator"}, "derived module");
+            CHECK_EQ(derived->module,
+                     water_mix::control::Regulator<int>::module(),
+                     "the printer's module is the filter's");
+            // the demangled tag: the class template's arguments with either compiler
+            CHECK_EQ(derived->functionName,
+                     std::string{"Regulator<int>::step"},
+                     "function name: the class with its template arguments");
+            CHECK_EQ(derived->logMsg, std::string{"step 5"}, "message with a derived module");
+        }
+
+        (void)valve::pointers::Table::name();
+        auto const pointer = takeEntry();
+        CHECK(pointer && pointer->parsedOk, "a pointer-returning function's line parses");
+        if(pointer) {
+            CHECK_EQ(pointer->module, std::string{"valve.pointers.table"}, "module under `T*`");
+            CHECK_EQ(pointer->module,
+                     valve::pointers::Table::module(),
+                     "the filter's module under `T*`");
+            CHECK_EQ(pointer->functionName, std::string{"Table::name"}, "function under `T*`");
+        }
+        (void)valve::pointers::Table::counter();
+        auto const reference = takeEntry();
+        CHECK(reference && reference->parsedOk, "a reference-returning function's line parses");
+        if(reference) {
+            CHECK_EQ(reference->module, std::string{"valve.pointers.table"}, "module under `T&`");
+            CHECK_EQ(reference->functionName, std::string{"Table::counter"}, "function under `T&`");
         }
     }
 
@@ -533,6 +694,49 @@ int main() {
                 CHECK(metrics[0].second.value == 42.0, "metric value");
                 CHECK(metrics[0].second.level == uc_log::LogLevel::info, "metric level");
                 CHECK(metrics[0].second.uc_time.time == LogTime, "metric uc time");
+            }
+        }
+    }
+
+#if REMOTE_FMT_USE_MP_UNITS
+    {
+        auto const entry = logQuantityMetric();
+        if(!entry) {
+            std::printf("FAIL: quantity metric did not round trip\n");
+            ++failures;
+        } else {
+            CHECK(entry->parsedOk, "quantity metric entry parses");
+            // cataloged, so the unit is the quantity's own UTF-8 symbol (inline it is ASCII: ddegC)
+            CHECK_EQ(entry->logMsg,
+                     std::string{"t @METRIC(board::temp[mK]=23500) rate "
+                                 "@METRIC(board::rate[mK/s]=-7) water @METRIC(::water[d℃]=385)"},
+                     "quantity metric message: the unit is the quantity's");
+            auto const metrics
+              = uc_log::extractMetrics(std::chrono::system_clock::time_point{}, *entry);
+            CHECK(metrics.size() == 3, "three quantity metrics");
+            if(metrics.size() == 3) {
+                CHECK_EQ(metrics[1].first.unit, std::string{"mK/s"}, "derived unit");
+                CHECK(metrics[1].second.value == -7.0, "negative value");
+            }
+        }
+    }
+#else
+    std::printf("note: built without mp-units, the quantity metric case is skipped\n");
+#endif
+    {
+        // a unit may hold a parenthesis; the value ends at the one behind the '='
+        std::string_view const msg{"c @METRIC(a::heat[J/(kg K)]=4182) and @METRIC(a::plain=3)"};
+        auto const             first = uc_log::nextMetricMarker(msg, 0);
+        CHECK(first.has_value(), "marker with a parenthesis in its unit");
+        if(first) {
+            CHECK_EQ(std::string{first->unit}, std::string{"J/(kg K)"}, "unit with parenthesis");
+            CHECK_EQ(std::string{first->value}, std::string{"4182"}, "its value");
+            auto const second = uc_log::nextMetricMarker(msg, first->end);
+            CHECK(second.has_value(), "marker without a unit");
+            if(second) {
+                CHECK_EQ(std::string{second->name}, std::string{"plain"}, "its name");
+                CHECK_EQ(std::string{second->value}, std::string{"3"}, "its value");
+                CHECK(second->end == msg.size(), "ends behind the parenthesis");
             }
         }
     }

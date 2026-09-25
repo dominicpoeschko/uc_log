@@ -131,6 +131,15 @@ constexpr std::array functionNames{"main"sv, "print"sv, "drive"sv, "assert"sv};
 
 constexpr std::array functionLines{20, 50, 129, 10023};
 
+// "" = a line outside every module scope (UC_LOG_SCOPE_MODULE)
+constexpr std::array moduleNames{""sv,
+                                 "i2c"sv,
+                                 "i2c.bus"sv,
+                                 "i2c.scanner"sv,
+                                 "usb.cdc.mixin"sv,
+                                 "usb.device"sv,
+                                 "watermix.regulator"sv};
+
 template<typename Gen>
 void updateMessage(uc_log::detail::LogEntry& e,
                    Gen&                      gen) {
@@ -142,6 +151,8 @@ void updateMessage(uc_log::detail::LogEntry& e,
     std::ranges::sample(logMessages, &e.logMsg, 1, gen);
     std::ranges::sample(functionNames, &e.functionName, 1, gen);
     std::ranges::sample(functionLines, &e.line, 1, gen);
+    e.module
+      = moduleNames[std::uniform_int_distribution<std::size_t>{0, moduleNames.size() - 1}(gen)];
     e.parsedOk = true;   // fabricated entries are complete, not parser bailouts
 }
 
@@ -184,6 +195,7 @@ int main() {
         uc_log::detail::LogEntry e{0, ""};
         e.ucTime.time = std::chrono::nanoseconds{0};
         std::mt19937 gen{std::random_device{}()};
+        std::size_t  loops{};
 
         // GUI_TEST_PRELOAD=1000000 bulk-loads entries as fast as possible to test
         // filter/scroll performance on large logs.
@@ -230,6 +242,13 @@ int main() {
                 gui.statusMessage(msg);
                 gui.errorMessage(msg);
                 gui.fatalError(msg);
+            }
+
+            // GUI_TEST_FORMAT_ERRORS=1: a format error every 2 s
+            if(std::getenv("GUI_TEST_FORMAT_ERRORS") != nullptr && ++loops % 20 == 0) {
+                gui.errorMessage(
+                  "bad format for replacement field \"{:#06x}\": invalid format "
+                  "specifier (gui_test)");
             }
 
             std::this_thread::sleep_for(addTime);

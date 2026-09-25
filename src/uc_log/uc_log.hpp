@@ -2,6 +2,8 @@
 
 #include "ComBackend.hpp"
 #include "LogClock.hpp"
+#include "LogEnv.hpp"
+#include "LogFilter.hpp"
 #include "LogLevel.hpp"
 #include "Tag.hpp"
 #include "detail/LevelBoundBackend.hpp"
@@ -104,15 +106,28 @@ namespace uc_log { namespace detail {
 
     template<typename... Args>
     struct Log<std::tuple<Args...>> {
+        // The format with the metrics' markers put in.
+        template<typename Fmt>
+        using Final
+          = decltype(injectMetricFmtString(Fmt{}, std::declval<LogArgument_t<Args>>()...));
+
+        // `site` is a value, not the site's lambda type: that would copy this function per
+        // instantiation of the caller.
         template<typename ComBackend,
                  char... chars>
-        static constexpr void log(sc::StringConstant<chars...> fmt,
+        static constexpr void log(remote_fmt::catalog_id       site,
+                                  sc::StringConstant<chars...> fmt,
                                   LogArgument_t<Args>... args) {
             // Held for the whole record, not each write() it is made of; empty unless the
             // backend names one (detail/LevelBoundBackend.hpp).
             [[maybe_unused]] typename ComBackend::RecordGuard const guard{};
-            remote_fmt::Printer<ComBackend>::staticPrint(injectMetricFmtString(fmt, args...),
-                                                         normalizeLogArgument(args)...);
+            if constexpr(remote_fmt::use_catalog) {
+                remote_fmt::Printer<ComBackend>::staticPrint(remote_fmt::SiteId{site},
+                                                             fmt,
+                                                             normalizeLogArgument(args)...);
+            } else {
+                remote_fmt::Printer<ComBackend>::staticPrint(fmt, normalizeLogArgument(args)...);
+            }
         }
     };
 
@@ -128,51 +143,112 @@ namespace uc_log { namespace detail {
 #endif
 
 namespace uc_log {
-    inline constexpr LogLevel minLevel = LogLevel::UC_LOG_MIN_LEVEL; }   // namespace uc_log
+inline constexpr LogLevel minLevel = LogLevel::UC_LOG_MIN_LEVEL;
+
+namespace detail {
+    // UC_LOG_MIN_LEVEL or the filter file's `*`, whichever is higher (LogFilter.hpp).
+    consteval std::uint8_t globalFloor() {
+        auto const level = static_cast<std::uint8_t>(minLevel);
+        return filterTable.global > level ? filterTable.global : level;
+    }
+
+    // A module rule of the filter file replaces the scope's floor. `signature` is read only when
+    // there are module rules (Signature.hpp scanSignature).
+    template<LogLevel Level,
+             typename Env>
+    consteval bool lineEnabled(std::string_view signature) {
+        auto floor = static_cast<std::uint8_t>(scopeMinLevel(Env{}));
+        if constexpr(filterTable.hasModuleRules()) {
+            using Name = EnvModule_t<Env>;
+            int rule   = -1;
+            if constexpr(!std::is_same_v<Name, NoModule>) {
+                rule = filterTable.levelFor(Name::stringView);
+            } else {
+                auto const module = moduleOf(scanSignature(signature), signature);
+                rule              = filterTable.levelFor(module.view());
+            }
+            if(rule >= 0) { floor = static_cast<std::uint8_t>(rule); }
+        }
+        auto const global = globalFloor();
+        return static_cast<std::uint8_t>(Level) >= (floor > global ? floor : global);
+    }
+
+    // Time goes out as a tick count, the header says "<count>[num/den]s".
+    template<typename Tag>
+    using LogTimePoint = decltype(LogClock<Tag>::now());
+
+    template<typename Tag>
+    consteval auto timeSuffix() {
+        using namespace ::sc::literals;
+        using Period = typename LogTimePoint<Tag>::period;
+        return ::sc::detail::format<static_cast<std::uint64_t>(Period::num),
+                                    static_cast<std::uint64_t>(Period::den)>("[{}/{}]s"_sc);
+    }
+
+    // now() is a time_point or a duration
+    template<typename Time>
+    constexpr auto ticks(Time const time) {
+        static_assert(std::is_integral_v<typename Time::rep>,
+                      "LogClock needs an integral tick count");
+        if constexpr(requires { time.time_since_epoch(); }) {
+            return time.time_since_epoch().count();
+        } else {
+            return time.count();
+        }
+    }
+}   // namespace detail
+}   // namespace uc_log
 
 #ifdef USE_UC_LOG
-    // Shared assembly of the compile-time header string; expects
-    // UC_LOG_DO_NOT_USE_FUNCTION_NAME and the sc literal namespaces in scope.
-    //
-    // Every name this macro introduces carries the UC_LOG_DO_NOT_USE_ prefix, because a macro
-    // expands into the caller's scope and anything shorter will eventually shadow one of their
-    // locals. The lambda parameters below were `c`, which shadowed a perfectly reasonable
-    // `auto& c` at a call site and produced -Wshadow warnings pointing into this header
-    // rather than at anything the caller could see was wrong.
-    #define UC_LOG_DETAIL_FMT(level, line, filename, fmt)                              \
-        "(\""_sc + SC_LIFT(::uc_log::detail::FileName{filename}) + "\", "_sc           \
-          + ::sc::detail::format<static_cast<std::uint32_t>(line),                     \
-                                 static_cast<std::uint8_t>(level)>("{}, {}"_sc)        \
-          + ", {}, \"\"\""_sc                                                          \
-          + ::sc::escape(                                                              \
-            SC_LIFT(UC_LOG_DO_NOT_USE_FUNCTION_NAME),                                  \
-            [](auto UC_LOG_DO_NOT_USE_CHAR) {                                          \
-                return UC_LOG_DO_NOT_USE_CHAR == '{' || UC_LOG_DO_NOT_USE_CHAR == '}'; \
-            },                                                                         \
-            [](auto UC_LOG_DO_NOT_USE_CHAR) { return UC_LOG_DO_NOT_USE_CHAR; })        \
-          + "\"\"\")"_sc + SC_LIFT(fmt)
+    // Shared assembly of the compile-time header string; expects the UC_LOG_DO_NOT_USE_ names of
+    // UC_LOG_IMPL and the sc literal namespaces in scope. Names the macros introduce carry the
+    // UC_LOG_DO_NOT_USE_ prefix: they expand into the caller's scope (-Wshadow).
+    #define UC_LOG_DETAIL_FMT(level, line, filename, fmt)                                        \
+        "(\""_sc + SC_LIFT(::uc_log::detail::FileName{filename}) + "\", "_sc                     \
+          + ::sc::detail::format<static_cast<std::uint32_t>(line),                               \
+                                 static_cast<std::uint8_t>(level)>("{}, {}"_sc)                  \
+          + ", {}"_sc + ::uc_log::detail::timeSuffix<::uc_log::detail::EnvTag_t<uc_log_env_t>>() \
+          + ", "_sc + ::uc_log::detail::headerTail<uc_log_env_t>() + "\"\"\")"_sc + SC_LIFT(fmt)
+
+    // Only the filter file's module rules need the signature.
+    #ifdef UC_LOG_HAS_FILTER_FILE
+        #define UC_LOG_DETAIL_FILTER_SIGNATURE                                     \
+            std::string_view{__PRETTY_FUNCTION__, sizeof(__PRETTY_FUNCTION__) - 1}
+    #else
+        #define UC_LOG_DETAIL_FILTER_SIGNATURE \
+            std::string_view {}
+    #endif
 
     // The argument list appears twice: unevaluated to harvest the types, then as the real
-    // call; nothing is evaluated twice.
-    #define UC_LOG_IMPL(level, line, filename, fmt, ...)                                           \
-        do {                                                                                       \
-            if constexpr(static_cast<::uc_log::LogLevel>(level) >= ::uc_log::minLevel) {           \
-                if(!std::is_constant_evaluated()) {                                                \
-                    constexpr auto UC_LOG_DO_NOT_USE_FUNCTION_NAME = __FUNCTION__;                 \
-                    using namespace ::remote_fmt::detail;                                          \
-                    using namespace ::sc::literals;                                                \
-                    ::uc_log::detail::Log<decltype(::uc_log::detail::logArgumentTypes(             \
-                      ::uc_log::detail::LogArgumentsPreferred{},                                   \
-                      ::uc_log::LogClock<::uc_log::Tag::User>::now() __VA_OPT__(, )                \
-                        __VA_ARGS__))>::                                                           \
-                      template log<                                                                \
-                        ::uc_log::detail::ResolveBackend<::uc_log::Tag::User,                      \
-                                                         static_cast<::uc_log::LogLevel>(level)>>( \
-                        UC_LOG_DETAIL_FMT(level, line, filename, fmt),                             \
-                        ::uc_log::LogClock<::uc_log::Tag::User>::now() __VA_OPT__(, )              \
-                          __VA_ARGS__);                                                            \
-                }                                                                                  \
-            }                                                                                      \
+    // call; nothing is evaluated twice. uc_log_env_t is unqualified on purpose (LogEnv.hpp).
+    #define UC_LOG_IMPL(level, line, filename, fmt, ...)                                         \
+        do {                                                                                     \
+            if constexpr(::uc_log::detail::lineEnabled<static_cast<::uc_log::LogLevel>(level),   \
+                                                       uc_log_env_t>(                            \
+                           UC_LOG_DETAIL_FILTER_SIGNATURE))                                      \
+            {                                                                                    \
+                if(!std::is_constant_evaluated()) {                                              \
+                    using namespace ::remote_fmt::detail;                                        \
+                    using namespace ::sc::literals;                                              \
+                    using UC_LOG_DO_NOT_USE_LOG                                                  \
+                      = ::uc_log::detail::Log<decltype(::uc_log::detail::logArgumentTypes(       \
+                        ::uc_log::detail::LogArgumentsPreferred{},                               \
+                        ::uc_log::detail::ticks(                                                 \
+                          ::uc_log::LogClock<::uc_log::detail::EnvTag_t<uc_log_env_t>>::now())   \
+                          __VA_OPT__(, ) __VA_ARGS__))>;                                         \
+                    constexpr typename UC_LOG_DO_NOT_USE_LOG::template Final<                    \
+                      decltype(UC_LOG_DETAIL_FMT(level, line, filename, fmt))>                   \
+                      UC_LOG_DO_NOT_USE_FMT{};                                                   \
+                    UC_LOG_DO_NOT_USE_LOG::template log<                                         \
+                      ::uc_log::detail::ResolveBackend<::uc_log::detail::EnvTag_t<uc_log_env_t>, \
+                                                       static_cast<::uc_log::LogLevel>(level)>>( \
+                      REMOTE_FMT_SITE()(UC_LOG_DO_NOT_USE_FMT),                                  \
+                      UC_LOG_DO_NOT_USE_FMT,                                                     \
+                      ::uc_log::detail::ticks(                                                   \
+                        ::uc_log::LogClock<::uc_log::detail::EnvTag_t<uc_log_env_t>>::now())     \
+                        __VA_OPT__(, ) __VA_ARGS__);                                             \
+                }                                                                                \
+            }                                                                                    \
         } while(false)
 #else
     // Same arguments and literal scope as the real call, never evaluated (detail::touch).

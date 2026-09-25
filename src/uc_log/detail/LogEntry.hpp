@@ -1,6 +1,7 @@
 #pragma once
 
 #include "uc_log/LogLevel.hpp"
+#include "uc_log/detail/SignatureTable.hpp"
 
 #include <algorithm>
 #include <array>
@@ -99,7 +100,11 @@ namespace uc_log { namespace detail {
         std::size_t      line{};
         uc_log::LogLevel logLevel{};
         std::string      functionName;
-        std::string      logMsg;
+        // empty for a global function without an explicit module
+        std::string module;
+        // the call site's demangled signature (SignatureTable); empty when the table does not know it
+        std::string signature;
+        std::string logMsg;
         // false when the header did not parse: such entries carry defaults (trace, time 0,
         // no location) and must be rendered/counted as unparsed, not trusted
         bool parsedOk{true};
@@ -201,8 +206,10 @@ namespace uc_log { namespace detail {
             return std::nullopt;
         }
 
-        LogEntry(std::size_t      channel_,
-                 std::string_view msg)
+        // without `site` (SignatureTable) the function is "?"
+        LogEntry(std::size_t          channel_,
+                 std::string_view     msg,
+                 SignatureInfo const* site = nullptr)
           : channel{channel_}
           , parsedOk{false} {
             auto const pos = msg.find(R"("""))");
@@ -233,8 +240,7 @@ namespace uc_log { namespace detail {
             contextMsg.remove_prefix(lineSv.size());
             if(!contextMsg.starts_with(", ")) { return; }
             contextMsg.remove_prefix(2);
-            // uint32 matches what the producer emits; uint16 used to discard the whole
-            // header for files with more than 65535 lines
+            // uint32, as the producer emits it
             std::uint32_t line_{};
             {
                 auto const [ptr, ec] = std::from_chars(lineSv.begin(), lineSv.end(), line_);
@@ -250,6 +256,7 @@ namespace uc_log { namespace detail {
                 auto const [ptr, ec]
                   = std::from_chars(logLevelSv.begin(), logLevelSv.end(), logLevel_);
                 if(ec != std::errc{} || ptr != logLevelSv.end()) { return; }
+                if(logLevel_ > static_cast<std::uint8_t>(uc_log::LogLevel::crit)) { return; }
             }
 
             auto const timeSv  = contextMsg.substr(0, contextMsg.find_first_of(','));
@@ -257,16 +264,32 @@ namespace uc_log { namespace detail {
             if(!oUcTime) { return; }
 
             contextMsg.remove_prefix(timeSv.size());
-            if(!contextMsg.starts_with(R"(, """)")) { return; }
-            contextMsg.remove_prefix(5);
-            auto const functionNameSv = contextMsg;
+            // optional `, "module"` before the empty `, """`; LogEnv.hpp forbids quotes in it
+            std::string_view moduleSv{};
+            if(!contextMsg.starts_with(R"(, """)")) {
+                if(!contextMsg.starts_with(R"(, ")")) { return; }
+                contextMsg.remove_prefix(3);
+                auto const end = contextMsg.find('"');
+                if(end == 0 || end == std::string_view::npos) { return; }
+                moduleSv = contextMsg.substr(0, end);
+                contextMsg.remove_prefix(end + 1);
+                if(!contextMsg.starts_with(R"(, """)")) { return; }
+            }
 
-            ucTime       = *oUcTime;
-            fileName     = fileNameSv;
-            line         = line_;
-            logLevel     = static_cast<uc_log::LogLevel>(logLevel_);
-            functionName = functionNameSv;
-            parsedOk     = true;
+            ucTime   = *oUcTime;
+            fileName = fileNameSv;
+            line     = line_;
+            logLevel = static_cast<uc_log::LogLevel>(logLevel_);
+            module   = moduleSv;
+            parsedOk = true;
+
+            if(site == nullptr) {
+                functionName = "?";
+                return;
+            }
+            functionName = site->function;
+            signature    = site->signature;
+            if(module.empty()) { module = site->module; }
         }
     };
 }}   // namespace uc_log::detail

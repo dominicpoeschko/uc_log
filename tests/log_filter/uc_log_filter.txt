@@ -1,0 +1,7 @@
+# the filter file of uc_log_test_log_filter (LogFilter.hpp)
+* = debug                # the global floor: no trace
+
+quiet = off              # quiet and everything below it
+quiet.loud = warn        # except quiet.loud, from warn on
+chatty = trace           # below the global floor: stays at debug
+usb = error              # an explicit UC_LOG_SCOPE_MODULE("usb")

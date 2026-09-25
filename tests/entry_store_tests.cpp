@@ -426,6 +426,62 @@ int main(int    argc,
         CHECK(ok, "filtered view has no trimmed groups");
     }
 
+    {
+        GuiEntryStore mods;
+        mods.requestRedraw = []() {};
+        auto add           = [&](std::string const& module, std::string const& msg) {
+            auto e   = makeEntry(0, LogLevel::info, "m.cpp", 1, 0.0, msg);
+            e.module = module;
+            mods.addEntry(std::chrono::system_clock::now(), e);
+        };
+        auto shown = [&]() {
+            std::lock_guard<std::mutex> const lock{mods.mutex};
+            std::vector<std::string>          v;
+            for(std::size_t i = 0; i < mods.filteredEntries.size(); ++i) {
+                v.emplace_back(mods.filteredEntries[i].lineText());
+            }
+            return v;
+        };
+        add("i2c", "i");
+        add("i2c.bus", "ib");
+        add("i2cx", "x");   // shares the letters, not the path
+        add("usb.cdc", "uc");
+        add("", "plain");
+
+        FilterState f;
+        f.excludedModules = {"i2c"};
+        mods.setFilterState(f);
+        quiesce(mods);
+        CHECK((shown() == std::vector<std::string>{"x", "uc", "plain"}),
+              "i2c hides i2c and i2c.bus only");
+
+        add("i2c.scanner", "is");
+        add("usb.device", "ud");
+        CHECK((shown() == std::vector<std::string>{"x", "uc", "plain", "ud"}),
+              "a new module is judged by its parents");
+
+        f.excludedModules = {"usb.cdc"};
+        mods.setFilterState(f);
+        quiesce(mods);
+        CHECK((shown() == std::vector<std::string>{"i", "ib", "x", "plain", "is", "ud"}),
+              "a leaf hidden, its sibling shown");
+
+        mods.setFilterState(FilterState{});
+        quiesce(mods);
+        CHECK(shown().size() == 7, "no module filter: everything");
+
+        GuiEntryStore::Mirror m;
+        mods.refreshMirror(m);
+        CHECK((m.moduleNamesById
+               == std::vector<
+                 std::string>{"i2c", "i2c.bus", "i2cx", "usb.cdc", "i2c.scanner", "usb.device"}),
+              "the mirror lists every module seen, by id (a filter's names are not modules)");
+        CHECK(m.moduleNameOf(uc_log::FTXUIGui::NoModuleId).empty(), "no module: empty name");
+        CHECK(moduleIsUnder("i2c.bus", "i2c") && moduleIsUnder("i2c", "i2c")
+                && !moduleIsUnder("i2cx", "i2c") && !moduleIsUnder("i2c", "i2c.bus"),
+              "prefix on '.' boundaries");
+    }
+
     if(failures == 0) {
         std::printf("ALL OK\n");
         return 0;

@@ -12,6 +12,8 @@ struct Theme {
 
         static constexpr ftxui::Color functionName() { return ftxui::Color::Blue; }
 
+        static constexpr ftxui::Color module() { return ftxui::Color::Yellow; }
+
         static constexpr ftxui::Color normal() { return ftxui::Color::Default; }
 
         static constexpr ftxui::Color separator() { return ftxui::Color::GrayDark; }

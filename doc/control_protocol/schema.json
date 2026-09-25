@@ -1,0 +1,704 @@
+{
+  "protocol": 1,
+  "request": {
+    "type": "object",
+    "$defs": {
+      "std::vector<std::string>": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "uc_log::control::Piece": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/uint32_t"
+          },
+          "size": {
+            "$ref": "#/$defs/uint32_t"
+          }
+        },
+        "additionalProperties": false
+      },
+      "uint32_t": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 4294967295
+      },
+      "uint64_t": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 18446744073709551615
+      }
+    },
+    "oneOf": [
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "ping"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "ping"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "status"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "status"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "messages"
+          },
+          "count": {
+            "$ref": "#/$defs/uint32_t"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "messages"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "read"
+          },
+          "pieces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/uc_log::control::Piece"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "read"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "wait"
+          },
+          "condition": {
+            "type": "string",
+            "oneOf": [
+              {
+                "title": "changed",
+                "const": "changed"
+              },
+              {
+                "title": "eq",
+                "const": "eq"
+              },
+              {
+                "title": "ne",
+                "const": "ne"
+              },
+              {
+                "title": "lt",
+                "const": "lt"
+              },
+              {
+                "title": "gt",
+                "const": "gt"
+              }
+            ]
+          },
+          "mask": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/uint64_t"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "piece": {
+            "$ref": "#/$defs/uc_log::control::Piece"
+          },
+          "timeout_ms": {
+            "$ref": "#/$defs/uint32_t"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/uint64_t"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "wait"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "reset"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "reset"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "flash"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "flash"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "subscribe"
+          },
+          "follow": {
+            "type": "boolean"
+          },
+          "last": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/uint32_t"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "min_level": {
+            "anyOf": [
+              {
+                "type": "string",
+                "oneOf": [
+                  {
+                    "title": "trace",
+                    "const": "trace"
+                  },
+                  {
+                    "title": "debug",
+                    "const": "debug"
+                  },
+                  {
+                    "title": "info",
+                    "const": "info"
+                  },
+                  {
+                    "title": "warn",
+                    "const": "warn"
+                  },
+                  {
+                    "title": "error",
+                    "const": "error"
+                  },
+                  {
+                    "title": "crit",
+                    "const": "crit"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "modules": {
+            "$ref": "#/$defs/std::vector<std::string>"
+          },
+          "not_modules": {
+            "$ref": "#/$defs/std::vector<std::string>"
+          },
+          "since_seq": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/uint64_t"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "streams": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "oneOf": [
+                {
+                  "title": "log",
+                  "const": "log"
+                },
+                {
+                  "title": "messages",
+                  "const": "messages"
+                },
+                {
+                  "title": "metrics",
+                  "const": "metrics"
+                }
+              ]
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "subscribe"
+      }
+    ],
+    "title": "std::variant<uc_log::control::Ping, uc_log::control::Status, uc_log::control::Messages, uc_log::control::Read, uc_log::control::Wait, uc_log::control::Reset, uc_log::control::Flash, uc_log::control::Subscribe>"
+  },
+  "answer": {
+    "type": "object",
+    "$defs": {
+      "int32_t": {
+        "type": "integer",
+        "minimum": -2147483648,
+        "maximum": 2147483647
+      },
+      "int64_t": {
+        "type": "integer",
+        "minimum": -9223372036854775808,
+        "maximum": 9223372036854775807
+      },
+      "uint32_t": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 4294967295
+      },
+      "uint64_t": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 18446744073709551615
+      }
+    },
+    "oneOf": [
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "ping"
+          },
+          "protocol": {
+            "$ref": "#/$defs/int32_t"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "ping"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "status"
+          },
+          "errors": {
+            "$ref": "#/$defs/uint64_t"
+          },
+          "firmware": {
+            "type": "object",
+            "properties": {
+              "build": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/uint32_t"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "type": "string",
+                "oneOf": [
+                  {
+                    "title": "unchecked",
+                    "const": "unchecked"
+                  },
+                  {
+                    "title": "match",
+                    "const": "match"
+                  },
+                  {
+                    "title": "different",
+                    "const": "different"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "flashing": {
+            "type": "boolean"
+          },
+          "halted": {
+            "type": "boolean"
+          },
+          "log_seq": {
+            "$ref": "#/$defs/uint64_t"
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "sessions": {
+            "$ref": "#/$defs/uint32_t"
+          },
+          "started_us": {
+            "$ref": "#/$defs/int64_t"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "status"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "messages"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "level": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "time": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "messages"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "read"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unix_us": {
+            "$ref": "#/$defs/int64_t"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "read"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "wait"
+          },
+          "first": {
+            "$ref": "#/$defs/uint64_t"
+          },
+          "hit": {
+            "type": "boolean"
+          },
+          "last": {
+            "$ref": "#/$defs/uint64_t"
+          },
+          "unix_us": {
+            "$ref": "#/$defs/int64_t"
+          },
+          "waited_us": {
+            "$ref": "#/$defs/int64_t"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "wait"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "reset"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "reset"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "flash"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "flash"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "subscribe"
+          },
+          "protocol": {
+            "$ref": "#/$defs/int32_t"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "subscribe"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "error"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "error"
+      }
+    ],
+    "title": "std::variant<uc_log::control::PingAnswer, uc_log::control::StatusAnswer, uc_log::control::MessagesAnswer, uc_log::control::ReadAnswer, uc_log::control::WaitAnswer, uc_log::control::ResetAnswer, uc_log::control::FlashAnswer, uc_log::control::SubscribeAnswer, uc_log::control::Error>"
+  },
+  "event": {
+    "type": "object",
+    "$defs": {
+      "double": {
+        "type": "number",
+        "minimum": -1.7976931348623157E+308,
+        "maximum": 1.7976931348623157E+308
+      },
+      "int64_t": {
+        "type": "integer",
+        "minimum": -9223372036854775808,
+        "maximum": 9223372036854775807
+      },
+      "uint32_t": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 4294967295
+      },
+      "uint64_t": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 18446744073709551615
+      }
+    },
+    "oneOf": [
+      {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "$ref": "#/$defs/uint32_t"
+          },
+          "cmd": {
+            "const": "log"
+          },
+          "file": {
+            "type": "string"
+          },
+          "function": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string",
+            "oneOf": [
+              {
+                "title": "trace",
+                "const": "trace"
+              },
+              {
+                "title": "debug",
+                "const": "debug"
+              },
+              {
+                "title": "info",
+                "const": "info"
+              },
+              {
+                "title": "warn",
+                "const": "warn"
+              },
+              {
+                "title": "error",
+                "const": "error"
+              },
+              {
+                "title": "crit",
+                "const": "crit"
+              }
+            ]
+          },
+          "line": {
+            "$ref": "#/$defs/uint32_t"
+          },
+          "message": {
+            "type": "string"
+          },
+          "module": {
+            "type": "string"
+          },
+          "recv_time": {
+            "type": "string"
+          },
+          "seq": {
+            "$ref": "#/$defs/uint64_t"
+          },
+          "uc_time_ns": {
+            "$ref": "#/$defs/int64_t"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "log"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "message"
+          },
+          "level": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "time": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "message"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "metric"
+          },
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "time": {
+            "$ref": "#/$defs/double"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "value": {
+            "$ref": "#/$defs/double"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "metric"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "backlog_end"
+          },
+          "lost": {
+            "$ref": "#/$defs/uint64_t"
+          },
+          "next_seq": {
+            "$ref": "#/$defs/uint64_t"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "backlog_end"
+      }
+    ],
+    "title": "std::variant<uc_log::control::LogLine, uc_log::control::StatusMessage, uc_log::control::MetricSample, uc_log::control::BacklogEnd>"
+  }
+}
