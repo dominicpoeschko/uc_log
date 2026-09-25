@@ -516,13 +516,15 @@ namespace uc_log { namespace FTXUIGui {
                 horizontalOffset = 0;
             }
 
-            if(event == ftxui::Event::Character('k')
+            // the arrows too: unhandled, a Vertical container around the list takes them and
+            // moves the focus out of the log instead of the selection
+            if(event == ftxui::Event::ArrowUp || event == ftxui::Event::Character('k')
                || (event.is_mouse() && event.mouse().button == ftxui::Mouse::WheelUp))
             {
                 stick = false;
                 selectedIndex--;
             }
-            if(event == ftxui::Event::Character('j')
+            if(event == ftxui::Event::ArrowDown || event == ftxui::Event::Character('j')
                || (event.is_mouse() && event.mouse().button == ftxui::Mouse::WheelDown))
             {
                 selectedIndex++;

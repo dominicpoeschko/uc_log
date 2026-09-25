@@ -2840,7 +2840,7 @@ namespace uc_log { namespace FTXUIGui {
                    ftxui::text("            (Esc hides it again when it is empty)"),
                    ftxui::text(""),
                    ftxui::text("📜 Log View") | ftxui::bold | ftxui::color(Theme::Header::accent()),
-                   ftxui::text("  j / k or mouse wheel   - Scroll down / up"),
+                   ftxui::text("  ↓/↑, j / k or wheel    - Scroll down / up"),
                    ftxui::text("  h / l or ←/→           - Scroll horizontally"),
                    ftxui::text("  PageUp / PageDown      - Scroll a page"),
                    ftxui::text("  Home / End             - Jump to first / last entry"),
