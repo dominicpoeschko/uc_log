@@ -120,6 +120,11 @@ def req_read(pieces: list[tuple[int, int]]) -> dict:
     return {"cmd": "read", "pieces": [{"address": a, "size": n} for a, n in pieces]}
 
 
+def req_write(words: list[tuple[int, int]]) -> dict:
+    """(address, value) words written in order, each read back; read_bytes() decodes the answer."""
+    return {"cmd": "write", "words": [{"address": a, "value": v} for a, v in words]}
+
+
 def req_wait(address: int, size: int, condition: str, timeout_ms: int,
              value: int | None = None, mask: int | None = None) -> dict:
     req = {"cmd": "wait", "piece": {"address": address,

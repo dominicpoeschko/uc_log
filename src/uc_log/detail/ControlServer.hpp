@@ -34,6 +34,7 @@ namespace uc_log::detail {
 
 using MemoryResult = std::expected<std::vector<std::vector<std::byte>>, std::string>;
 using MemoryReader = std::function<MemoryResult(std::span<control::Piece const>)>;
+using MemoryWriter = std::function<MemoryResult(std::span<control::WordWrite const>)>;
 
 /// What the server acts on. A function left empty answers an error for its request.
 struct ControlTarget {
@@ -41,6 +42,7 @@ struct ControlTarget {
     using Action = std::function<std::expected<void, std::string>(std::function<bool()> const&)>;
 
     MemoryReader                                                    read{};
+    MemoryWriter                                                    write{};
     std::function<control::StatusAnswer()>                          status{};
     Action                                                          reset{};
     Action                                                          flash{};
@@ -122,6 +124,27 @@ namespace control_detail {
         auto const now    = unixMicros(t);
         if(!result) { return error(result.error()); }
         control::ReadAnswer out{.unix_us = now, .data = {}};
+        out.data.reserve(result->size());
+        for(auto const& bytes : *result) { out.data.push_back(hex(bytes)); }
+        return out;
+    }
+
+    inline control::Answer answer(control::Write const& w,
+                                  ControlTarget const&  t) {
+        if(w.words.empty()) { return error("write: nothing to write"); }
+        if(w.words.size() > control::MaxWriteWords) {
+            return error(fmt::format("write: at most {} words a request", control::MaxWriteWords));
+        }
+        for(auto const& word : w.words) {
+            if(word.address % 4 != 0) {
+                return error(fmt::format("write: {:#010x} is not word aligned", word.address));
+            }
+        }
+        if(!t.write) { return error("no target here"); }
+        auto const result = t.write(w.words);
+        auto const now    = unixMicros(t);
+        if(!result) { return error(result.error()); }
+        control::WriteAnswer out{.unix_us = now, .data = {}};
         out.data.reserve(result->size());
         for(auto const& bytes : *result) { out.data.push_back(hex(bytes)); }
         return out;

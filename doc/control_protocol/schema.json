@@ -281,9 +281,37 @@
           "cmd"
         ],
         "title": "subscribe"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "write"
+          },
+          "words": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "address": {
+                  "$ref": "#/$defs/uint32_t"
+                },
+                "value": {
+                  "$ref": "#/$defs/uint32_t"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "write"
       }
     ],
-    "title": "std::variant<uc_log::control::Ping, uc_log::control::Status, uc_log::control::Messages, uc_log::control::Read, uc_log::control::Wait, uc_log::control::Reset, uc_log::control::Flash, uc_log::control::Subscribe>"
+    "title": "std::variant<uc_log::control::Ping, uc_log::control::Status, uc_log::control::Messages, uc_log::control::Read, uc_log::control::Wait, uc_log::control::Reset, uc_log::control::Flash, uc_log::control::Subscribe, uc_log::control::Write>"
   },
   "answer": {
     "type": "object",
@@ -297,6 +325,12 @@
         "type": "integer",
         "minimum": -9223372036854775808,
         "maximum": 9223372036854775807
+      },
+      "std::vector<std::string>": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
       },
       "uint32_t": {
         "type": "integer",
@@ -431,10 +465,7 @@
             "const": "read"
           },
           "data": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
+            "$ref": "#/$defs/std::vector<std::string>"
           },
           "unix_us": {
             "$ref": "#/$defs/int64_t"
@@ -520,6 +551,25 @@
         "type": "object",
         "properties": {
           "cmd": {
+            "const": "write"
+          },
+          "data": {
+            "$ref": "#/$defs/std::vector<std::string>"
+          },
+          "unix_us": {
+            "$ref": "#/$defs/int64_t"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "write"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
             "const": "error"
           },
           "error": {
@@ -533,7 +583,7 @@
         "title": "error"
       }
     ],
-    "title": "std::variant<uc_log::control::PingAnswer, uc_log::control::StatusAnswer, uc_log::control::MessagesAnswer, uc_log::control::ReadAnswer, uc_log::control::WaitAnswer, uc_log::control::ResetAnswer, uc_log::control::FlashAnswer, uc_log::control::SubscribeAnswer, uc_log::control::Error>"
+    "title": "std::variant<uc_log::control::PingAnswer, uc_log::control::StatusAnswer, uc_log::control::MessagesAnswer, uc_log::control::ReadAnswer, uc_log::control::WaitAnswer, uc_log::control::ResetAnswer, uc_log::control::FlashAnswer, uc_log::control::SubscribeAnswer, uc_log::control::WriteAnswer, uc_log::control::Error>"
   },
   "event": {
     "type": "object",

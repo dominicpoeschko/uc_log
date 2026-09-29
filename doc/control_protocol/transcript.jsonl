@@ -17,6 +17,10 @@
 {"name":"wait_too_long","stable":true,"request":"{\"cmd\":\"wait\",\"piece\":{\"address\":536870912,\"size\":4},\"condition\":\"changed\",\"timeout_ms\":600001}","answer":{"cmd":"error","error":"wait: timeout_ms is at most 600000"}}
 {"name":"reset","stable":true,"request":"{\"cmd\":\"reset\"}","answer":{"cmd":"reset"}}
 {"name":"flash","stable":true,"request":"{\"cmd\":\"flash\"}","answer":{"cmd":"error","error":"no hex file"}}
+{"name":"write_two","stable":true,"request":"{\"cmd\":\"write\",\"words\":[{\"address\":1342177292,\"value\":0},{\"address\":1342177296,\"value\":305419896}]}","answer":{"cmd":"write","unix_us":1758448800000000,"data":["00000000","78563412"]}}
+{"name":"write_nothing","stable":true,"request":"{\"cmd\":\"write\",\"words\":[]}","answer":{"cmd":"error","error":"write: nothing to write"}}
+{"name":"write_unaligned","stable":true,"request":"{\"cmd\":\"write\",\"words\":[{\"address\":1342177294,\"value\":0}]}","answer":{"cmd":"error","error":"write: 0x5000000e is not word aligned"}}
+{"name":"write_disconnected","stable":true,"request":"{\"cmd\":\"write\",\"words\":[{\"address\":3758096384,\"value\":1}]}","answer":{"cmd":"error","error":"the target is not connected"}}
 {"name":"not_json","stable":true,"request":"read 20000010:4","answer":{"cmd":"error","error":"bad line: 1:1: no_matching_variant_type\n   read 20000010:4\n   ^"}}
-{"name":"unknown_cmd","stable":true,"request":"{\"cmd\":\"write\",\"pieces\":[]}","answer":{"cmd":"error","error":"bad line: 1:15: no_matching_variant_type\n   {\"cmd\":\"write\",\"pieces\":[]}\n                 ^ supported types: ping, status, messages, read, wait, reset, flash, subscribe"}}
+{"name":"unknown_cmd","stable":true,"request":"{\"cmd\":\"poke\",\"pieces\":[]}","answer":{"cmd":"error","error":"bad line: 1:14: no_matching_variant_type\n   {\"cmd\":\"poke\",\"pieces\":[]}\n                ^ supported types: ping, status, messages, read, wait, reset, flash, subscribe, write"}}
 {"name":"unknown_key","stable":true,"request":"{\"cmd\":\"ping\",\"verbose\":true}","answer":{"cmd":"error","error":"bad line: 1:24: unknown_key\n   {\"cmd\":\"ping\",\"verbose\":true}\n                          ^"}}

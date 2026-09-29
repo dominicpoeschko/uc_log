@@ -10,12 +10,15 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 FIXTURES = HERE.parent / "doc" / "control_protocol"
+
+sys.dont_write_bytecode = True  # no __pycache__ next to the imported tools
 
 spec = importlib.util.spec_from_file_location(
     "uc_log_client", HERE / "uc_log_client.py")
@@ -52,6 +55,10 @@ BUILT = {
     "wait_too_long": kb.req_wait(0x20000000, 4, "changed", 600001),
     "reset": kb.req_reset(),
     "flash": kb.req_flash(),
+    "write_two": kb.req_write([(0x5000000C, 0), (0x50000010, 0x12345678)]),
+    "write_nothing": kb.req_write([]),
+    "write_unaligned": kb.req_write([(0x5000000E, 0)]),
+    "write_disconnected": kb.req_write([(0xE0000000, 1)]),
 }
 
 SUBSCRIBED = {
@@ -176,6 +183,9 @@ class Fixtures(unittest.TestCase):
         self.assertEqual([kb.message_line(m) for m in TRANSCRIPT["messages_2"]["answer"]["messages"]],
                          ["2025-09-21T10:00:01.000Z [error] RTT buffer 0 overflow",
                           "2025-09-21T10:00:02.000Z [tool] control socket up"])
+        _, words = kb.read_bytes(TRANSCRIPT["write_two"]["answer"])
+        self.assertEqual([int.from_bytes(w, "little")
+                         for w in words], [0, 0x12345678])
         wait = TRANSCRIPT["wait_timeout"]["answer"]
         self.assertEqual((wait["hit"], wait["first"],
                          wait["last"]), (False, 0x03020100, 0x03020100))

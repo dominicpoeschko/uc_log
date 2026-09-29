@@ -687,10 +687,17 @@ int main(int    argc,
         controlServer->setTarget(uc_log::detail::ControlTarget{
           .read =
             [&rttReader](std::span<uc_log::control::Piece const> pieces) {
-                std::vector<JLinkRttReader::MemoryRead> reads;
+                std::vector<JLinkRttReader::MemoryAccess> reads;
                 reads.reserve(pieces.size());
                 for(auto const& p : pieces) { reads.push_back({p.address, p.size}); }
-                return rttReader.readMemory(reads);
+                return rttReader.accessMemory(reads);
+            },
+          .write =
+            [&rttReader](std::span<uc_log::control::WordWrite const> words) {
+                std::vector<JLinkRttReader::MemoryAccess> writes;
+                writes.reserve(words.size());
+                for(auto const& w : words) { writes.push_back({w.address, 4, w.value}); }
+                return rttReader.accessMemory(writes);
             },
           .status =
             [&rttReader, &firmwareCheck, &logFilePrinter, &controlServer, startedUs] {

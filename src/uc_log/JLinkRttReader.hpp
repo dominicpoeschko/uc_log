@@ -37,9 +37,11 @@ private:
 public:
     using Probe = typename TransportT::Probe;
 
-    struct MemoryRead {
-        std::uint32_t address{};
-        std::uint32_t size{};
+    /// With `write`: that word is written first, then 4 bytes are read back.
+    struct MemoryAccess {
+        std::uint32_t                address{};
+        std::uint32_t                size{};
+        std::optional<std::uint32_t> write{};
     };
 
     using MemoryResult = std::expected<std::vector<std::vector<std::byte>>, std::string>;
@@ -122,7 +124,7 @@ private:
                               address));
                 told = true;
             }
-            serviceMemoryReads(jlink);
+            serviceMemoryAccesses(jlink);
             std::this_thread::sleep_for(ControlBlockPoll);
         }
     }
@@ -248,30 +250,35 @@ private:
     // Serves only what is queued now: clients reading in a loop would otherwise starve the RTT
     // reads.
     template<typename Transport>
-    void serviceMemoryReads(Transport& jlink) {
-        std::deque<std::shared_ptr<PendingMemoryRead>> batch;
+    void serviceMemoryAccesses(Transport& jlink) {
+        std::deque<std::shared_ptr<PendingMemoryAccess>> batch;
         {
-            std::lock_guard<std::mutex> const lock{memoryReadsMutex};
-            batch.swap(memoryReads);
+            std::lock_guard<std::mutex> const lock{memoryAccessesMutex};
+            batch.swap(memoryAccesses);
         }
         for(auto const& pending : batch) {
             if(pending->abandoned) { continue; }
-            MemoryRead current{};
+            MemoryAccess current{};
             try {
                 std::vector<std::vector<std::byte>> data;
-                data.reserve(pending->reads.size());
-                for(auto const& r : pending->reads) {
+                data.reserve(pending->accesses.size());
+                for(auto const& r : pending->accesses) {
                     current = r;
-                    data.emplace_back(r.size);
+                    if(r.write) { jlink.writeWord(r.address, *r.write); }
+                    data.emplace_back(r.write ? 4U : r.size);
                     jlink.readMemory(r.address, data.back());
                 }
                 pending->result.set_value(std::move(data));
             } catch(std::exception const& e) {
                 pending->result.set_value(
-                  std::unexpected{fmt::format("{} (reading {} bytes at {:#010x})",
-                                              e.what(),
-                                              current.size,
-                                              current.address)});
+                  std::unexpected{current.write ? fmt::format("{} (writing {:#010x} at {:#010x})",
+                                                              e.what(),
+                                                              *current.write,
+                                                              current.address)
+                                                : fmt::format("{} (reading {} bytes at {:#010x})",
+                                                              e.what(),
+                                                              current.size,
+                                                              current.address)});
             }
         }
     }
@@ -328,12 +335,12 @@ private:
         errorMessageCallback(text);
     }
 
-    void failMemoryReads(std::string const& why) {
-        std::lock_guard<std::mutex> const lock{memoryReadsMutex};
-        for(auto& pending : memoryReads) {
+    void failMemoryAccesses(std::string const& why) {
+        std::lock_guard<std::mutex> const lock{memoryAccessesMutex};
+        for(auto& pending : memoryAccesses) {
             if(!pending->abandoned) { pending->result.set_value(std::unexpected{why}); }
         }
-        memoryReads.clear();
+        memoryAccesses.clear();
     }
 
     void run(std::stop_token stoken) {
@@ -594,7 +601,7 @@ private:
                         applyPreResetCommands(jlink);
                     }
                     serviceProbeListRequest();
-                    serviceMemoryReads(jlink);
+                    serviceMemoryAccesses(jlink);
                 }
             } catch(std::exception const& e) {
                 toolErrorMessageCallback(fmt::format("caught {}", e.what()));
@@ -605,7 +612,7 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds{1000});
             }
             setStatusNotRunning();
-            failMemoryReads("the target is not connected");
+            failMemoryAccesses("the target is not connected");
             toolMessageCallback("stopped jlink");
         }
     }
@@ -654,8 +661,8 @@ private:
     }
 
     // Queued by other threads; the J-Link is only ever driven from the reader thread.
-    struct PendingMemoryRead {
-        std::vector<MemoryRead>    reads;
+    struct PendingMemoryAccess {
+        std::vector<MemoryAccess>  accesses;
         std::promise<MemoryResult> result;
         std::atomic<bool>          abandoned{false};
     };
@@ -677,22 +684,22 @@ private:
         o.error          = std::move(error);
     }
 
-    Outcome                                        flashOutcome_;
-    Outcome                                        resetOutcome_;   // serial: requests covered
-    std::atomic<std::uint64_t>                     resetRequests_{0};
-    std::atomic<unsigned>                          flashAttempt{};
-    std::atomic<bool>                              flashing_{false};
-    std::atomic<std::uint64_t>                     sessionCount_{0};
-    std::atomic<bool>                              halted_{false};
-    std::mutex                                     sessionStartMutex;
-    std::function<void(DirectMemoryRead const&)>   sessionStartCallback;
-    std::mutex                                     memoryReadsMutex;
-    std::deque<std::shared_ptr<PendingMemoryRead>> memoryReads;
-    std::atomic<bool>                              probeListRequest{false};
-    std::mutex                                     probesMutex;
-    std::vector<Probe>                             probes_;
-    std::atomic<std::uint64_t>                     probesVersion_{0};
-    std::jthread                                   thread;
+    Outcome                                          flashOutcome_;
+    Outcome                                          resetOutcome_;   // serial: requests covered
+    std::atomic<std::uint64_t>                       resetRequests_{0};
+    std::atomic<unsigned>                            flashAttempt{};
+    std::atomic<bool>                                flashing_{false};
+    std::atomic<std::uint64_t>                       sessionCount_{0};
+    std::atomic<bool>                                halted_{false};
+    std::mutex                                       sessionStartMutex;
+    std::function<void(DirectMemoryRead const&)>     sessionStartCallback;
+    std::mutex                                       memoryAccessesMutex;
+    std::deque<std::shared_ptr<PendingMemoryAccess>> memoryAccesses;
+    std::atomic<bool>                                probeListRequest{false};
+    std::mutex                                       probesMutex;
+    std::vector<Probe>                               probes_;
+    std::atomic<std::uint64_t>                       probesVersion_{0};
+    std::jthread                                     thread;
 
 public:
     template<typename BlockInfoF,
@@ -735,15 +742,15 @@ public:
 
     void resetJLink() { jlinkResetFlag = true; }
 
-    /// Read while the core runs. From any thread; blocks until done or `timeout`.
-    MemoryResult readMemory(std::span<MemoryRead const> reads,
-                            std::chrono::milliseconds   timeout = std::chrono::milliseconds{250}) {
-        auto pending = std::make_shared<PendingMemoryRead>();
-        pending->reads.assign(reads.begin(), reads.end());
+    /// Read (and write) while the core runs. From any thread; blocks until done or `timeout`.
+    MemoryResult accessMemory(std::span<MemoryAccess const> accesses,
+                              std::chrono::milliseconds timeout = std::chrono::milliseconds{250}) {
+        auto pending = std::make_shared<PendingMemoryAccess>();
+        pending->accesses.assign(accesses.begin(), accesses.end());
         auto future = pending->result.get_future();
         {
-            std::lock_guard<std::mutex> const lock{memoryReadsMutex};
-            memoryReads.push_back(pending);
+            std::lock_guard<std::mutex> const lock{memoryAccessesMutex};
+            memoryAccesses.push_back(pending);
         }
         if(future.wait_for(timeout) != std::future_status::ready) {
             pending->abandoned = true;

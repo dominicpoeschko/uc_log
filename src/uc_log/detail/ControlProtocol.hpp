@@ -23,6 +23,7 @@ inline constexpr std::size_t   MaxPieces        = 64;
 inline constexpr std::size_t   MaxReadBytes     = 4096;
 inline constexpr std::uint32_t MaxWaitBytes     = 8;
 inline constexpr std::uint32_t MaxWaitTimeoutMs = 600'000;
+inline constexpr std::size_t   MaxWriteWords    = 16;
 
 struct Piece {
     std::uint32_t address{};
@@ -47,6 +48,16 @@ struct Messages {
 /// Target memory, read while the core runs.
 struct Read {
     std::vector<Piece> pieces;
+};
+
+struct WordWrite {
+    std::uint32_t address{};
+    std::uint32_t value{};
+};
+
+/// Aligned 32-bit words written in order while the core runs, each read back after its write.
+struct Write {
+    std::vector<WordWrite> words;
 };
 
 /// Polls one little-endian value until the condition holds or the timeout runs out.
@@ -76,7 +87,7 @@ struct Subscribe {
     bool                         follow{true};
 };
 
-using Request = std::variant<Ping, Status, Messages, Read, Wait, Reset, Flash, Subscribe>;
+using Request = std::variant<Ping, Status, Messages, Read, Wait, Reset, Flash, Subscribe, Write>;
 
 struct PingAnswer {
     int protocol{ProtocolVersion};
@@ -116,6 +127,11 @@ struct ReadAnswer {
     std::vector<std::string> data;
 };
 
+struct WriteAnswer {
+    std::int64_t             unix_us{};
+    std::vector<std::string> data;
+};
+
 struct WaitAnswer {
     bool          hit{};
     std::int64_t  unix_us{};
@@ -144,6 +160,7 @@ using Answer = std::variant<PingAnswer,
                             ResetAnswer,
                             FlashAnswer,
                             SubscribeAnswer,
+                            WriteAnswer,
                             Error>;
 
 /// The columns of a .rttlog row, and `seq`: numbered from 0 at the printer's start.
@@ -207,8 +224,15 @@ struct glz::meta<uc_log::control::Level> {
 template<>
 struct glz::meta<uc_log::control::Request> {
     static constexpr std::string_view tag = "cmd";
-    static constexpr auto             ids
-      = std::array{"ping", "status", "messages", "read", "wait", "reset", "flash", "subscribe"};
+    static constexpr auto             ids = std::array{"ping",
+                                                       "status",
+                                                       "messages",
+                                                       "read",
+                                                       "wait",
+                                                       "reset",
+                                                       "flash",
+                                                       "subscribe",
+                                                       "write"};
 };
 
 template<>
@@ -222,6 +246,7 @@ struct glz::meta<uc_log::control::Answer> {
                                                        "reset",
                                                        "flash",
                                                        "subscribe",
+                                                       "write",
                                                        "error"};
 };
 

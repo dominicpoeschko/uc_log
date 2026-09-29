@@ -63,9 +63,24 @@ struct FakeTarget {
         };
     }
 
+    detail::MemoryResult write(std::span<ctl::WordWrite const> words) {
+        std::vector<std::vector<std::byte>> out;
+        for(auto const& w : words) {
+            if(w.address >= DisconnectedFrom) {
+                return std::unexpected{std::string{"the target is not connected"}};
+            }
+            out.emplace_back(4);
+            for(std::uint32_t i = 0; i != 4; ++i) {
+                out.back()[i] = static_cast<std::byte>((w.value >> (8U * i)) & 0xFFU);
+            }
+        }
+        return out;
+    }
+
     detail::ControlTarget target() {
         return detail::ControlTarget{
-          .read = [this](std::span<ctl::Piece const> pieces) { return read(pieces); },
+          .read  = [this](std::span<ctl::Piece const> pieces) { return read(pieces); },
+          .write = [this](std::span<ctl::WordWrite const> words) { return write(words); },
           .status =
             [] {
                 return ctl::StatusAnswer{
@@ -136,8 +151,13 @@ inline std::vector<Exchange> exchanges() {
        R"({"cmd":"wait","piece":{"address":536870912,"size":4},"condition":"changed","timeout_ms":600001})"},
       {"reset", R"({"cmd":"reset"})"},
       {"flash", R"({"cmd":"flash"})"},
+      {"write_two",
+       R"({"cmd":"write","words":[{"address":1342177292,"value":0},{"address":1342177296,"value":305419896}]})"},
+      {"write_nothing", R"({"cmd":"write","words":[]})"},
+      {"write_unaligned", R"({"cmd":"write","words":[{"address":1342177294,"value":0}]})"},
+      {"write_disconnected", R"({"cmd":"write","words":[{"address":3758096384,"value":1}]})"},
       {"not_json", R"(read 20000010:4)"},
-      {"unknown_cmd", R"({"cmd":"write","pieces":[]})"},
+      {"unknown_cmd", R"({"cmd":"poke","pieces":[]})"},
       {"unknown_key", R"({"cmd":"ping","verbose":true})"},
     };
 }

@@ -127,6 +127,14 @@ int main() {
             && as<ctl::StatusAnswer>(status)->firmware.state == ctl::FirmwareState::match,
           "status");
     CHECK(as<ctl::ResetAnswer>(ask(R"({"cmd":"reset"})")) != nullptr, "reset");
+    {
+        auto const written = ask(R"({"cmd":"write","words":[{"address":16,"value":258}]})");
+        CHECK(as<ctl::WriteAnswer>(written) != nullptr
+                && as<ctl::WriteAnswer>(written)->data == std::vector<std::string>{"02010000"},
+              "a word written and read back, little endian");
+        CHECK(!errorOf(ask(R"({"cmd":"write","words":[{"address":18,"value":0}]})")).empty(),
+              "a write off a word boundary is refused");
+    }
     CHECK(errorOf(ask(R"({"cmd":"flash"})")) == "no hex file", "a failed flash says why");
     {
         uc_log::detail::ControlTarget const bare{};
@@ -137,7 +145,7 @@ int main() {
               "no flash without a handler");
     }
     CHECK(!errorOf(ask("read 20000010:4")).empty(), "the old line protocol is an error");
-    CHECK(!errorOf(ask(R"({"cmd":"write"})")).empty(), "an unknown command");
+    CHECK(!errorOf(ask(R"({"cmd":"poke"})")).empty(), "an unknown command");
     CHECK(!errorOf(ask(R"({"cmd":"ping","verbose":true})")).empty(), "an unknown key");
 
     {

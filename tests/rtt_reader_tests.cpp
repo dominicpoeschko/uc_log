@@ -62,7 +62,8 @@ struct FakeTransport {
         std::atomic<bool> coreWasReset{false};   // DHCSR.S_RESET_ST: set by a reset, read clears it
         std::atomic<bool> blockGone{false};      // no RTT id at the block address (a boot ROM runs)
         std::function<void()>           onReset;
-        std::vector<JLink::MemoryWrite> preResetAtLastReset;   // guarded by mutex
+        std::vector<JLink::MemoryWrite> preResetAtLastReset;           // guarded by mutex
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> writes;   // guarded by mutex
 
         void feed(std::vector<std::byte> const& data) {
             std::lock_guard<std::mutex> const lock{mutex};
@@ -145,6 +146,12 @@ struct FakeTransport {
     bool isHalted() {
         ++shared->haltPolls;
         return shared->halted;
+    }
+
+    void writeWord(std::uint32_t address,
+                   std::uint32_t value) {
+        std::lock_guard<std::mutex> const lock{shared->mutex};
+        shared->writes.emplace_back(address, value);
     }
 
     void readMemory(std::uint32_t        address,
@@ -313,11 +320,11 @@ int main() {
 
     {
         using Reader = BasicJLinkRttReader<FakeTransport>;
-        std::array<Reader::MemoryRead, 2> const pieces{
-          Reader::MemoryRead{0x20000010, 4},
-          Reader::MemoryRead{0x200000FE, 3}
+        std::array<Reader::MemoryAccess, 2> const pieces{
+          Reader::MemoryAccess{0x20000010, 4},
+          Reader::MemoryAccess{0x200000FE, 3}
         };
-        auto const result = reader.readMemory(pieces, 2000ms);
+        auto const result = reader.accessMemory(pieces, 2000ms);
         CHECK(result.has_value(), "memory read through the reader thread");
         if(result) {
             CHECK(result->size() == 2 && (*result)[0].size() == 4 && (*result)[1].size() == 3,
@@ -325,6 +332,22 @@ int main() {
             CHECK((*result)[0][0] == std::byte{0x10} && (*result)[0][3] == std::byte{0x13}
                     && (*result)[1][2] == std::byte{0x00},
                   "the fake target's bytes: the low byte of each address");
+        }
+
+        std::array<Reader::MemoryAccess, 2> const writes{
+          Reader::MemoryAccess{0x5000'000C, 4, 0U},
+          Reader::MemoryAccess{0x5000'0010, 4, 7U}
+        };
+        auto const written = reader.accessMemory(writes, 2000ms);
+        CHECK(written.has_value() && written->size() == 2 && (*written)[1].size() == 4
+                && (*written)[1][0] == std::byte{0x10},
+              "a word per write, read back from the target");
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            CHECK((shared.writes
+                   == std::vector<std::pair<std::uint32_t, std::uint32_t>>{{0x5000'000CU, 0U},
+                                                                          {0x5000'0010U, 7U}}),
+                  "both words written, in order");
         }
     }
 
@@ -524,10 +547,10 @@ int main() {
         CHECK(reader.sessionCount() == waiting, "and starts no session while it is gone");
         {
             using Reader = BasicJLinkRttReader<FakeTransport>;
-            std::array<Reader::MemoryRead, 1> const piece{
-              Reader::MemoryRead{0x20000010, 4}
+            std::array<Reader::MemoryAccess, 1> const piece{
+              Reader::MemoryAccess{0x20000010, 4}
             };
-            CHECK(reader.readMemory(piece, 2000ms).has_value(),
+            CHECK(reader.accessMemory(piece, 2000ms).has_value(),
                   "memory reads are served meanwhile");
         }
         shared.blockGone = false;
