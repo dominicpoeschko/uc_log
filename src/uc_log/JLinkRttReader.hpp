@@ -582,6 +582,26 @@ private:
                             // pause is over.
                             std::this_thread::sleep_for(AnnouncedResetDrain);
                             auto const unfinished = drainAll();
+                            // The firmware waits a bounded time (Kvasir::AnnouncedReset, ~0.5 s).
+                            // A printer that was slow to see the request - busy with a halt it
+                            // caught, a slow probe - finds it reset already. Writing then would
+                            // clear the id of the new boot's control block (the firmware sets it
+                            // at startup only, so no session would find it again until the next
+                            // boot) and ack into its block: check that the request still waits.
+                            if(auto const still = readAnnouncedResetBlock(jlink, *announceAt);
+                               !still || !still->pending() || still->request != block->request)
+                            {
+                                messageCallback(fmt::format(
+                                  "the target announced a reset and did it before the printer "
+                                  "answered: a new RTT session{}",
+                                  unfinished == 0
+                                    ? std::string{}
+                                    : fmt::format(" ({} byte{} of an unfinished line dropped)",
+                                                  unfinished,
+                                                  unfinished == 1 ? "" : "s")));
+                                awaitControlBlock_ = true;
+                                break;
+                            }
                             // the firmware may ask for longer (a watchdog it lets run out)
                             announcedPause
                               = std::clamp(std::chrono::milliseconds{block->stayAwayMs()},

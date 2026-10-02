@@ -78,6 +78,9 @@ struct FakeTransport {
         std::atomic<int>                                   open{0};   // transports alive
         std::atomic<int>                                   closedWhileResetting{0};
         std::atomic<int>                                   rttStops{0};
+        // the firmware's wait for the ack runs out right after the printer's first read of a
+        // request: the chip resets, and the new boot's .data holds a fresh block
+        std::atomic<bool> gaveUpBeforeAck{false};
 
         // every call that reaches the target; one while the chip resets is the bug
         void touch() {
@@ -225,6 +228,10 @@ struct FakeTransport {
             std::lock_guard<std::mutex> const lock{shared->mutex};
             for(std::size_t i = 0; i != out.size(); ++i) {
                 out[i] = static_cast<std::byte>(shared->announce[i / 4] >> (8 * (i % 4)));
+            }
+            if(shared->gaveUpBeforeAck && shared->announce[2] != 0) {
+                shared->gaveUpBeforeAck = false;
+                shared->announce        = {uc_log::detail::announced_reset::Magic, 0, 0, 0};
             }
             return;
         }
@@ -761,6 +768,48 @@ int main() {
         CHECK(!reader.isPausedForReset(), "the pause is over");
         shared.feed(makeFrame(0));
         CHECK(waitFor([&]() { return hellos() == before + 2; }, 3000ms), "the log runs again");
+    }
+
+    // a request the printer answers too late - it was busy (a halt it caught, a slow probe) and
+    // the firmware's bounded wait ran out: the chip has reset already. The printer must not write
+    // into the new boot: a cleared id there would hide its control block from every session
+    {
+        using namespace uc_log::detail::announced_reset;
+        auto const armed = [&]() {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            return shared.announce[1] == HostArmed;
+        };
+        CHECK(waitFor(armed, 3000ms), "armed");
+        std::size_t writesBefore{};
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            writesBefore           = shared.writes.size();
+            shared.gaveUpBeforeAck = true;
+            shared.announce[2]     = 2;
+        }
+        CHECK(
+          waitFor(
+            [&]() { return collected.anyMessageContains("did it before the printer answered"); },
+            3000ms),
+          "told that the reset came first");
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            using Write      = std::pair<std::uint32_t, std::uint32_t>;
+            auto const after = std::ranges::subrange(shared.writes.begin()
+                                                       + static_cast<std::ptrdiff_t>(writesBefore),
+                                                     shared.writes.end());
+            CHECK(std::ranges::find(after, Write{0x20000100U, 0U}) == after.end(),
+                  "the new boot's control block keeps its id");
+            CHECK(std::ranges::find_if(after,
+                                       [](Write const& w) {
+                                           return w.first
+                                               == FakeTransport::Shared::AnnounceAddress + 12;
+                                       })
+                    == after.end(),
+                  "no ack into the new boot's block");
+        }
+        CHECK(!shared.blockGone.load(), "the block is still there for the next session");
+        CHECK(waitFor(armed, 3000ms), "the next session arms the new boot's block");
     }
 
     // a session that starts before the boot has set the block up (right after a flash, .data not
