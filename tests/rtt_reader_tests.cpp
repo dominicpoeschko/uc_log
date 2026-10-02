@@ -5,6 +5,8 @@
 #include "uc_log/JLinkRttReader.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -56,6 +58,8 @@ struct FakeTransport {
         std::atomic<int>      flashFailures{0};   // the next so many flash() calls throw
         std::atomic<int>      flashes{0};
         std::atomic<int>      resets{0};
+        std::atomic<int>      ramFlashes{0};    // flashRamImage(): reset, download, start
+        JLink::RamImageStart  lastRamStart{};   // guarded by mutex
         std::atomic<int>      haltPolls{0};
         std::atomic<bool>     stackUnreadable{false};    // reads near sp throw
         std::atomic<bool>     holdSessionStart{false};   // startRtt waits while set
@@ -64,6 +68,21 @@ struct FakeTransport {
         std::function<void()>           onReset;
         std::vector<JLink::MemoryWrite> preResetAtLastReset;           // guarded by mutex
         std::vector<std::pair<std::uint32_t, std::uint32_t>> writes;   // guarded by mutex
+
+        // an announced reset: the block at AnnounceAddress, words magic armed request ack
+        static constexpr std::uint32_t AnnounceAddress = 0x2000'0300;
+        std::array<std::uint32_t, 4>   announce{};         // guarded by mutex
+        std::atomic<bool>              resetting{false};   // set by the ack: the chip resets
+        std::atomic<std::chrono::steady_clock::time_point> ackedAt{};   // when the ack was written
+        std::atomic<int>                                   touchedWhileResetting{0};
+        std::atomic<int>                                   open{0};   // transports alive
+        std::atomic<int>                                   closedWhileResetting{0};
+        std::atomic<int>                                   rttStops{0};
+
+        // every call that reaches the target; one while the chip resets is the bug
+        void touch() {
+            if(resetting) { ++touchedWhileResetting; }
+        }
 
         void feed(std::vector<std::byte> const& data) {
             std::lock_guard<std::mutex> const lock{mutex};
@@ -100,7 +119,23 @@ struct FakeTransport {
                   MessageF&&,
                   ErrorF&&) {
         ++shared->constructions;
+        shared->touch();   // the connect
+        ++shared->open;
         checkConnected();
+    }
+
+    FakeTransport(FakeTransport const&)            = delete;
+    FakeTransport& operator=(FakeTransport const&) = delete;
+
+    // JLINK_Close
+    ~FakeTransport() {
+        --shared->open;
+        if(shared->resetting) { ++shared->closedWhileResetting; }
+    }
+
+    void stopRtt() {
+        shared->touch();
+        ++shared->rttStops;
     }
 
     void setResetType(std::uint8_t) {}
@@ -112,6 +147,7 @@ struct FakeTransport {
     }
 
     void resetTarget() {
+        shared->touch();
         {
             std::lock_guard<std::mutex> const lock{shared->mutex};
             shared->preResetAtLastReset = preResetCommands;
@@ -122,6 +158,7 @@ struct FakeTransport {
     }
 
     void flash(std::string const&) {
+        shared->touch();
         if(shared->flashFailures > 0) {
             --shared->flashFailures;
             throw std::runtime_error{"fake flash failure"};
@@ -130,32 +167,67 @@ struct FakeTransport {
         shared->coreWasReset = true;
     }
 
+    void flashRamImage(std::string const&,
+                       JLink::RamImageStart const& start) {
+        shared->touch();
+        if(shared->flashFailures > 0) {
+            --shared->flashFailures;
+            throw std::runtime_error{"fake flash failure"};
+        }
+        {
+            std::lock_guard<std::mutex> const lock{shared->mutex};
+            shared->preResetAtLastReset = preResetCommands;
+            shared->lastRamStart        = start;
+        }
+        ++shared->ramFlashes;
+        shared->coreWasReset = true;
+    }
+
     enum class CoreRegister : int { sp = 13, lr = 14, pc = 15, xpsr = 16, msp = 17, psp = 18 };
 
     std::uint32_t readRegister(CoreRegister r) {
+        shared->touch();
         if(r == CoreRegister::sp) { return 0x20000100; }
         return 0x1000U + static_cast<std::uint32_t>(r);
     }
 
-    void go() {}
+    void go() { shared->touch(); }
 
-    void halt() {}
+    void halt() { shared->touch(); }
 
-    void clearAllBreakpoints() {}
+    void clearAllBreakpoints() { shared->touch(); }
 
     bool isHalted() {
+        shared->touch();
         ++shared->haltPolls;
         return shared->halted;
     }
 
     void writeWord(std::uint32_t address,
                    std::uint32_t value) {
+        shared->touch();
         std::lock_guard<std::mutex> const lock{shared->mutex};
         shared->writes.emplace_back(address, value);
+        if(address == 0x20000100 && value == 0) { shared->blockGone = true; }   // the id cleared
+        if(address >= Shared::AnnounceAddress && address < Shared::AnnounceAddress + 16) {
+            shared->announce[(address - Shared::AnnounceAddress) / 4] = value;
+            if(address == Shared::AnnounceAddress + 12) {   // the ack
+                shared->ackedAt   = std::chrono::steady_clock::now();
+                shared->resetting = true;
+            }
+        }
     }
 
     void readMemory(std::uint32_t        address,
                     std::span<std::byte> out) {
+        shared->touch();
+        if(address == Shared::AnnounceAddress && out.size() == 16) {
+            std::lock_guard<std::mutex> const lock{shared->mutex};
+            for(std::size_t i = 0; i != out.size(); ++i) {
+                out[i] = static_cast<std::byte>(shared->announce[i / 4] >> (8 * (i % 4)));
+            }
+            return;
+        }
         if(shared->stackUnreadable && address >= 0x20000100 && address < 0x20000200) {
             throw std::runtime_error{"JLINK_ReadMem: -1"};
         }
@@ -179,11 +251,13 @@ struct FakeTransport {
     }
 
     void checkConnected() {
+        shared->touch();
         std::lock_guard<std::mutex> const lock{shared->mutex};
         if(!shared->connected) { throw std::runtime_error{"fake transport disconnected"}; }
     }
 
     FakeStatus readStatus() {
+        shared->touch();
         std::lock_guard<std::mutex> const lock{shared->mutex};
         if(!shared->connected) { throw std::runtime_error{"fake transport disconnected"}; }
         return shared->status;
@@ -202,6 +276,7 @@ struct FakeTransport {
 
     std::span<std::byte> rttRead(std::uint32_t,
                                  std::span<std::byte> buffer) {
+        shared->touch();
         std::lock_guard<std::mutex> const lock{shared->mutex};
         std::size_t const                 n = std::min(buffer.size(), shared->upData.size());
         for(std::size_t i = 0; i < n; ++i) {
@@ -215,6 +290,7 @@ struct FakeTransport {
 
     std::size_t rttWrite(std::uint32_t,
                          std::span<std::byte const> data) {
+        shared->touch();
         return data.size();
     }
 };
@@ -230,6 +306,7 @@ struct Collected {
     std::mutex               mutex;
     std::vector<std::string> entries;
     std::vector<std::string> messages;
+    std::vector<std::string> tools;   // the tool's own messages (toolMessageCallback)
     std::vector<std::string> errors;
 
     bool anyEntryContains(std::string_view needle) {
@@ -266,8 +343,9 @@ static bool waitFor(Predicate&&               predicate,
 }
 
 int main() {
-    FakeTransport::Shared shared;
-    FakeTransport::shared = &shared;
+    // never freed: FakeTransport::shared points at it until the program ends (still reachable, not a leak)
+    FakeTransport::shared = new FakeTransport::Shared;
+    auto& shared          = *FakeTransport::shared;
 
     Collected collected;
 
@@ -295,9 +373,13 @@ int main() {
           std::lock_guard<std::mutex> const lock{collected.mutex};
           collected.errors.emplace_back(msg);
       },
-      [](std::string_view) {},
+      [&collected](std::string_view msg) {
+          std::lock_guard<std::mutex> const lock{collected.mutex};
+          collected.tools.emplace_back(msg);
+      },
       [](std::string_view) {}};
 
+    using Reader = BasicJLinkRttReader<FakeTransport>;
     reader.setNoLogTimeout(1);
     std::atomic<int>      sessionStarts{0};
     std::atomic<unsigned> sessionByte{0};
@@ -319,7 +401,6 @@ int main() {
     CHECK(shared.constructions.load() == 1, "no reconnect while the link is alive");
 
     {
-        using Reader = BasicJLinkRttReader<FakeTransport>;
         std::array<Reader::MemoryAccess, 2> const pieces{
           Reader::MemoryAccess{0x20000010, 4},
           Reader::MemoryAccess{0x200000FE, 3}
@@ -457,6 +538,48 @@ int main() {
         CHECK(shared.flashes.load() == 2 && !reader.isFlashing(),
               "and the flash request is dropped");
         CHECK(sessionStarts.load() >= 2 && sessionByte.load() == 0x42, "session start callback");
+
+        // a RAM image: flash and reset load it and start it, and never reset after that
+        JLink::RamImageStart const start{0x2000'0000, 0x2008'2000, 0x2000'0199};
+        CHECK(!reader.isRamImage(), "an ordinary image by default");
+        reader.setRamImage([&]() { return Reader::RamImageStartResult{start}; });
+        CHECK(reader.isRamImage(), "a RAM image once told");
+        auto const ramResetsBefore = shared.resets.load();
+        auto const flashesBefore   = shared.flashes.load();
+        auto const sessionsRam     = reader.sessionCount();
+        auto const ram             = reader.flashAndWait(8000ms);
+        CHECK(ram.has_value() && shared.ramFlashes.load() == 1,
+              "a RAM image is loaded and started");
+        CHECK(reader.sessionCount() > sessionsRam, "and its log comes back");
+        CHECK(shared.resets.load() == ramResetsBefore && shared.flashes.load() == flashesBefore,
+              "no reset after it (that would boot flash), no plain download");
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            CHECK(shared.lastRamStart == start, "started at its vector table");
+            CHECK(shared.preResetAtLastReset == commands, "the pre-reset commands are there too");
+        }
+        auto const ramReset = reader.resetAndWait(5000ms);
+        CHECK(ramReset.has_value() && shared.ramFlashes.load() == 2
+                && shared.resets.load() == ramResetsBefore,
+              "a reset of a RAM image loads it again instead of a reset");
+
+        // where it starts is unknown (no map symbol, no table in the hex): told, not tried
+        reader.setRamImage(
+          []() { return Reader::RamImageStartResult{std::unexpected{std::string{"no map"}}}; });
+        auto const t0       = std::chrono::steady_clock::now();
+        auto const noReset  = reader.resetAndWait(5000ms);
+        auto const tookLong = std::chrono::steady_clock::now() - t0 > 3000ms;
+        CHECK(!noReset && noReset.error() == "not reset: no map" && !tookLong,
+              "a reset says why at once");
+        auto const noFlash = reader.flashAndWait(12000ms);
+        CHECK(!noFlash && noFlash.error() == "no map", "so does a flash");
+        CHECK(shared.ramFlashes.load() == 2 && shared.resets.load() == ramResetsBefore,
+              "and neither touches the target");
+        reader.setRamImage({});
+        CHECK(!reader.isRamImage(), "an ordinary image again");
+        // the failed download ended the session: the next checks need a running one
+        CHECK(waitFor([&]() { return reader.getStatus().isRunning != 0; }, 5000ms),
+              "the log comes back after the refused flash");
     }
 
     {
@@ -546,7 +669,6 @@ int main() {
         std::this_thread::sleep_for(300ms);
         CHECK(reader.sessionCount() == waiting, "and starts no session while it is gone");
         {
-            using Reader = BasicJLinkRttReader<FakeTransport>;
             std::array<Reader::MemoryAccess, 1> const piece{
               Reader::MemoryAccess{0x20000010, 4}
             };
@@ -556,6 +678,150 @@ int main() {
         shared.blockGone = false;
         CHECK(waitFor([&]() { return reader.sessionCount() > waiting; }, 3000ms),
               "the session starts once the block is back");
+    }
+
+    // an announced reset (Kvasir_SDK Util/AnnouncedReset.hpp): the printer arms the block, and on
+    // a request drains the log, stops RTT, clears the control block id, writes the ack and closes
+    // the session - and touches nothing until the pause is over, then connects again
+    {
+        using namespace uc_log::detail::announced_reset;
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.announce = {Magic, 0, 0, 0};
+        }
+        reader.setAnnouncedReset(
+          []() -> std::optional<std::uint32_t> { return FakeTransport::Shared::AnnounceAddress; });
+        auto const sessions = reader.sessionCount();
+        reader.resetJLink();
+        auto const armed = [&]() {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            return shared.announce[1] == HostArmed;
+        };
+        CHECK(waitFor([&]() { return reader.sessionCount() > sessions && armed(); }, 3000ms),
+              "a session start arms the block");
+        auto const hellos = [&]() {
+            std::lock_guard<std::mutex> const lock{collected.mutex};
+            return std::ranges::count_if(collected.entries, [](auto const& e) {
+                return e.find("hello from target") != std::string::npos;
+            });
+        };
+        std::this_thread::sleep_for(100ms);
+        CHECK(!reader.isPausedForReset(), "no pause without a request");
+        auto const before = hellos();
+        auto const built  = shared.constructions.load();
+        {
+            // the firmware's last line, then its request
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            auto const                        frame = makeFrame(0);
+            shared.upData.insert(shared.upData.end(), frame.begin(), frame.end());
+            shared.announce[2] = 1;
+        }
+        CHECK(waitFor([&]() { return shared.resetting.load(); }, 3000ms), "the ack is written");
+        auto const ackedAt = shared.ackedAt.load();   // the write itself, not when we noticed it
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            CHECK(shared.announce[3] == 1, "ack = request");
+            using Write           = std::pair<std::uint32_t, std::uint32_t>;
+            auto const  idCleared = std::ranges::find(shared.writes, Write{0x20000100U, 0U});
+            Write const ackWrite  = {FakeTransport::Shared::AnnounceAddress + 12, 1U};
+            CHECK(idCleared != shared.writes.end(), "the control block's id is cleared");
+            CHECK(!shared.writes.empty() && shared.writes.back() == ackWrite,
+                  "the ack is the last write");
+        }
+        CHECK(shared.rttStops.load() >= 1, "RTT is stopped before it");
+        CHECK(hellos() == before + 1, "the last line before the reset is in the log");
+        CHECK(collected.anyMessageContains("the target announced a reset"),
+              "told as a status message");
+        CHECK(waitFor([&]() { return shared.open.load() == 0; }, 1000ms), "the session is closed");
+        CHECK(reader.isPausedForReset(), "the reader is paused");
+        {
+            std::array<Reader::MemoryAccess, 1> const piece{
+              Reader::MemoryAccess{0x20000010, 4}
+            };
+            auto const t0     = std::chrono::steady_clock::now();
+            auto const result = reader.accessMemory(piece, 2000ms);
+            CHECK(!result && result.error().find("announced reset") != std::string::npos
+                    && std::chrono::steady_clock::now() - t0 < 100ms,
+                  "a memory access during the pause fails at once");
+        }
+        // the chip reboots for ~1 s; then the new boot's .data: a fresh block and the RTT id
+        std::this_thread::sleep_until(ackedAt + 1000ms);
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.announce = {Magic, 0, 0, 0};
+        }
+        shared.resetting = false;
+        shared.blockGone = false;
+        CHECK(shared.touchedWhileResetting.load() == 0, "no DLL call touched the resetting target");
+        CHECK(shared.constructions.load() == built, "no reconnect during the pause");
+        CHECK(waitFor([&]() { return shared.constructions.load() > built && armed(); }, 3000ms),
+              "connected again after the pause, and armed again");
+        CHECK(std::chrono::steady_clock::now() - ackedAt >= Reader::AnnouncedResetPause,
+              "not before the pause is over");
+        CHECK(!reader.isPausedForReset(), "the pause is over");
+        shared.feed(makeFrame(0));
+        CHECK(waitFor([&]() { return hellos() == before + 2; }, 3000ms), "the log runs again");
+    }
+
+    // a session that starts before the boot has set the block up (right after a flash, .data not
+    // copied yet) looks for it again and arms it once it is there - in the same session, and a
+    // request afterwards is served as usual (on the RP2040 a reset the printer does not know of
+    // ends in the Rescue DP, so a session must never stay unarmed)
+    {
+        using namespace uc_log::detail::announced_reset;
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.announce = {0, 0, 0, 0};
+        }
+        auto const sessions = reader.sessionCount();
+        auto const notYet   = [&]() {
+            std::lock_guard<std::mutex> const lock{collected.mutex};
+            return std::ranges::count_if(collected.tools, [](auto const& m) {
+                return m.find("announced resets: no block at") != std::string::npos;
+            });
+        };
+        auto const notYetBefore = notYet();
+        reader.resetJLink();
+        CHECK(waitFor([&]() { return reader.sessionCount() > sessions; }, 3000ms),
+              "a session starts without the block");
+        auto const armed = [&]() {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            return shared.announce[1] == HostArmed;
+        };
+        std::this_thread::sleep_for(150ms);
+        CHECK(!armed(), "nothing armed while the block is not there");
+        CHECK(notYet() == notYetBefore + 1, "said once, not once per look");
+        auto const session = reader.sessionCount();
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.announce = {Magic, 0, 0, 0};
+        }
+        CHECK(waitFor(armed, 500ms), "armed once the block is set up");
+        CHECK(reader.sessionCount() == session, "in the same session");
+        CHECK(notYet() == notYetBefore + 1, "no further message");
+        auto const built = shared.constructions.load();
+        {
+            // a watchdog left to run out: the request asks the printer to stay away 3 s
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.announce[2] = (30U << 16) | 1U;
+        }
+        CHECK(waitFor([&]() { return shared.resetting.load(); }, 3000ms),
+              "a request after the late arming is acked");
+        auto const ackedAt = shared.ackedAt.load();
+        CHECK(shared.announce[3] == ((30U << 16) | 1U), "the whole request word is the ack");
+        CHECK(collected.anyMessageContains("the probe stays off it for 3000 ms"),
+              "the time the firmware asked for is told");
+        std::this_thread::sleep_for(1000ms);
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.announce = {Magic, 0, 0, 0};
+        }
+        shared.resetting = false;
+        shared.blockGone = false;
+        CHECK(waitFor([&]() { return shared.constructions.load() > built && armed(); }, 5000ms),
+              "and the session after the pause is armed again");
+        CHECK(std::chrono::steady_clock::now() - ackedAt >= 3000ms,
+              "not before the 3 s the firmware asked for");
     }
 
     // a lost connection must reconnect

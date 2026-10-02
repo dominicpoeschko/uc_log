@@ -7,7 +7,7 @@
 namespace {
 
 struct FakeActive {
-    static int operator()() { return 0; }
+    [[maybe_unused]] static int operator()() { return 0; }
 };
 
 }   // namespace

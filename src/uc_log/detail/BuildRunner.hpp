@@ -1,5 +1,7 @@
 #pragma once
 
+#include "uc_log/detail/Lifetimebound.hpp"
+
 #ifdef __GNUC__
     #pragma GCC diagnostic push
     #pragma GCC diagnostic ignored "-Wredundant-decls"
@@ -266,28 +268,30 @@ namespace uc_log { namespace FTXUIGui {
                           boost::process::process_environment{buildEnvironment}
                         };
 
-                        auto createRead
-                          = [this](auto& pipe, auto& buffer, auto& self, bool isError) {
-                                return [this, &pipe, &buffer, &self, isError]() {
-                                    boost::asio::async_read_until(
-                                      pipe,
-                                      boost::asio::dynamic_buffer(buffer),
-                                      '\n',
-                                      [this, &buffer, &self, isError](
-                                        boost::system::error_code error_code,
-                                        std::size_t               bytes_transferred) {
-                                          if(!error_code && bytes_transferred > 0) {
-                                              auto pos = buffer.find('\n');
-                                              if(pos != std::string::npos) {
-                                                  std::string const line = buffer.substr(0, pos);
-                                                  buffer.erase(0, pos + 1);
-                                                  addOutput(line, true, isError);
-                                              }
-                                              self();
+                        auto createRead = [this](auto& pipe   UC_LOG_LIFETIMEBOUND,
+                                                 auto& buffer UC_LOG_LIFETIMEBOUND,
+                                                 auto& self   UC_LOG_LIFETIMEBOUND,
+                                                 bool         isError) {
+                            return [this, &pipe, &buffer, &self, isError]() {
+                                boost::asio::async_read_until(
+                                  pipe,
+                                  boost::asio::dynamic_buffer(buffer),
+                                  '\n',
+                                  [this, &buffer, &self, isError](
+                                    boost::system::error_code error_code,
+                                    std::size_t               bytes_transferred) {
+                                      if(!error_code && bytes_transferred > 0) {
+                                          auto pos = buffer.find('\n');
+                                          if(pos != std::string::npos) {
+                                              std::string const line = buffer.substr(0, pos);
+                                              buffer.erase(0, pos + 1);
+                                              addOutput(line, true, isError);
                                           }
-                                      });
-                                };
+                                          self();
+                                      }
+                                  });
                             };
+                        };
 
                         std::function<void(void)> readOut;
                         readOut = createRead(stdoutPipe, stdoutBuffer, readOut, false);

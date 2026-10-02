@@ -2,6 +2,7 @@
 
 #include "uc_log/detail/ControlHistory.hpp"
 #include "uc_log/detail/ControlProtocol.hpp"
+#include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/detail/TcpPortStatus.hpp"
 #include "uc_log/detail/TcpServerCommon.hpp"
 
@@ -296,8 +297,8 @@ public:
     ControlServer(boost::asio::ip::address bindAddress,
                   std::uint16_t            port,
                   std::filesystem::path    socketPath,
-                  ErrorF                   errorf  = {},
-                  StatusF                  statusf = {})
+                  ErrorF errorf            UC_LOG_LIFETIMEBOUND = {},
+                  StatusF statusf          UC_LOG_LIFETIMEBOUND = {})
       : errorf_{std::move(errorf)}
       , statusf_{std::move(statusf)}
       , listener_{ioc_,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "uc_log/detail/ControlProtocol.hpp"
+#include "uc_log/detail/Lifetimebound.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -26,7 +27,7 @@ public:
     explicit ControlHistory(std::size_t limitBytes = DefaultLimitBytes) : limit_{limitBytes} {}
 
     /// Numbers `line` and keeps it; the protocol line to send live.
-    std::string const& append(control::LogLine& line) {
+    std::string const& append(control::LogLine& line) UC_LOG_LIFETIMEBOUND {
         line.seq = firstSeq_ + entries_.size();
         entries_.push_back(Entry{.level  = line.level,
                                  .module = line.module,

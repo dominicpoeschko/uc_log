@@ -1,6 +1,7 @@
 #pragma once
 
 #include "uc_log/detail/DuplexChannelInfo.hpp"
+#include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/detail/RttChannelMap.hpp"
 #include "uc_log/detail/TcpPortStatus.hpp"
 #include "uc_log/detail/TcpServerCommon.hpp"
@@ -46,14 +47,14 @@ namespace uc_log { namespace detail {
         template<typename ErrorMessageF,
                  typename MessageF,
                  typename StateChangeF>
-        DuplexChannelServer(boost::asio::io_context& ioc,
-                            boost::asio::ip::address bindAddress,
-                            std::string              name_,
-                            std::uint16_t            port,
-                            ErrorMessageF&&          errorMessagef_,
-                            MessageF&&               messagef_,
-                            StateChangeF&&           stateChangef_,
-                            std::filesystem::path    socketPath = {})
+        DuplexChannelServer(boost::asio::io_context& ioc UC_LOG_LIFETIMEBOUND,
+                            boost::asio::ip::address     bindAddress,
+                            std::string                  name_,
+                            std::uint16_t                port,
+                            ErrorMessageF&&              errorMessagef_,
+                            MessageF&&                   messagef_,
+                            StateChangeF&&               stateChangef_,
+                            std::filesystem::path        socketPath = {})
           : name{std::move(name_)}
           , errorMessagef{std::forward<ErrorMessageF>(errorMessagef_)}
           , messagef{std::forward<MessageF>(messagef_)}
@@ -277,13 +278,13 @@ namespace uc_log { namespace detail {
         template<typename ErrorMessageF,
                  typename MessageF,
                  typename StateChangeF>
-        DuplexChannelHub(boost::asio::io_context& ioc_,
-                         boost::asio::ip::address bindAddress_,
-                         std::uint16_t            basePort_,
-                         ErrorMessageF&&          errorMessagef_,
-                         MessageF&&               messagef_,
-                         StateChangeF&&           stateChangef_,
-                         std::filesystem::path    socketDir_ = {})
+        DuplexChannelHub(boost::asio::io_context& ioc_ UC_LOG_LIFETIMEBOUND,
+                         boost::asio::ip::address      bindAddress_,
+                         std::uint16_t                 basePort_,
+                         ErrorMessageF&&               errorMessagef_,
+                         MessageF&&                    messagef_,
+                         StateChangeF&&                stateChangef_,
+                         std::filesystem::path         socketDir_ = {})
           : errorMessagef{std::forward<ErrorMessageF>(errorMessagef_)}
           , messagef{std::forward<MessageF>(messagef_)}
           , stateChangef{std::forward<StateChangeF>(stateChangef_)}

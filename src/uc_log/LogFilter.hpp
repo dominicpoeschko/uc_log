@@ -1,6 +1,7 @@
 #pragma once
 
 #include "LogLevel.hpp"
+#include "detail/Lifetimebound.hpp"
 #include "detail/Signature.hpp"
 
 #include <algorithm>
@@ -81,7 +82,7 @@ namespace uc_log { namespace detail {
         return level < FilterLevelNames.size() ? FilterLevelNames[level] : std::string_view{"?"};
     }
 
-    constexpr std::string_view trimmed(std::string_view s) {
+    constexpr std::string_view trimmed(std::string_view s UC_LOG_LIFETIMEBOUND) {
         while(!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\r')) {
             s.remove_prefix(1);
         }

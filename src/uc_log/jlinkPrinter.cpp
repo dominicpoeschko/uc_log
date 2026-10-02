@@ -8,12 +8,15 @@
 #include "uc_log/LogLevel.hpp"
 #include "uc_log/RttBlockInfo.hpp"
 #include "uc_log/TimeDelayedQueue.hpp"
+#include "uc_log/detail/AnnouncedReset.hpp"
 #include "uc_log/detail/ControlEvents.hpp"
 #include "uc_log/detail/ControlServer.hpp"
 #include "uc_log/detail/DuplexChannelServer.hpp"
 #include "uc_log/detail/HexImage.hpp"
+#include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 #include "uc_log/detail/LogFormat.hpp"
+#include "uc_log/detail/RamImage.hpp"
 #include "uc_log/detail/RttChannelMap.hpp"
 #include "uc_log/detail/TcpServerCommon.hpp"
 #include "uc_log/metric_utils.hpp"
@@ -174,8 +177,8 @@ struct LogFilePrinter {
         }
     }};
 
-    LogFilePrinter(uc_log::FTXUIGui::Gui& gui,
-                   std::string const&     logDir)
+    LogFilePrinter(uc_log::FTXUIGui::Gui& gui UC_LOG_LIFETIMEBOUND,
+                   std::string const&         logDir)
       : errorMessagef{[&gui](auto const& m) { gui.errorMessage(m); }}
       , statusChangef{[&gui](LogFileStatus    s,
                              std::string_view p) { gui.setLogFileStatus(s, p); }} {
@@ -274,19 +277,32 @@ struct FirmwareCheck {
     std::mutex                     mutex;
     uc_log::control::FirmwareCheck summary{};
 
+    /// `ramImage`: the image lives in RAM, which changes as it runs - nothing to compare, and
+    /// that is no error (emit's third argument says whether it is one).
     template<typename ReadF,
              typename EmitF>
     void run(std::string const& hexFile,
+             bool               ramImage,
              ReadF&&            read,
              EmitF&&            emit) {
         using uc_log::detail::ImageCheck;
         std::string                    text;
+        bool                           isError = true;
         uc_log::control::FirmwareCheck state{};
         std::ifstream                  file{hexFile};
         auto const image = file ? uc_log::detail::parseIntelHex(file)
                                 : std::unexpected{fmt::format("cannot open {:?}", hexFile)};
         if(!image) {
             text = fmt::format("firmware not checked: {}", image.error());
+        } else if(ramImage) {
+            auto const crc = uc_log::detail::imageCrc(*image);
+            state          = {.state = State::unchecked, .build = crc};
+            isError        = false;
+            text           = fmt::format(
+              "firmware not checked: {} is a RAM image (build {:08x}), and RAM "
+              "changes as it runs",
+              hexFile,
+              crc);
         } else {
             auto const      crc   = uc_log::detail::imageCrc(*image);
             auto const      check = uc_log::detail::compareImage(*image, read);
@@ -298,7 +314,8 @@ struct FirmwareCheck {
                        std::chrono::time_point_cast<std::chrono::system_clock::duration>(
                          std::chrono::file_clock::to_sys(written)));
             if(check.result == ImageCheck::Result::match) {
-                state = {.state = State::match, .build = crc};
+                state   = {.state = State::match, .build = crc};
+                isError = false;
                 text
                   = fmt::format("firmware matches {} (build {:08x}, {} bytes compared, built {})",
                                 hexFile,
@@ -324,7 +341,7 @@ struct FirmwareCheck {
             std::lock_guard<std::mutex> const lock{mutex};
             summary = state;
         }
-        emit(checkState(state), text);
+        emit(checkState(state), text, isError);
     }
 
     uc_log::control::FirmwareCheck get() {
@@ -371,6 +388,7 @@ int main(int    argc,
     std::string                     controlSocket{};
     std::string                     transport{};
     bool                            disableUi{false};
+    bool                            ramImage{false};
     std::vector<JLink::MemoryWrite> preResetCommands{};
     std::string                     logFilterFile{};
     std::size_t                     controlHistoryMb{};
@@ -432,6 +450,10 @@ int main(int    argc,
           "repeatable, in order; only 'w4 <address> <value>'. What a chip needs there (the RP "
           "chips park core 1) comes from its package's TARGET_JLINK_CONNECT_COMMANDS",
           cxxopts::value<std::vector<std::string>>())(
+          "ram_image",
+          "the image lives in RAM (a Kvasir RAM_ONLY target): a reset would boot flash, so flash "
+          "and reset load the hex file and start it at its vector table (VTOR, MSP, xPSR, PC from "
+          "the map file's _LINKER_vectors_start_ and the hex), as the target's J-Link script does")(
           "control_socket",
           "unix domain socket of the control server (--transport unix; JSON lines, "
           "detail/ControlProtocol.hpp): 'auto' = control.sock in the log directory, where "
@@ -456,6 +478,7 @@ int main(int    argc,
         probe               = result["probe"].as<std::string>();
         bindAddressString   = result["bind_address"].as<std::string>();
         disableUi           = result.count("disable_ui") > 0;
+        ramImage            = result.count("ram_image") > 0;
         controlSocket       = result["control_socket"].as<std::string>();
         transport           = result["transport"].as<std::string>();
         logFilterFile       = result["log_filter"].as<std::string>();
@@ -667,19 +690,37 @@ int main(int    argc,
     };
 
     rttReader.setPreResetCommands(preResetCommands);
+    // a firmware that announces its own resets (Kvasir_SDK Util/AnnouncedReset.hpp) has the block
+    // in its map; asked at every session start, a rebuild may add or move it
+    rttReader.setAnnouncedReset([&mapFile]() -> std::optional<std::uint32_t> {
+        auto const address = uc_log::detail::announced_reset::addressFromMap(mapFile);
+        if(!address) { return std::nullopt; }
+        return *address;
+    });
+    if(ramImage) {
+        // asked before each flash and reset: a rebuild may have moved the table
+        rttReader.setRamImage(
+          [&mapFile, &hexFile]() { return uc_log::detail::ramImageStart(mapFile, hexFile); });
+        gui.toolStatusMessage(
+          fmt::format("RAM image: flash and reset load {} and start it at its "
+                      "vector table, no reset after the download",
+                      hexFile));
+    }
 
     FirmwareCheck firmwareCheck;
     rttReader.setOnSessionStart([&](JLinkRttReader::DirectMemoryRead const& read) {
-        firmwareCheck.run(hexFile,
-                          read,
-                          [&gui](uc_log::FTXUIGui::FirmwareState state, std::string const& text) {
-                              gui.firmwareChecked(state);
-                              if(state == uc_log::FTXUIGui::FirmwareState::match) {
-                                  gui.statusMessage(text);
-                              } else {
-                                  gui.errorMessage(text);
-                              }
-                          });
+        firmwareCheck.run(
+          hexFile,
+          ramImage,
+          read,
+          [&gui](uc_log::FTXUIGui::FirmwareState state, std::string const& text, bool isError) {
+              gui.firmwareChecked(state);
+              if(isError) {
+                  gui.errorMessage(text);
+              } else {
+                  gui.statusMessage(text);
+              }
+          });
     });
 
     // Cleared again before the reader goes: its requests run on the reader.
@@ -709,7 +750,8 @@ int main(int    argc,
                   .firmware   = firmwareCheck.get(),
                   .errors     = logFilePrinter.statusErrorCount(),
                   .log_seq    = controlServer->logSeq(),
-                  .started_us = startedUs};
+                  .started_us = startedUs,
+                  .ram_image  = rttReader.isRamImage()};
             },
           .reset =
             [&rttReader](std::function<bool()> const& cancelled) {

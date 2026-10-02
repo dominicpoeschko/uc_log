@@ -108,6 +108,8 @@ struct StatusAnswer {
     std::uint64_t errors{};       // error lines in the Status tab
     std::uint64_t log_seq{};      // the seq the next log line gets
     std::int64_t  started_us{};   // seqs are only valid for this start
+    // started with --ram_image: flash and reset load the image into RAM and start it there
+    bool ram_image{};
 };
 
 /// A line of the Status tab.

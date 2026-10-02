@@ -2,6 +2,7 @@
 #include "jlink/JLink.hpp"
 #include "remote_fmt/remote_fmt.hpp"
 #include "uc_log/RttBlockInfo.hpp"
+#include "uc_log/detail/AnnouncedReset.hpp"
 #include "uc_log/detail/RttChannel.hpp"
 #include "uc_log/detail/RttChannelMap.hpp"
 
@@ -73,6 +74,34 @@ private:
     // target that already talks again
     static constexpr int  ResetDrainReads  = 64;
     static constexpr auto ControlBlockPoll = std::chrono::milliseconds{20};
+    // An announced reset (uc_log/detail/AnnouncedReset.hpp, Kvasir_SDK Util/AnnouncedReset.hpp):
+    // how often the block is read (the firmware waits >= 0.5 s for the ack), how long the
+    // target gets to put its last lines into the rings before they are drained, and how long
+    // the probe stays off the chip after the ack (the RP2040's reboot into its boot ROM or the
+    // next image takes a few ms; the firmware's grace after the ack is ~0.1 s).
+    static constexpr auto AnnouncedResetPoll = std::chrono::milliseconds{10};
+    // how often a session that found no announced-reset block looks for it again, and how long
+    // a session start waits for it (a boot copies .data a few ms after the reset)
+    static constexpr auto AnnouncedResetArmRetry = std::chrono::milliseconds{20};
+    static constexpr auto AnnouncedResetArmWait  = std::chrono::milliseconds{100};
+    static constexpr auto AnnouncedResetDrain    = std::chrono::milliseconds{20};
+
+public:
+    static constexpr auto AnnouncedResetPause = std::chrono::milliseconds{1500};
+    // the longest stay-away a firmware's request is granted (its field holds up to 6553.5 s)
+    static constexpr auto AnnouncedResetPauseMax = std::chrono::milliseconds{600'000};   // 10 min
+
+private:
+    template<typename Transport>
+    static std::optional<uc_log::detail::announced_reset::Block>
+    readAnnouncedResetBlock(Transport&    jlink,
+                            std::uint32_t address) {
+        std::array<std::byte, uc_log::detail::announced_reset::BlockSize> raw{};
+        try {
+            jlink.readMemory(address, raw);
+        } catch(std::exception const&) { return std::nullopt; }
+        return uc_log::detail::announced_reset::decode(raw);
+    }
 
     // true when the core was reset since the last look (reading clears the bit); a failed read
     // says no
@@ -353,6 +382,8 @@ private:
 
         while(!stoken.stop_requested()) {
             toolMessageCallback("start jlink");
+            bool announcedReset = false;   // the session ended for a reset the target announced
+            auto announcedPause = AnnouncedResetPause;   // ... and the probe stays off this long
             try {
                 {
                     std::lock_guard<std::mutex> lock{connectionMutex};
@@ -377,14 +408,24 @@ private:
 
                 // taken while it runs: a request can only be withdrawn before or between attempts
                 if(flashFlag.exchange(false)) {
-                    flashing_ = true;
+                    flashing_      = true;
+                    bool ramImage_ = false;
                     try {
-                        toolMessageCallback("resetting target");
-                        jlink.resetTarget();
-                        toolMessageCallback("resetting target succeeded");
-                        toolMessageCallback("flashing target");
-                        jlink.flash(hexFileNameCallback());
-                        toolMessageCallback("flashing target succeeded");
+                        if(auto const ram = ramImageStart(); ram) {
+                            // no reset after the download: it would boot flash, not the image
+                            ramImage_ = true;
+                            if(!*ram) { throw std::runtime_error{ram->error()}; }
+                            toolMessageCallback("flashing RAM image");
+                            jlink.flashRamImage(hexFileNameCallback(), **ram);
+                            toolMessageCallback("flashing RAM image succeeded, started it");
+                        } else {
+                            toolMessageCallback("resetting target");
+                            jlink.resetTarget();
+                            toolMessageCallback("resetting target succeeded");
+                            toolMessageCallback("flashing target");
+                            jlink.flash(hexFileNameCallback());
+                            toolMessageCallback("flashing target succeeded");
+                        }
                     } catch(std::exception const& e) {
                         // a J-Link with a second client fails about every other download
                         if(++flashAttempt >= FlashAttempts) {
@@ -396,29 +437,47 @@ private:
                         flashing_ = false;
                         throw;
                     }
-                    flashAttempt    = 0;
-                    flashing_       = false;
-                    targetResetFlag = true;
-                    restart         = true;
+                    flashAttempt = 0;
+                    flashing_    = false;
+                    if(!ramImage_) { targetResetFlag = true; }
+                    restart = true;
                     setOutcome(flashOutcome_, std::string{}, sessionCount());
                 }
                 if(targetResetFlag.exchange(false)) {
                     // every resetAndWait() numbered up to here is served by this reset
-                    auto const covered = resetRequests_.load();
-                    toolMessageCallback("resetting target");
-                    try {
-                        jlink.resetTarget();
-                    } catch(...) {
-                        targetResetFlag = true;
-                        throw;
+                    auto const  covered = resetRequests_.load();
+                    auto const  ram     = ramImageStart();
+                    std::string error;
+                    if(ram && !*ram) {
+                        // nothing to start: told, not retried (the files will not change)
+                        error = ram->error();
+                        toolErrorMessageCallback(fmt::format("not reset: {}", error));
+                    } else {
+                        // a RAM image is lost by a reset (the boot ROM boots flash): load it again
+                        toolMessageCallback(
+                          ram ? fmt::format(
+                                  "resetting the RAM image: loading {} again and starting it",
+                                  hexFileNameCallback())
+                              : std::string{"resetting target"});
+                        try {
+                            if(ram) {
+                                jlink.flashRamImage(hexFileNameCallback(), **ram);
+                            } else {
+                                jlink.resetTarget();
+                            }
+                        } catch(...) {
+                            targetResetFlag = true;
+                            throw;
+                        }
+                        toolMessageCallback("resetting target succeeded");
+                        restart = true;
                     }
-                    toolMessageCallback("resetting target succeeded");
                     {
                         std::lock_guard<std::mutex> const lock{resetOutcome_.mutex};
                         resetOutcome_.serial         = covered;
                         resetOutcome_.sessionsBefore = sessionCount();
+                        resetOutcome_.error          = std::move(error);
                     }
-                    restart = true;
                 }
 
                 if(restart) { continue; }
@@ -426,6 +485,13 @@ private:
                 // our own reset (or flash) set it: only a reset after this point is from outside
                 (void)resetSinceLastLook(jlink);
                 auto const stringConstantsMap = catalogMapCallback();
+
+                // Arm the announced-reset block before anything slow (firmware check, RAM search):
+                // a firmware that resets itself early in its boot must find the printer armed, or
+                // on the RP2040 the DLL "rescues" the chip from the reset it sees. Right after a
+                // reset .data is not copied yet: a few ms of polling.
+                auto const announceAddress = announcedResetAddress();   // the map file, once
+                auto       announceAt      = armAnnouncedResetSoon(jlink, announceAddress, stoken);
 
                 // Firmware check before startRtt: until then the target keeps its lines in its
                 // rings, so the slow image read loses none.
@@ -475,18 +541,15 @@ private:
                 auto previousStatus   = rttStatus;
                 auto lastBlockDump    = Clock::time_point{};
                 auto lossReport       = LossReport{};
+                auto nextAnnouncePoll = Clock::time_point{};
+                auto nextAnnounceArm  = Clock::now() + AnnouncedResetArmRetry;
 
                 while(!stoken.stop_requested() && !jlinkResetFlag && !targetResetFlag && !flashFlag)
                 {
                     bool const haltedRecently = Clock::now() < lastHaltDetected + HaltGracePeriod;
-                    if(resetSinceLastLook(jlink)) {
-                        // Someone else reset the target (picotool, a watchdog, the button).
-                        // SEGGER's RTT reader carries on across it, and when the new image - or
-                        // the RP2350 boot ROM, which zeroes the block - rewrites the control
-                        // block 10-20 ms later, it reads an old lap of a ring: lines a second
-                        // time, then garbage (i2c_testing combo, picotool reboot -u,
-                        // 2026-09-25). What the DLL holds now it read before that: take it,
-                        // then start over as after a reset of our own.
+                    // what the DLL holds of each log channel, decoded; the bytes of a line cut
+                    // off at the end are counted and dropped
+                    auto const drainAll = [&]() {
                         std::size_t unfinished{};
                         for(auto& [upIndex, channelId, channel] : channels) {
                             for(int i = 0; i != ResetDrainReads; ++i) {
@@ -502,6 +565,52 @@ private:
                                           haltedRecently);
                             unfinished += channel.buffer.size();
                         }
+                        return unfinished;
+                    };
+                    if(announceAddress && !announceAt && Clock::now() >= nextAnnounceArm) {
+                        nextAnnounceArm = Clock::now() + AnnouncedResetArmRetry;
+                        announceAt      = armAnnouncedReset(jlink, announceAddress, true);
+                    }
+                    if(announceAt && Clock::now() >= nextAnnouncePoll) {
+                        nextAnnouncePoll = Clock::now() + AnnouncedResetPoll;
+                        auto const block = readAnnouncedResetBlock(jlink, *announceAt);
+                        if(block && block->pending()) {
+                            // The firmware is about to reset itself and waits for our ack:
+                            // drain its last lines, stop RTT, clear the control block's id (a
+                            // reboot into a boot ROM keeps RAM), then ack as the last access -
+                            // the session closes and nothing touches the target until the
+                            // pause is over.
+                            std::this_thread::sleep_for(AnnouncedResetDrain);
+                            auto const unfinished = drainAll();
+                            // the firmware may ask for longer (a watchdog it lets run out)
+                            announcedPause
+                              = std::clamp(std::chrono::milliseconds{block->stayAwayMs()},
+                                           AnnouncedResetPause,
+                                           AnnouncedResetPauseMax);
+                            messageCallback(fmt::format(
+                              "the target announced a reset: the probe stays off it for {} ms{}",
+                              announcedPause.count(),
+                              unfinished == 0
+                                ? std::string{}
+                                : fmt::format(" ({} byte{} of an unfinished line dropped)",
+                                              unfinished,
+                                              unfinished == 1 ? "" : "s")));
+                            jlink.stopRtt();
+                            if(blockInfo.address != 0) { jlink.writeWord(blockInfo.address, 0); }
+                            jlink.writeWord(*announceAt
+                                              + uc_log::detail::announced_reset::AckOffset,
+                                            block->request);
+                            announcedReset = true;
+                            break;
+                        }
+                    }
+                    if(resetSinceLastLook(jlink)) {
+                        // Someone else reset the target (picotool, a watchdog, the button).
+                        // SEGGER's RTT reader carries on across it and, once the new image or
+                        // the boot ROM rewrites the control block, reads an old lap of a ring.
+                        // What the DLL holds now it read before that: take it, then start over
+                        // as after a reset of our own.
+                        auto const unfinished = drainAll();
                         messageCallback(fmt::format(
                           "the target was reset from outside the printer: a new RTT session{}",
                           unfinished == 0
@@ -603,6 +712,13 @@ private:
                     serviceProbeListRequest();
                     serviceMemoryAccesses(jlink);
                 }
+                if(stoken.stop_requested() && announceAt) {
+                    // the printer goes: a later reset of the firmware must not wait for it
+                    try {
+                        jlink.writeWord(*announceAt + uc_log::detail::announced_reset::ArmedOffset,
+                                        0);
+                    } catch(std::exception const&) {}
+                }
             } catch(std::exception const& e) {
                 toolErrorMessageCallback(fmt::format("caught {}", e.what()));
                 std::this_thread::sleep_for(std::chrono::milliseconds{1000});
@@ -614,7 +730,93 @@ private:
             setStatusNotRunning();
             failMemoryAccesses("the target is not connected");
             toolMessageCallback("stopped jlink");
+            if(announcedReset) { pauseForAnnouncedReset(stoken, announcedPause); }
         }
+    }
+
+    // The session is closed (the transport is gone): no DLL call until the pause is over, and
+    // memory accesses asked meanwhile fail at once instead of waiting for it.
+    void pauseForAnnouncedReset(std::stop_token const&    stoken,
+                                std::chrono::milliseconds pause) {
+        pausedForReset_ = true;
+        auto const end  = Clock::now() + pause;
+        while(!stoken.stop_requested() && Clock::now() < end) {
+            failMemoryAccesses(std::string{PausedMessage});
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+        pausedForReset_ = false;
+        failMemoryAccesses(std::string{PausedMessage});
+        // the next session waits for the new boot's control block (its id was cleared)
+        awaitControlBlock_ = true;
+        toolMessageCallback("the announced reset is over: connecting again");
+    }
+
+    static constexpr std::string_view PausedMessage{
+      "target paused for an announced reset: the probe stays off it"};
+
+    // armAnnouncedReset() polled quietly for up to AnnouncedResetArmWait; reported once if the
+    // block is still not there (the session's loop keeps looking every AnnouncedResetArmRetry).
+    template<typename Transport>
+    std::optional<std::uint32_t> armAnnouncedResetSoon(Transport&                          jlink,
+                                                       std::optional<std::uint32_t> const& address,
+                                                       std::stop_token const&              stoken) {
+        if(!address) { return std::nullopt; }
+        auto const end = Clock::now() + AnnouncedResetArmWait;
+        while(true) {
+            if(auto const armed = armAnnouncedReset(jlink, address, true); armed) { return armed; }
+            if(stoken.stop_requested() || Clock::now() >= end) { break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        return armAnnouncedReset(jlink, address, false);   // says why
+    }
+
+    std::optional<std::uint32_t> announcedResetAddress() {
+        std::function<std::optional<std::uint32_t>()> f;
+        {
+            std::lock_guard<std::mutex> lock{connectionMutex};
+            f = announcedResetAddressCallback;
+        }
+        if(!f) { return std::nullopt; }
+        return f();
+    }
+
+    // The block's address once armed for this session (the firmware then waits for our ack
+    // before resetting itself); nullopt: not armed now. `retry`: no message unless it succeeds.
+    template<typename Transport>
+    std::optional<std::uint32_t> armAnnouncedReset(Transport&                          jlink,
+                                                   std::optional<std::uint32_t> const& address,
+                                                   bool                                retry) {
+        if(!address) { return std::nullopt; }
+        auto const block = readAnnouncedResetBlock(jlink, *address);
+        if(!block || !block->valid()) {
+            if(!retry) {
+                toolMessageCallback(fmt::format(
+                  "announced resets: no block at {:#010x} yet ({} not set up or not readable) - "
+                  "looking again every {} ms",
+                  *address,
+                  uc_log::detail::announced_reset::Symbol,
+                  AnnouncedResetArmRetry.count()));
+            }
+            return std::nullopt;
+        }
+        try {
+            jlink.writeWord(*address + uc_log::detail::announced_reset::ArmedOffset,
+                            uc_log::detail::announced_reset::HostArmed);
+        } catch(std::exception const& e) {
+            if(!retry) {
+                toolErrorMessageCallback(
+                  fmt::format("announced resets: arming the block at {:#010x} failed: {}",
+                              *address,
+                              e.what()));
+            }
+            return std::nullopt;
+        }
+        toolMessageCallback(
+          fmt::format("announced resets: listening at {:#010x} (request {}, ack {})",
+                      *address,
+                      block->request,
+                      block->ack));
+        return address;
     }
 
     std::string   host;
@@ -648,6 +850,24 @@ private:
     std::optional<ConnectionSettings> pendingConnection;
     std::atomic<bool>                 hasPreResetCommandsChange;
     std::vector<JLink::MemoryWrite>   preResetCommands;   // guarded by connectionMutex
+
+public:
+    using RamImageStartResult = std::expected<JLink::RamImageStart, std::string>;
+
+private:
+    // set: the image lives in RAM, flash and reset load it and start it (guarded by connectionMutex)
+    std::function<RamImageStartResult()> ramImageStartCallback;
+
+    // nullopt: an ordinary image; else where the RAM image starts, or why that is not known
+    std::optional<RamImageStartResult> ramImageStart() {
+        std::function<RamImageStartResult()> f;
+        {
+            std::lock_guard<std::mutex> lock{connectionMutex};
+            f = ramImageStartCallback;
+        }
+        if(!f) { return std::nullopt; }
+        return f();
+    }
 
     template<typename T>
     void applyPreResetCommands(T& jlink) {
@@ -684,13 +904,16 @@ private:
         o.error          = std::move(error);
     }
 
-    Outcome                                          flashOutcome_;
-    Outcome                                          resetOutcome_;   // serial: requests covered
-    std::atomic<std::uint64_t>                       resetRequests_{0};
-    std::atomic<unsigned>                            flashAttempt{};
-    std::atomic<bool>                                flashing_{false};
-    std::atomic<std::uint64_t>                       sessionCount_{0};
-    std::atomic<bool>                                halted_{false};
+    Outcome                    flashOutcome_;
+    Outcome                    resetOutcome_;   // serial: requests covered
+    std::atomic<std::uint64_t> resetRequests_{0};
+    std::atomic<unsigned>      flashAttempt{};
+    std::atomic<bool>          flashing_{false};
+    std::atomic<std::uint64_t> sessionCount_{0};
+    std::atomic<bool>          halted_{false};
+    std::atomic<bool>          pausedForReset_{false};
+    // guarded by connectionMutex; empty or nullopt: the image has no announced-reset block
+    std::function<std::optional<std::uint32_t>()>    announcedResetAddressCallback;
     std::mutex                                       sessionStartMutex;
     std::function<void(DirectMemoryRead const&)>     sessionStartCallback;
     std::mutex                                       memoryAccessesMutex;
@@ -745,6 +968,7 @@ public:
     /// Read (and write) while the core runs. From any thread; blocks until done or `timeout`.
     MemoryResult accessMemory(std::span<MemoryAccess const> accesses,
                               std::chrono::milliseconds timeout = std::chrono::milliseconds{250}) {
+        if(pausedForReset_) { return std::unexpected{std::string{PausedMessage}}; }
         auto pending = std::make_shared<PendingMemoryAccess>();
         pending->accesses.assign(accesses.begin(), accesses.end());
         auto future = pending->result.get_future();
@@ -823,6 +1047,9 @@ public:
             if(!session) {
                 std::lock_guard<std::mutex> const lock{resetOutcome_.mutex};
                 if(resetOutcome_.serial < request) { continue; }
+                if(!resetOutcome_.error.empty()) {
+                    return std::unexpected{"not reset: " + resetOutcome_.error};
+                }
                 session = resetOutcome_.sessionsBefore;
             }
             if(sessionCount() != *session && getStatus().isRunning != 0) { return {}; }
@@ -886,6 +1113,32 @@ public:
         }
         hasPreResetCommandsChange.store(true, std::memory_order_release);
     }
+
+    /// An image that lives in RAM (a Kvasir RAM_ONLY target): a reset would boot flash, so flash
+    /// and reset load it and start it at its vector table (JLink::flashRamImage) instead. `f`
+    /// tells where it starts, asked anew before each of them (a rebuild may move it). Empty: an
+    /// ordinary image.
+    void setRamImage(std::function<RamImageStartResult()> f) {
+        std::lock_guard<std::mutex> lock{connectionMutex};
+        ramImageStartCallback = std::move(f);
+    }
+
+    bool isRamImage() {
+        std::lock_guard<std::mutex> lock{connectionMutex};
+        return static_cast<bool>(ramImageStartCallback);
+    }
+
+    /// The image's announced-reset block (Kvasir_SDK Util/AnnouncedReset.hpp): `f` gives its
+    /// address, asked anew at every session start (from the map file; nullopt: none, the
+    /// feature is off). The printer arms it, and when the firmware announces a reset of its own
+    /// the session is closed and the probe stays off the chip for AnnouncedResetPause.
+    void setAnnouncedReset(std::function<std::optional<std::uint32_t>()> f) {
+        std::lock_guard<std::mutex> lock{connectionMutex};
+        announcedResetAddressCallback = std::move(f);
+    }
+
+    /// True while the probe stays off the chip for an announced reset.
+    bool isPausedForReset() const { return pausedForReset_; }
 
     void flash() { flashFlag = true; }
 

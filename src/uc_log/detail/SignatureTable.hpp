@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Lifetimebound.hpp"
 #include "Signature.hpp"
 #include "remote_fmt/catalog.hpp"
 
@@ -40,7 +41,8 @@ namespace uc_log { namespace detail {
                                                    std::string{signature}});
         }
 
-        SignatureInfo const* find(std::optional<remote_fmt::catalog_id> id) const {
+        SignatureInfo const*
+        find(std::optional<remote_fmt::catalog_id> id) const UC_LOG_LIFETIMEBOUND {
             if(!id) { return nullptr; }
             auto const it = entries.find(*id);
             return it == entries.end() ? nullptr : &it->second;

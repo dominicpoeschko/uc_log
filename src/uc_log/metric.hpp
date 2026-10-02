@@ -1,5 +1,6 @@
 #pragma once
 
+#include "detail/Lifetimebound.hpp"
 #include "remote_fmt/remote_fmt.hpp"
 
 #include <array>
@@ -18,7 +19,7 @@ template<typename ValueType,
 struct Metric : metric_tag {
     ValueType const& value;
 
-    Metric(ValueType const& value_) : value{value_} {}
+    Metric(ValueType const& value_ UC_LOG_LIFETIMEBOUND) : value{value_} {}
 
     static constexpr auto Name  = Name_;
     static constexpr auto Unit  = Unit_;
@@ -98,7 +99,7 @@ namespace detail {
 template<sc::StringConstant Name,
          sc::StringConstant UnitOrScope = sc::StringConstant<>{},
          sc::StringConstant Scope       = sc::StringConstant<>{}>
-constexpr auto metric(auto const& value) {
+constexpr auto metric(auto const& value UC_LOG_LIFETIMEBOUND) {
     using ValueType = std::remove_cvref_t<decltype(value)>;
     if constexpr(detail::isMetricQuantity<ValueType>) {
 #if REMOTE_FMT_USE_MP_UNITS

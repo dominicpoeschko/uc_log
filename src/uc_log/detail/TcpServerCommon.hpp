@@ -42,6 +42,7 @@
 #endif
 
 #include "remote_fmt/fmt_wrapper.hpp"
+#include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/detail/TcpPortStatus.hpp"
 
 #include <atomic>
@@ -147,7 +148,7 @@ namespace uc_log { namespace detail {
         boost::asio::io_context& ioc;
         std::jthread             thread;
 
-        explicit AsioContextRunner(AsioContext& context)
+        explicit AsioContextRunner(AsioContext& context UC_LOG_LIFETIMEBOUND)
           : ioc{context.ioc}
           , thread{[this](std::stop_token const& stoken) {
               std::stop_callback const onStop{stoken, [this]() { ioc.stop(); }};
@@ -183,11 +184,11 @@ namespace uc_log { namespace detail {
         std::vector<std::byte>   recvData;
 
         template<typename ErrorF>
-        TcpSession(StreamSocket socket_,
-                   std::size_t  sendQueueCap_,
-                   ErrorF&&     errorf_,
-                   DataF        onData_,
-                   GoneF        onGone_)
+        TcpSession(StreamSocket  socket_,
+                   std::size_t   sendQueueCap_,
+                   ErrorF&&      errorf_,
+                   DataF onData_ UC_LOG_LIFETIMEBOUND,
+                   GoneF onGone_ UC_LOG_LIFETIMEBOUND)
           : socket{std::move(socket_)}
           , sendQueueCap{sendQueueCap_}
           , errorf{std::forward<ErrorF>(errorf_)}
@@ -341,12 +342,12 @@ namespace uc_log { namespace detail {
         template<typename AcceptF,
                  typename ErrorF,
                  typename StatusChangeF>
-        TcpListener(boost::asio::io_context& ioc_,
-                    boost::asio::ip::address bindAddress_,
-                    AcceptF&&                onAccept_,
-                    ErrorF&&                 errorf_,
-                    StatusChangeF&&          statusChangef_,
-                    std::filesystem::path    socketPath_ = {})
+        TcpListener(boost::asio::io_context& ioc_ UC_LOG_LIFETIMEBOUND,
+                    boost::asio::ip::address      bindAddress_,
+                    AcceptF&&                     onAccept_,
+                    ErrorF&&                      errorf_,
+                    StatusChangeF&&               statusChangef_,
+                    std::filesystem::path         socketPath_ = {})
           : ioc{ioc_}
           , bindAddress{std::move(bindAddress_)}
           , onAccept{std::forward<AcceptF>(onAccept_)}

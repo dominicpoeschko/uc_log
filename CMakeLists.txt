@@ -77,7 +77,7 @@ find_or_fetch_package(
     GIT_REPOSITORY
     https://github.com/dominicpoeschko/aglio.git
     GIT_TAG
-    v0.2.5
+    v0.2.6
     GIT_BRANCH
     master)
 
@@ -135,6 +135,13 @@ if(UC_LOG_BUILD_PRINTER)
             GIT_BRANCH
             master)
 
+        if(TARGET boost_container AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+            # libc++ 23 opens namespace std with a '#pragma clang attribute push' that applies to functions only;
+            # boost/container/detail/std_fwd.hpp forward-declares just class templates in it, so clang warns three times
+            # per boost_container source. Boost's own code, not ours: silence it there.
+            target_compile_options(boost_container PRIVATE -Wno-pragma-clang-attribute)
+        endif()
+
         set(FMT_INSTALL OFF)
         find_or_fetch_package(
             fmt
@@ -161,7 +168,7 @@ if(UC_LOG_BUILD_PRINTER)
             GIT_REPOSITORY
             https://github.com/ArthurSonzogni/ftxui
             GIT_TAG
-            v7.0.2
+            v7.0.3
             GIT_BRANCH
             main)
 
@@ -221,7 +228,9 @@ if(UC_LOG_BUILD_PRINTER)
         endif()
     else()
         include(${cmake_helpers_SOURCE_DIR}/HostBuild.cmake)
-        configure_host_build(uc_log_printer)
+        # The printer is built from the aglio the target is built from. Forced into the host tree: a redirection
+        # (FETCHCONTENT_SOURCE_DIR_AGLIO) the parent has dropped would otherwise stay in the host tree's cache.
+        configure_host_build(uc_log_printer FORWARD_VARS FETCHCONTENT_SOURCE_DIR_AGLIO)
         # configure_host_build() makes a plain custom target, which is excluded from ALL. No firmware target drags the
         # printer in any more, so put it in ALL here to keep a bare `cmake --build .` building the tool.
         set_property(TARGET uc_log_printer PROPERTY EXCLUDE_FROM_ALL FALSE)
@@ -230,7 +239,9 @@ if(UC_LOG_BUILD_PRINTER)
 endif() # UC_LOG_BUILD_PRINTER
 
 function(target_add_uc_log_rtt_jlink targetname)
-    set(options VERBOSE)
+    # RAM_IMAGE: the image lives in RAM (Kvasir's RAM_ONLY): the printer's flash and reset load it and start it at its
+    # vector table instead of resetting into the boot ROM (--ram_image)
+    set(options VERBOSE RAM_IMAGE)
     set(oneValueArgs
         LOG_FILTER
         TARGET_MPU
@@ -374,6 +385,10 @@ function(target_add_uc_log_rtt_jlink targetname)
     foreach(pre_reset_command IN LISTS PARSED_ARGS_PRE_RESET_COMMANDS)
         list(APPEND command --pre_reset_command "${pre_reset_command}")
     endforeach()
+
+    if(PARSED_ARGS_RAM_IMAGE)
+        list(APPEND command --ram_image)
+    endif()
 
     # the compile-time log filter the firmware was built with (LogFilter.hpp), for the printer to show
     if(PARSED_ARGS_LOG_FILTER)

@@ -5,6 +5,7 @@
 #include "uc_log/detail/BuildRunner.hpp"
 #include "uc_log/detail/DuplexChannelInfo.hpp"
 #include "uc_log/detail/GuiEntryStore.hpp"
+#include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 #include "uc_log/detail/LogFormat.hpp"
 #include "uc_log/detail/TcpPortStatus.hpp"
@@ -879,7 +880,7 @@ namespace uc_log { namespace FTXUIGui {
 
         // recompute only when the location list or the parameters changed: the full
         // copy + sort used to run once per rendered frame
-        OutlierResult const& currentOutliers() {
+        OutlierResult const& currentOutliers() UC_LOG_LIFETIMEBOUND {
             // bitwise compare: this is change detection of the exact stored value, not a
             // numeric tolerance question
             auto const bitsDiffer = [](double a, double b) {
@@ -1457,7 +1458,7 @@ namespace uc_log { namespace FTXUIGui {
         // Unchecking a node hides its subtree; a hidden ancestor must be re-checked first.
         class ModuleFilterBase : public ftxui::ComponentBase {
         public:
-            explicit ModuleFilterBase(Gui& gui_) : gui{gui_} {
+            explicit ModuleFilterBase(Gui& gui_ UC_LOG_LIFETIMEBOUND) : gui{gui_} {
                 list = ftxui::Container::Vertical({});
                 Add(ftxui::Container::Vertical(
                   {ftxui::Button(

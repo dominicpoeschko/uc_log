@@ -1,6 +1,7 @@
 // Unit test for uc_log::detail::RttChannel: frame decode, partial frames, garbage
 // resync (timeout + size cap), halt gating, single-compaction drain.
 #include "remote_fmt/type_identifier.hpp"
+#include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/detail/RttChannel.hpp"
 
 #include <chrono>
@@ -38,13 +39,13 @@ struct Sink {
     std::vector<std::string> messages;
     std::vector<std::string> errors;
 
-    auto printF() {
+    auto printF() UC_LOG_LIFETIMEBOUND {
         return [this](std::size_t, std::string_view msg, std::optional<remote_fmt::catalog_id>) {
             messages.emplace_back(msg);
         };
     }
 
-    auto errorF() {
+    auto errorF() UC_LOG_LIFETIMEBOUND {
         return [this](std::string_view msg) { errors.emplace_back(msg); };
     }
 };

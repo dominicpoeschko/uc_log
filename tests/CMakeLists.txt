@@ -28,6 +28,8 @@ if(JLINK_USE_FAKE_DLL)
     uc_log_add_test(uc_log_test_jlink jlink_tests.cpp)
 endif()
 uc_log_add_test(uc_log_test_hex_image hex_image_tests.cpp)
+uc_log_add_test(uc_log_test_ram_image ram_image_tests.cpp)
+uc_log_add_test(uc_log_test_announced_reset announced_reset_tests.cpp)
 
 # RTT ring layout wants 4-byte pointers: -m32 where that links, with the directory's stdlib options (libc++ has no
 # 32-bit package on Arch, so those builds skip it).

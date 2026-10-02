@@ -411,6 +411,9 @@
           "log_seq": {
             "$ref": "#/$defs/uint64_t"
           },
+          "ram_image": {
+            "type": "boolean"
+          },
           "running": {
             "type": "boolean"
           },

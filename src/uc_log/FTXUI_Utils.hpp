@@ -1,5 +1,6 @@
 #pragma once
 
+#include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 #include "uc_log/metric_utils.hpp"
 #include "uc_log/theme.hpp"
@@ -633,7 +634,7 @@ namespace uc_log { namespace FTXUIGui {
 
     struct SourceLocationAdapter : ftxui::ConstStringListRef::Adapter {
         SourceLocationAdapter(std::map<SourceLocation,
-                                       std::size_t>& container_)
+                                       std::size_t>& container_ UC_LOG_LIFETIMEBOUND)
           : container{container_} {}
 
         std::size_t size() const override {
@@ -663,7 +664,8 @@ namespace uc_log { namespace FTXUIGui {
     // O(1) adapter over a prebuilt label vector (the map-based SourceLocationAdapter cost
     // O(index) per visible entry per frame)
     struct StringVectorAdapter : ftxui::ConstStringListRef::Adapter {
-        explicit StringVectorAdapter(std::vector<std::string> const& labels_) : labels{labels_} {}
+        explicit StringVectorAdapter(std::vector<std::string> const& labels_ UC_LOG_LIFETIMEBOUND)
+          : labels{labels_} {}
 
         std::size_t size() const override { return labels.size(); }
 
@@ -675,7 +677,8 @@ namespace uc_log { namespace FTXUIGui {
     };
 
     struct EnabledLocationAdapter : ftxui::ConstStringListRef::Adapter {
-        EnabledLocationAdapter(std::set<SourceLocation>& container_) : container{container_} {}
+        EnabledLocationAdapter(std::set<SourceLocation>& container_ UC_LOG_LIFETIMEBOUND)
+          : container{container_} {}
 
         std::size_t size() const override {
             string_storage.clear();   // Clear at start of render pass
@@ -1228,7 +1231,9 @@ namespace uc_log { namespace FTXUIGui {
             timePeriodValueStr_ = std::to_string(config_.timePeriodValue);
         }
 
-        std::optional<MetricInfo> const& getSelectedMetric() const { return selectedMetric_; }
+        std::optional<MetricInfo> const& getSelectedMetric() const UC_LOG_LIFETIMEBOUND {
+            return selectedMetric_;
+        }
 
         [[nodiscard]] ftxui::Component createControlsComponent() {
             return createControlsWithData([]() { return std::vector<MetricEntry>{}; });

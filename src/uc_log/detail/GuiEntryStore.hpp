@@ -2,6 +2,7 @@
 
 #include "uc_log/FTXUI_Utils.hpp"
 #include "uc_log/LogLevel.hpp"
+#include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 #include "uc_log/metric_utils.hpp"
 
@@ -117,7 +118,7 @@ namespace uc_log { namespace FTXUIGui {
                     return (*snapshot)[index + static_cast<std::size_t>(n)];
                 }
 
-                iterator& operator++() {
+                iterator& operator++() UC_LOG_LIFETIMEBOUND {
                     ++index;
                     return *this;
                 }
@@ -128,7 +129,7 @@ namespace uc_log { namespace FTXUIGui {
                     return tmp;
                 }
 
-                iterator& operator--() {
+                iterator& operator--() UC_LOG_LIFETIMEBOUND {
                     --index;
                     return *this;
                 }

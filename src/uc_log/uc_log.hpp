@@ -7,6 +7,7 @@
 #include "LogLevel.hpp"
 #include "Tag.hpp"
 #include "detail/LevelBoundBackend.hpp"
+#include "detail/Lifetimebound.hpp"
 #include "metric.hpp"
 #include "remote_fmt/remote_fmt.hpp"
 #include "rtt/rtt.hpp"
@@ -27,14 +28,21 @@ namespace uc_log { namespace detail {
     private:
         std::string_view sv;
 
-        consteval auto basename(std::string_view f) {
+        consteval auto basename(std::string_view f UC_LOG_LIFETIMEBOUND) {
             auto const pos = f.find('/');
             if(pos == std::string_view::npos) { return f; }
             return f.substr(pos + 1);
         }
 
     public:
+        template<std::size_t N>
+        consteval FileName(char const (&s UC_LOG_LIFETIMEBOUND)[N])
+          : sv{basename(std::string_view{s})} {}
+
+        // No mark here: for a view (StartUp.hpp passes a std::string_view) the result points where
+        // `s` points, not into `s` - clang 23 reports a mark on it as unverifiable.
         template<std::convertible_to<std::string_view> S>
+            requires(!std::is_array_v<S>)
         consteval FileName(S const& s) : sv{basename(std::string_view{s})} {}
 
         constexpr operator std::string_view() const { return sv; }
@@ -53,7 +61,7 @@ namespace uc_log { namespace detail {
     // address; char pointers are rejected because their length would need strlen, which a
     // missing nul makes undefined - std::string_view is the caller stating that contract.
     template<typename T>
-    constexpr T const& normalizeLogArgument(T const& value) {
+    constexpr T const& normalizeLogArgument(T const& value UC_LOG_LIFETIMEBOUND) {
         static_assert(!std::is_same_v<T, char*> && !std::is_same_v<T, char const*>,
                       "char pointers cannot be logged: the length is not safely knowable from "
                       "a pointer - log the literal or array itself, or state the contract by "
