@@ -68,6 +68,9 @@ struct FakeTransport {
         std::function<void()>           onReset;
         std::vector<JLink::MemoryWrite> preResetAtLastReset;           // guarded by mutex
         std::vector<std::pair<std::uint32_t, std::uint32_t>> writes;   // guarded by mutex
+        // the RTT control block at 0x20000100 with one buffer, as words (id, counts, descriptor);
+        // empty: the address pattern, which holds no "SEGGER RTT" id
+        std::optional<std::array<std::uint32_t, 12>> controlBlock;   // guarded by mutex
 
         // an announced reset: the block at AnnounceAddress, words magic armed request ack
         static constexpr std::uint32_t AnnounceAddress = 0x2000'0300;
@@ -212,6 +215,9 @@ struct FakeTransport {
         std::lock_guard<std::mutex> const lock{shared->mutex};
         shared->writes.emplace_back(address, value);
         if(address == 0x20000100 && value == 0) { shared->blockGone = true; }   // the id cleared
+        if(shared->controlBlock && address >= 0x20000100 && address < 0x20000100 + 48) {
+            (*shared->controlBlock)[(address - 0x20000100) / 4] = value;
+        }
         if(address >= Shared::AnnounceAddress && address < Shared::AnnounceAddress + 16) {
             shared->announce[(address - Shared::AnnounceAddress) / 4] = value;
             if(address == Shared::AnnounceAddress + 12) {   // the ack
@@ -243,6 +249,16 @@ struct FakeTransport {
                                       10};
             for(std::size_t i = 0; i != out.size(); ++i) { out[i] = static_cast<std::byte>(id[i]); }
             return;
+        }
+        if(address == 0x20000100 && out.size() == 48) {
+            std::lock_guard<std::mutex> const lock{shared->mutex};
+            if(shared->controlBlock) {
+                for(std::size_t i = 0; i != out.size(); ++i) {
+                    out[i]
+                      = static_cast<std::byte>((*shared->controlBlock)[i / 4] >> (8 * (i % 4)));
+                }
+                return;
+            }
         }
         if(address == 0xE000'EDF0 && out.size() == 4) {   // DHCSR: S_RETIRE_ST, S_RESET_ST
             std::uint32_t const dhcsr
@@ -627,6 +643,54 @@ int main() {
                     return e.find("RTT host overflow") != std::string::npos;
                 }));
             CHECK(after == before, "a running overflow is summarised, not repeated");
+        }
+    }
+
+    // the host's offset in the control block out of range (the channel would be dead for good): set
+    // to the target's offset at the next loss
+    {
+        auto const block = [](std::uint32_t wr, std::uint32_t rd) {
+            return std::array<std::uint32_t, 12>{0x47474553U,   // "SEGGER RTT\0..."
+                                                 0x52205245U,
+                                                 0x00005454U,
+                                                 0U,
+                                                 1U,   // up
+                                                 0U,   // down
+                                                 0U,   // name
+                                                 0x20000400U,
+                                                 1024U,
+                                                 wr,
+                                                 rd,
+                                                 0U};
+        };
+        auto const loss = [&]() {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.status.hostOverflowCount += 1;
+        };
+        auto const word = [&](std::size_t i) {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            return (*shared.controlBlock)[i];
+        };
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.controlBlock = block(334, 3222675632U);
+        }
+        loss();
+        CHECK(waitFor([&]() { return word(10) == 334; }, 3000ms),
+              "an up buffer's read offset out of range is set to the write offset");
+        CHECK(
+          collected.anyErrorContains("the host's read offset was 3222675632 in a 1024-byte ring"),
+          "and said so");
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.controlBlock = block(5000, 7);   // the target's own offset: its RAM, not ours
+        }
+        loss();
+        std::this_thread::sleep_for(300ms);
+        CHECK(word(9) == 5000 && word(10) == 7, "a target-owned offset out of range is left alone");
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.controlBlock.reset();
         }
     }
 

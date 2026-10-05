@@ -35,6 +35,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/box.hpp>
 #include <ftxui/screen/screen.hpp>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -592,6 +593,129 @@ namespace uc_log { namespace FTXUIGui {
         return ftxui::Make<ScrollerBase<ContainerGetter, Transform>>(
           std::forward<ContainerGetter>(containerGetter),
           std::forward<Transform>(transformFunc));
+    }
+
+    // A scrolling view of an element that is built anew every frame (a vbox of text, a table).
+    // `Renderer(...) | ftxui::frame` does not scroll such a thing: a frame has no position of
+    // its own, it only follows the element marked focus/select inside it, and a Renderer takes
+    // no events - the wheel then moves the focus of the container around it instead. This one
+    // keeps the first visible row: the wheel moves it while the pointer is over the view, the
+    // keys while it has the focus (which it takes only while there is something to scroll).
+    class ScrollViewBase : public ftxui::ComponentBase {
+    public:
+        explicit ScrollViewBase(std::function<ftxui::Element()> render UC_LOG_LIFETIMEBOUND)
+          : render_{std::move(render)} {}
+
+        // scroll as little as it takes to bring rows [first, last] of the content into view
+        void Show(int first,
+                  int last) {
+            state->showFirst = first;
+            state->showLast  = last;
+        }
+
+        int Offset() const { return state->offset; }
+
+    private:
+        struct State {
+            int        offset{};      // first visible row, clamped when the box is known
+            int        maxOffset{};   // of the last render
+            int        showFirst{-1};
+            int        showLast{-1};
+            ftxui::Box box;
+        };
+
+        struct Scrolled : public ftxui::Node {
+            Scrolled(ftxui::Element         child,
+                     std::shared_ptr<State> shared)
+              : ftxui::Node({std::move(child)})
+              , state_{std::move(shared)} {}
+
+            void ComputeRequirement() override {
+                children_[0]->ComputeRequirement();
+                requirement_ = children_[0]->requirement();
+            }
+
+            void SetBox(ftxui::Box box) override {
+                box_              = box;
+                state_->box       = box;
+                int const visible = box.y_max - box.y_min + 1;
+                int const total   = std::max(requirement_.min_y, visible);
+                if(state_->showFirst >= 0) {
+                    state_->offset    = std::max(state_->offset, state_->showLast - visible + 1);
+                    state_->offset    = std::min(state_->offset, state_->showFirst);
+                    state_->showFirst = -1;
+                }
+                state_->maxOffset = total - visible;
+                state_->offset    = std::max(0, std::min(state_->maxOffset, state_->offset));
+                auto childBox     = box;
+                childBox.y_min    = box.y_min - state_->offset;
+                childBox.y_max    = childBox.y_min + total - 1;
+                children_[0]->SetBox(childBox);
+            }
+
+            void Render(ftxui::Screen& screen) override {
+                auto const outer = screen.stencil;
+                screen.stencil   = ftxui::Box::Intersection(box_, outer);
+                children_[0]->Render(screen);
+                screen.stencil = outer;
+            }
+
+            std::shared_ptr<State> state_;
+        };
+
+        ftxui::Element OnRender() final {
+            return std::make_shared<Scrolled>(render_() | ftxui::vscroll_indicator, state);
+        }
+
+        bool OnEvent(ftxui::Event event) final {
+            int const before = state->offset;
+            int const page   = std::max(1, state->box.y_max - state->box.y_min);
+            if(event.is_mouse()) {
+                if(!state->box.Contain(event.mouse().x, event.mouse().y)) { return false; }
+                if(event.mouse().button == ftxui::Mouse::WheelUp) {
+                    state->offset -= WheelRows;
+                } else if(event.mouse().button == ftxui::Mouse::WheelDown) {
+                    state->offset += WheelRows;
+                } else {
+                    if(event.mouse().button == ftxui::Mouse::Left
+                       && event.mouse().motion == ftxui::Mouse::Pressed)
+                    {
+                        TakeFocus();
+                    }
+                    return false;
+                }
+                state->offset = std::max(0, std::min(state->maxOffset, state->offset));
+                // also at either end: unhandled, the container around the view moves its focus
+                return true;
+            }
+            if(event == ftxui::Event::ArrowUp || event == ftxui::Event::Character('k')) {
+                --state->offset;
+            } else if(event == ftxui::Event::ArrowDown || event == ftxui::Event::Character('j')) {
+                ++state->offset;
+            } else if(event == ftxui::Event::PageUp) {
+                state->offset -= page;
+            } else if(event == ftxui::Event::PageDown) {
+                state->offset += page;
+            } else if(event == ftxui::Event::Home) {
+                state->offset = 0;
+            } else if(event == ftxui::Event::End) {
+                state->offset = state->maxOffset;
+            }
+            state->offset = std::max(0, std::min(state->maxOffset, state->offset));
+            // false at either end: ArrowUp on the first row moves the focus out, as in a menu
+            return state->offset != before;
+        }
+
+        bool Focusable() const final { return state->maxOffset > 0; }
+
+        static constexpr int WheelRows = 3;
+
+        std::function<ftxui::Element()> render_;
+        std::shared_ptr<State>          state{std::make_shared<State>()};
+    };
+
+    inline std::shared_ptr<ScrollViewBase> ScrollView(std::function<ftxui::Element()> render) {
+        return std::make_shared<ScrollViewBase>(std::move(render));
     }
 
     inline ftxui::Element toElement(uc_log::detail::LogEntry::Channel const& channel) {

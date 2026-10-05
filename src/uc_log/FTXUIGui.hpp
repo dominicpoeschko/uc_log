@@ -1,6 +1,7 @@
 #pragma once
 
 #include "uc_log/FTXUI_Utils.hpp"
+#include "uc_log/InspectorViews.hpp"
 #include "uc_log/LogFilter.hpp"
 #include "uc_log/detail/BuildRunner.hpp"
 #include "uc_log/detail/DuplexChannelInfo.hpp"
@@ -8,6 +9,7 @@
 #include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 #include "uc_log/detail/LogFormat.hpp"
+#include "uc_log/detail/TargetInspector.hpp"
 #include "uc_log/detail/TcpPortStatus.hpp"
 #include "uc_log/metric_utils.hpp"
 #include "uc_log/theme.hpp"
@@ -364,6 +366,31 @@ namespace uc_log { namespace FTXUIGui {
         int tabCount{0};
 
         int selectedMetricTab{};
+
+        // Health and Inspect tabs (kvasir_bench.py's ub/crash/stack/trace/peek/profile/panic):
+        // the inspector works on its own thread; the renderers read the copy below, taken
+        // only when its version moved
+        std::string                                      mapFilePath;
+        std::mutex                                       inspectorMutex;   // the pointer
+        std::unique_ptr<uc_log::detail::TargetInspector> inspector;
+        uc_log::detail::TargetInspector::Snapshot        inspectorView;
+        std::uint64_t            inspectorViewVersion{std::numeric_limits<std::uint64_t>::max()};
+        bool                     targetHalted{false};   // the reader's isHalted(), per frame
+        int                      selectedInspectTab{};
+        bool                     traceDelta{true};
+        bool                     traceHex{false};
+        std::string              traceRowsStr{"64"};
+        std::string              watchInput;
+        std::string              watchStatus;
+        std::string              watchCompletionsFor;
+        std::vector<std::string> watchCompletions;
+        std::vector<std::string> watchNames;
+        int                      watchSelection{0};
+        std::vector<std::string> panicCauseEntries;
+        int                      panicCauseSelection{0};
+        bool                     panicArmed{false};
+        static constexpr int     HealthTabIndex  = 7;
+        static constexpr int     InspectTabIndex = 8;
 
         // Every text input component, so hotkey handling can generically check whether
         // the user is typing (see trackInput / anyTextInputFocused).
@@ -1285,15 +1312,37 @@ namespace uc_log { namespace FTXUIGui {
                                        double      latestValue{};
                                        std::size_t valueCount{};
                                        bool        found{};
+                                       // kvasir_bench.py metrics' summary
+                                       double minValue{};
+                                       double maxValue{};
+                                       double sum{};
+                                       double rate{};
                                        {
                                            std::lock_guard<std::mutex> const storeLock{store.mutex};
                                            auto iter = store.metricEntries.find(metricInfo);
                                            if(iter != store.metricEntries.end()) {
-                                               found       = true;
-                                               valueCount  = iter->second.size();
-                                               latestValue = iter->second.empty()
-                                                             ? 0.0
-                                                             : iter->second.back().value;
+                                               found         = true;
+                                               valueCount    = iter->second.size();
+                                               latestValue   = iter->second.empty()
+                                                               ? 0.0
+                                                               : iter->second.back().value;
+                                               auto const& v = iter->second;
+                                               if(!v.empty()) {
+                                                   minValue = maxValue = v.front().value;
+                                                   for(auto const& e : v) {
+                                                       minValue = std::min(minValue, e.value);
+                                                       maxValue = std::max(maxValue, e.value);
+                                                       sum += e.value;
+                                                   }
+                                                   auto const span
+                                                     = std::chrono::duration<double>(
+                                                         v.back().recv_time - v.front().recv_time)
+                                                         .count();
+                                                   if(span > 0) {
+                                                       rate
+                                                         = static_cast<double>(v.size() - 1) / span;
+                                                   }
+                                               }
                                            }
                                        }
                                        if(!found) {
@@ -1321,7 +1370,18 @@ namespace uc_log { namespace FTXUIGui {
                                                    | ftxui::bold,
                                                  ftxui::text(
                                                    fmt::format(" ({} values)", valueCount))
-                                                   | ftxui::color(Theme::Data::count())})
+                                                   | ftxui::color(Theme::Data::count()),
+                                                 ftxui::text(
+                                                   valueCount == 0
+                                                     ? std::string{}
+                                                     : fmt::format(
+                                                         "  min {:.4g} mean {:.4g} max {:.4g}"
+                                                         "  {:.2g}/s",
+                                                         minValue,
+                                                         sum / static_cast<double>(valueCount),
+                                                         maxValue,
+                                                         rate))
+                                                   | ftxui::color(Theme::Text::metadata())})
                                             | ftxui::flex;
                                    }) | ftxui::flex,
                                    selectButton});
@@ -1338,10 +1398,12 @@ namespace uc_log { namespace FTXUIGui {
                         }
                     }
 
-                    return metricsContainer->Render();
+                    // a list of buttons scrolls by its focus: the wheel moves the container's
+                    // selection and the frame follows the selected row
+                    return metricsContainer->Render() | ftxui::vscroll_indicator | ftxui::yframe;
                 });
 
-            components.push_back(dynamicMetricsList);
+            components.push_back(dynamicMetricsList | ftxui::flex);
 
             return ftxui::Container::Vertical(components);
         }
@@ -2813,7 +2875,7 @@ namespace uc_log { namespace FTXUIGui {
         }
 
         ftxui::Component getHelpComponent() {
-            return ftxui::Renderer([]() {
+            return ScrollView([]() {
                 return ftxui::vbox(
                   {ftxui::text("❓ Help - Keyboard Shortcuts") | ftxui::bold
                      | ftxui::color(Theme::Header::primary()) | ftxui::center,
@@ -2828,8 +2890,10 @@ namespace uc_log { namespace FTXUIGui {
                    ftxui::text("  5       - Debugger tab"),
                    ftxui::text("  6       - Metrics tab"),
                    ftxui::text("  7       - Status tab"),
-                   ftxui::text("  8       - Statistics tab"),
-                   ftxui::text("  9       - Help tab"),
+                   ftxui::text("  8       - Health tab (sanitizer, halt, fault and panic records,"),
+                   ftxui::text("            stacks, raise a panic; session statistics)"),
+                   ftxui::text("  9       - Inspect tab (trace rings, watches, profiler)"),
+                   ftxui::text("  0 / ?   - Help tab"),
                    ftxui::text(""),
                    ftxui::text("🔧 Actions") | ftxui::bold | ftxui::color(Theme::Header::accent()),
                    ftxui::text("  q       - Quit application"),
@@ -2855,6 +2919,9 @@ namespace uc_log { namespace FTXUIGui {
                    ftxui::text("  ✘ N - N log lines were lost since the last flash because the"),
                    ftxui::text("        host could not apply their format string; the Status tab"),
                    ftxui::text("        says which field and why"),
+                   ftxui::text("  UB N - sanitizer reports since boot (Health tab: where)"),
+                   ftxui::text("  🚨 PANIC / 📕 FAULT - a record in RAM the firmware has not"),
+                   ftxui::text("        reported yet (Health tab); ⏸ HALTED - the core is halted"),
                    ftxui::text(""),
                    ftxui::text("💡 Tips") | ftxui::bold | ftxui::color(Theme::Header::warning()),
                    ftxui::text("  • Use Tab/Shift+Tab to navigate between UI elements"),
@@ -2876,7 +2943,7 @@ namespace uc_log { namespace FTXUIGui {
             return ftxui::Container::Vertical(
               {resetButton,
                ftxui::Renderer([]() { return ftxui::separator(); }),
-               ftxui::Renderer([this]() {
+               ScrollView([this]() {
                    auto const now    = std::chrono::system_clock::now();
                    auto const uptime = std::chrono::duration_cast<std::chrono::seconds>(
                      now - statistics.sessionStartTime);
@@ -2993,7 +3060,7 @@ namespace uc_log { namespace FTXUIGui {
                                      | ftxui::color(statistics.maxOverflowCount > 0
                                                       ? Theme::Status::error()
                                                       : Theme::Status::success())})});
-               })});
+               }) | ftxui::flex});
         }
 
         // Rebuild the probe radio entries when the reader has a newer list. The current
@@ -3406,6 +3473,30 @@ namespace uc_log { namespace FTXUIGui {
                        : firmwareState == FirmwareState::match   ? Theme::Status::success()
                                                                  : Theme::Text::normal())
                      | (firmwareState == FirmwareState::different ? ftxui::bold : ftxui::nothing),
+                   [this]() -> ftxui::Element {
+                       auto const&                 v = inspectorView;
+                       std::vector<ftxui::Element> badges;
+                       if(v.haveUbsan && v.ubsan) {
+                           bool const bad = v.ubsan->count != 0;
+                           badges.push_back(ftxui::separator());
+                           badges.push_back(
+                             ftxui::text(bad ? fmt::format("UB {}", v.ubsan->count)
+                                             : std::string{"UB 0"})
+                             | ftxui::color(bad ? Theme::Status::error() : Theme::Text::normal())
+                             | (bad ? ftxui::bold : ftxui::nothing));
+                       }
+                       if(v.fault || v.panic) {
+                           badges.push_back(ftxui::separator());
+                           badges.push_back(ftxui::text(v.panic ? "🚨 PANIC" : "📕 FAULT")
+                                            | ftxui::color(Theme::Status::error()) | ftxui::bold);
+                       }
+                       if(targetHalted) {
+                           badges.push_back(ftxui::separator());
+                           badges.push_back(ftxui::text("⏸ HALTED")
+                                            | ftxui::color(Theme::Status::error()) | ftxui::bold);
+                       }
+                       return ftxui::hbox(std::move(badges));
+                   }(),
                    display.trimmedLogCount > 0 ? ftxui::separator() : ftxui::text(""),
                    display.trimmedLogCount > 0
                      ? ftxui::text(fmt::format("♻ TRIM {}",
@@ -3480,6 +3571,231 @@ namespace uc_log { namespace FTXUIGui {
             return ftxui::Container::Horizontal({statusRenderer | ftxui::flex, hotkeyContainer});
         }
 
+        // Per frame, under the gui mutex: the inspector's snapshot when it changed, and which of
+        // its pages is shown (rings and watches are read only while they are).
+        void refreshInspectorView(bool halted) {
+            targetHalted = halted;
+            std::lock_guard<std::mutex> const lock{inspectorMutex};
+            if(!inspector) { return; }
+            using Page = uc_log::detail::TargetInspector::Page;
+            inspector->setPage(selectedTab == HealthTabIndex    ? Page::health
+                               : selectedTab != InspectTabIndex ? Page::none
+                               : selectedInspectTab == 0        ? Page::trace
+                               : selectedInspectTab == 1        ? Page::watch
+                                                                : Page::profile);
+            if(auto const v = inspector->version(); v != inspectorViewVersion) {
+                inspectorViewVersion = v;
+                inspectorView        = inspector->snapshot();
+                watchNames.clear();
+                for(auto const& w : inspectorView.watches) { watchNames.push_back(w.name); }
+                if(watchSelection >= static_cast<int>(watchNames.size())) {
+                    watchSelection = std::max(0, static_cast<int>(watchNames.size()) - 1);
+                }
+            }
+            // the frames between versions keep the "changed just now" colour honest
+            if(selectedTab == InspectTabIndex && selectedInspectTab == 1) {
+                redrawPending.store(true, std::memory_order_relaxed);
+            }
+        }
+
+        // the inspector, called from a button: the pointer is only swapped in run()
+        template<typename F>
+        void withInspector(F&& f) {
+            std::lock_guard<std::mutex> const lock{inspectorMutex};
+            if(inspector) { f(*inspector); }
+        }
+
+        ftxui::Component getHealthComponent() {
+            for(auto const& c : uc_log::detail::records::PanicCauses) {
+                panicCauseEntries.emplace_back(c);
+            }
+            auto refreshBtn = ftxui::Button(
+              "🔄 Read now",
+              [this]() { withInspector([](auto& i) { i.refresh(); }); },
+              createButtonStyle(Theme::Button::Background::reset(), Theme::Button::text()));
+            auto causeDropdown = ftxui::Dropdown(&panicCauseEntries, &panicCauseSelection);
+            auto raiseBtn      = ftxui::Button(
+              "🚨 Raise panic",
+              [this]() {
+                  if(!panicArmed) {
+                      panicArmed = true;
+                      return;
+                  }
+                  panicArmed       = false;
+                  auto const cause = static_cast<std::uint32_t>(panicCauseSelection);
+                  withInspector([cause](auto& i) { i.raisePanic(cause); });
+              },
+              createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
+            // the first click arms, the second raises
+            auto armedRenderer = ftxui::Renderer([this]() {
+                return panicArmed ? ftxui::text(
+                                      " click again to make the core call "
+                                      "Kvasir::Panic::raise() - it resets or halts")
+                                      | ftxui::color(Theme::Status::error()) | ftxui::bold
+                                  : ftxui::text("");
+            });
+            auto controls      = ftxui::Container::Horizontal(
+              {refreshBtn,
+               ftxui::Renderer([]() { return ftxui::text("   panic cause "); }),
+               causeDropdown,
+               ftxui::Renderer([]() { return ftxui::text(" "); }),
+               raiseBtn,
+               armedRenderer});
+            auto view = ScrollView(
+              [this]() { return inspector::healthElement(inspectorView, targetHalted); });
+            auto left = ftxui::Container::Vertical(
+              {controls, ftxui::Renderer([]() { return ftxui::separator(); }), view | ftxui::flex});
+            return ftxui::Container::Horizontal(
+              {left | ftxui::flex,
+               ftxui::Renderer([]() { return ftxui::separator(); }),
+               getStatisticsComponent() | ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 60)});
+        }
+
+        ftxui::Component getTraceComponent() {
+            ftxui::InputOption rowsOpts;
+            rowsOpts.multiline = false;
+            auto rowsInput
+              = trackInput(ftxui::Input(&traceRowsStr, "64", rowsOpts) | numericFilter(false));
+            auto controls = ftxui::Container::Horizontal(
+              {ftxui::Checkbox(" Δ first field  ", &traceDelta),
+               ftxui::Checkbox(" hex  ", &traceHex),
+               ftxui::Renderer([]() { return ftxui::text(" rows per ring "); }),
+               rowsInput | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 6)});
+            auto view = ScrollView([this]() {
+                std::size_t rows = 64;
+                try {
+                    rows = traceRowsStr.empty() ? 64 : std::stoul(traceRowsStr);
+                } catch(std::exception const&) {}
+                return inspector::ringsElement(inspectorView, traceDelta, traceHex, rows);
+            });
+            return ftxui::Container::Vertical(
+              {controls, ftxui::Renderer([]() { return ftxui::separator(); }), view | ftxui::flex});
+        }
+
+        void addWatchFromInput() {
+            if(watchInput.empty()) { return; }
+            std::string result;
+            withInspector([&](auto& i) { result = i.addWatch(watchInput); });
+            watchStatus = result.empty() ? "watching " + watchInput : result;
+            if(result.empty()) { watchInput.clear(); }
+        }
+
+        ftxui::Component getWatchComponent() {
+            ftxui::InputOption opts;
+            opts.multiline = false;
+            opts.on_enter  = [this]() { addWatchFromInput(); };
+            auto input
+              = trackInput(ftxui::Input(&watchInput, "symbol or regex (Tab completes)", opts));
+            // Tab takes the first completion instead of moving the focus
+            input       = ftxui::CatchEvent(input, [this](ftxui::Event const& e) {
+                if(e != ftxui::Event::Tab || watchCompletions.empty()) { return false; }
+                watchInput = watchCompletions.front();
+                return true;
+            });
+            auto addBtn = ftxui::Button(
+              "➕ watch",
+              [this]() { addWatchFromInput(); },
+              createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
+            auto removeBtn = ftxui::Button(
+              "✖ remove selected",
+              [this]() {
+                  auto const index = static_cast<std::size_t>(watchSelection);
+                  withInspector([index](auto& i) { i.removeWatch(index); });
+              },
+              createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
+            auto menu = ftxui::Menu(&watchNames, &watchSelection);
+            auto controls
+              = ftxui::Container::Horizontal({input | ftxui::border | ftxui::flex,
+                                              addBtn,
+                                              ftxui::Renderer([]() { return ftxui::text(" "); }),
+                                              removeBtn});
+            auto completions = ftxui::Renderer([this]() {
+                if(watchInput != watchCompletionsFor) {
+                    watchCompletionsFor = watchInput;
+                    watchCompletions.clear();
+                    withInspector(
+                      [this](auto& i) { watchCompletions = i.completions(watchInput, 8); });
+                }
+                std::vector<ftxui::Element> rows;
+                if(!watchStatus.empty()) {
+                    rows.push_back(ftxui::text(watchStatus) | ftxui::color(Theme::Status::info()));
+                }
+                for(auto const& c : watchCompletions) {
+                    rows.push_back(ftxui::text("  " + inspector::shortName(c))
+                                   | ftxui::color(Theme::Text::metadata()));
+                }
+                return ftxui::vbox(std::move(rows));
+            });
+            // ↑/↓ select a watch (the menu, never drawn itself) and the view follows the
+            // selection; the wheel moves the view alone
+            auto scroll = ScrollView(
+              [this]() { return inspector::watchesElement(inspectorView, watchSelection); });
+            auto view
+              = ftxui::Renderer(menu,
+                                [this, scroll, shown = -1]() mutable {
+                                    if(watchSelection != shown) {
+                                        shown = watchSelection;
+                                        scroll->Show(inspector::WatchRows * watchSelection,
+                                                     inspector::WatchRows * (watchSelection + 1)
+                                                       - 1);
+                                    }
+                                    return scroll->Render();
+                                })
+              | ftxui::CatchEvent([wheel = ftxui::Component{scroll}](ftxui::Event const& e) {
+                    return e.is_mouse() && wheel->OnEvent(e);
+                });
+            return ftxui::Container::Vertical(
+              {controls,
+               completions,
+               ftxui::Renderer([]() {
+                   return ftxui::text(
+                            "untyped: a value of 1, 2, 4 or 8 bytes as numbers, "
+                            "anything else as bytes (first 64); ↑/↓ select, read 5x a second")
+                        | ftxui::color(Theme::Text::metadata());
+               }),
+               ftxui::Renderer([]() { return ftxui::separator(); }),
+               view | ftxui::flex});
+        }
+
+        ftxui::Component getProfileComponent() {
+            auto startBtn = ftxui::Button(
+              "▶ start / ■ stop",
+              [this]() {
+                  bool const running = inspectorView.profiling;
+                  withInspector([running](auto& i) {
+                      if(running) {
+                          i.stopProfile();
+                      } else {
+                          i.startProfile();
+                      }
+                  });
+              },
+              createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
+            auto clearBtn = ftxui::Button(
+              "🗑 clear",
+              [this]() { withInspector([](auto& i) { i.clearProfile(); }); },
+              createButtonStyle(Theme::Button::Background::reset(), Theme::Button::text()));
+            auto view
+              = ScrollView([this]() { return inspector::profileElement(inspectorView, 100); });
+            return ftxui::Container::Vertical(
+              {ftxui::Container::Horizontal(
+                 {startBtn, ftxui::Renderer([]() { return ftxui::text(" "); }), clearBtn}),
+               ftxui::Renderer([]() { return ftxui::separator(); }),
+               view | ftxui::flex});
+        }
+
+        ftxui::Component getInspectComponent() {
+            std::vector<std::string> names{"🧵 Trace ", "👁 Watch ", "⏱ Profile "};
+            auto toggle = ftxui::Toggle(std::move(names), &selectedInspectTab) | ftxui::bold;
+            return ftxui::Container::Vertical(
+              {toggle,
+               ftxui::Renderer([]() { return ftxui::separator(); }),
+               ftxui::Container::Tab(
+                 {getTraceComponent(), getWatchComponent(), getProfileComponent()},
+                 &selectedInspectTab)
+                 | ftxui::flex});
+        }
+
         template<typename Reader>
         ftxui::Component getTabComponent(Reader& rttReader) {
             auto tabs = generateTabsComponent({
@@ -3490,7 +3806,8 @@ namespace uc_log { namespace FTXUIGui {
               {"🐛 Debugger", getDebuggerComponent(rttReader)},
               { "📈 Metrics",            getMetricComponent()},
               {  "💬 Status",            getStatusComponent()},
-              {   "📊 Stats",        getStatisticsComponent()},
+              {  "🩺 Health",            getHealthComponent()},
+              { "🔬 Inspect",           getInspectComponent()},
               {    "❓ Help",              getHelpComponent()}
             });
 
@@ -3515,6 +3832,9 @@ namespace uc_log { namespace FTXUIGui {
         bool echoToStderr{false};
 
         void setEchoToStderr(bool enabled) { echoToStderr = enabled; }
+
+        /// The linker map the inspectors take their symbols from (--map_file). Before run().
+        void setMapFile(std::string path) { mapFilePath = std::move(path); }
 
         // Before the ui runs.
         void setCompiledFilter(uc_log::detail::FilterTable const& table) {
@@ -3552,6 +3872,10 @@ namespace uc_log { namespace FTXUIGui {
         void errorMessage(std::string_view msg) {
             if(echoToStderr) { fmt::print(stderr, "[error] {}\n", msg); }
             if(messageSink) { messageSink("error", msg); }
+            if(msg.starts_with("core halted:")) {
+                std::lock_guard<std::mutex> const lock{inspectorMutex};
+                if(inspector) { inspector->noteHalt(msg); }
+            }
             std::lock_guard<std::mutex> const lock{mutex};
             ++statusErrorCount;
             if(isFormatError(msg)) { ++formatErrorCount; }
@@ -3690,6 +4014,44 @@ namespace uc_log { namespace FTXUIGui {
             ipAddressInput          = initialHost;
             probeInput              = initialProbe;
             buildRunner.initialize(buildCommand);
+            {
+                using uc_log::detail::InspectorAccess;
+                using uc_log::detail::TargetInspector;
+                using Access = typename Reader::MemoryAccess;
+                auto created = std::make_unique<TargetInspector>(TargetInspector::Hooks{
+                  .memory =
+                    [&rttReader](std::span<InspectorAccess const> accesses,
+                                 std::chrono::milliseconds        timeout) {
+                        std::vector<Access> converted;
+                        converted.reserve(accesses.size());
+                        for(auto const& a : accesses) {
+                            converted.push_back(Access{a.address, a.size, a.write});
+                        }
+                        return rttReader.accessMemory(converted, timeout);
+                    },
+                  .connected =
+                    [&rttReader] {
+                        return rttReader.getStatus().isRunning != 0 && !rttReader.isFlashing();
+                    },
+                  .sessions = [&rttReader] { return rttReader.sessionCount(); },
+                  .mapFile  = [this] { return mapFilePath; },
+                  .changed  = [this] { requestRedrawFromAnywhere(); }});
+                std::lock_guard<std::mutex> const lock{inspectorMutex};
+                inspector = std::move(created);
+            }
+
+            // the reader outlives run(): stop the inspector's reads before returning
+            struct StopInspector {
+                Gui& gui;
+
+                ~StopInspector() {
+                    std::unique_ptr<uc_log::detail::TargetInspector> gone;
+                    {
+                        std::lock_guard<std::mutex> const lock{gui.inspectorMutex};
+                        gone = std::move(gui.inspector);
+                    }
+                }
+            } const stopInspector{*this};
 
             auto screen = ftxui::ScreenInteractive::Fullscreen();
             screen.ForceHandleCtrlC(true);
@@ -3710,6 +4072,10 @@ namespace uc_log { namespace FTXUIGui {
                         // Number keys for tab switching
                         if(c >= '1' && c <= '9' && c - '1' < tabCount) {
                             selectedTab = c - '1';
+                            return true;
+                        }
+                        if((c == '0' || c == '?') && tabCount >= 10) {
+                            selectedTab = 9;   // Help
                             return true;
                         }
                         // Action hotkeys
@@ -3743,6 +4109,7 @@ namespace uc_log { namespace FTXUIGui {
                 {
                     std::lock_guard<std::mutex> const lock{mutex};
                     updateJLinkStatistics(rttReader);
+                    refreshInspectorView(rttReader.isHalted());
                     // the live window moves with the data; the input string follows unless
                     // the user is editing it
                     if(display.ucTimeLiveMode && !ucTimeMinInput->Focused()) {

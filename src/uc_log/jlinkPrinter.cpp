@@ -772,6 +772,7 @@ int main(int    argc,
     }};
 
     if(!disableUi) {
+        gui.setMapFile(mapFile);
         return gui.run(rttReader, buildCommand, host, probe);
     } else {
         static std::atomic<bool> shutdown_requested(false);

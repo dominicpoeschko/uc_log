@@ -1,9 +1,14 @@
 #include "uc_log/FTXUIGui.hpp"
 
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <expected>
 #include <functional>
+#include <optional>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -57,6 +62,24 @@ struct Reader {
     }
 
     bool isFlashing() const { return false; }
+
+    // the Health and Inspect tabs' target access: this demo has no target memory
+    struct MemoryAccess {
+        std::uint32_t                address{};
+        std::uint32_t                size{};
+        std::optional<std::uint32_t> write{};
+    };
+
+    std::expected<std::vector<std::vector<std::byte>>,
+                  std::string>
+    accessMemory(std::span<MemoryAccess const>,
+                 std::chrono::milliseconds) {
+        return std::unexpected{std::string{"no target in the gui demo"}};
+    }
+
+    std::uint64_t sessionCount() const { return 0; }
+
+    bool isHalted() const { return false; }
 
     void continueTarget() {
         if(msg) { msg("Continue target"); }

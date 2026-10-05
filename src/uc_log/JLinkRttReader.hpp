@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <expected>
 #include <functional>
@@ -203,6 +204,52 @@ private:
             lost = true;
         }
         return lost;
+    }
+
+    // After data loss: an offset the HOST owns (an up buffer's RdOff, a down buffer's WrOff) that is
+    // out of range kills that channel for good - the target sees no room / no data, and the DLL
+    // keeps reading the garbage range and writes a garbage RdOff back. Set it to the target's own
+    // offset: the ring's content is dropped, the channel lives. A target-owned offset out of range
+    // is left alone (the target's RAM).
+    template<typename Transport>
+    void repairHostOffsets(Transport&    jlink,
+                           std::uint32_t address,
+                           std::uint32_t totalBuffers) {
+        if(address == 0) { return; }
+        try {
+            std::vector<std::byte> raw(24U + 24U * std::min<std::uint32_t>(totalBuffers, 16U));
+            jlink.readMemory(address, raw);
+            auto const word = [&](std::size_t offset) {
+                std::uint32_t v{};
+                for(std::size_t i = 0; i != 4; ++i) {
+                    v |= std::to_integer<std::uint32_t>(raw[offset + i]) << (8U * i);
+                }
+                return v;
+            };
+            if(std::memcmp(raw.data(), "SEGGER RTT", 10) != 0) { return; }
+            auto const numUp = word(16);
+            for(std::size_t b = 0; 24U + 24U * (b + 1U) <= raw.size(); ++b) {
+                auto const base         = 24U + 24U * b;
+                auto const size         = word(base + 8);
+                bool const up           = b < numUp;
+                auto const hostAt       = base + (up ? 16U : 12U);
+                auto const targetAt     = base + (up ? 12U : 16U);
+                auto const hostOffset   = word(hostAt);
+                auto const targetOffset = word(targetAt);
+                if(size == 0 || targetOffset >= size || hostOffset < size) { continue; }
+                jlink.writeWord(address + static_cast<std::uint32_t>(hostAt), targetOffset);
+                errorMessageCallback(
+                  fmt::format("RTT buffer {} ({}): the host's {} was {} in a {}-byte ring - set to "
+                              "the target's {} ({}), its content is lost",
+                              b,
+                              up ? "up" : "down",
+                              up ? "read offset" : "write offset",
+                              hostOffset,
+                              size,
+                              up ? "write offset" : "read offset",
+                              targetOffset));
+            }
+        } catch(std::exception const&) {}   // the dump that follows says why it cannot be read
     }
 
     // After data loss: is the control block still sane? Layout as in rtt/src/rtt/rtt.hpp.
@@ -687,11 +734,12 @@ private:
                     wasHalted                 = halted;
                     Status const local_status = jlink.readStatus();
                     status                    = local_status;
-                    if(reportRttDataLoss(previousStatus, local_status, lossReport)
-                       && Clock::now() > lastBlockDump + ControlBlockDumpPeriod)
-                    {
-                        lastBlockDump = Clock::now();
-                        dumpControlBlock(jlink, blockInfo.address, blockInfo.totalBuffers);
+                    if(reportRttDataLoss(previousStatus, local_status, lossReport)) {
+                        repairHostOffsets(jlink, blockInfo.address, blockInfo.totalBuffers);
+                        if(Clock::now() > lastBlockDump + ControlBlockDumpPeriod) {
+                            lastBlockDump = Clock::now();
+                            dumpControlBlock(jlink, blockInfo.address, blockInfo.totalBuffers);
+                        }
                     }
                     previousStatus = local_status;
                     if(local_status.isRunning == 0
