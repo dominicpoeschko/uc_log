@@ -120,6 +120,130 @@ void showFollowsARow() {
     CHECK(firstLine(base) == "row 12", "moves the view alone: Show() applies once");
 }
 
+ftxui::Event mouseAt(int                  x,
+                     int                  y,
+                     ftxui::Mouse::Button button,
+                     ftxui::Mouse::Motion motion) {
+    ftxui::Mouse mouse{};
+    mouse.button = button;
+    mouse.motion = motion;
+    mouse.x      = x;
+    mouse.y      = y;
+    return ftxui::Event::Mouse("", mouse);
+}
+
+ftxui::Event click(int x,
+                   int y) {
+    return mouseAt(x, y, ftxui::Mouse::Left, ftxui::Mouse::Pressed);
+}
+
+ftxui::Event hover(int x,
+                   int y) {
+    return mouseAt(x, y, ftxui::Mouse::None, ftxui::Mouse::Moved);
+}
+
+struct Picked {
+    int count{20};
+    int selected{0};
+    int clicked{-1};
+    int clickedLine{-1};
+    int clickedColumn{-1};
+    int entered{-1};
+    int deleted{-1};
+
+    uc_log::FTXUIGui::PickListOption option(int rowsPerItem) {
+        uc_log::FTXUIGui::PickListOption o;
+        o.count = [this]() { return count; };
+        o.row   = [rowsPerItem](int index, uc_log::FTXUIGui::PickListOption::RowState s) {
+            std::vector<ftxui::Element> lines{ftxui::text(std::string{s.selected  ? ">"
+                                                                      : s.hovered ? "~"
+                                                                                  : " "}
+                                                          + std::to_string(index))};
+            for(int i = 1; i < rowsPerItem; ++i) { lines.push_back(ftxui::text("  value")); }
+            return ftxui::vbox(std::move(lines));
+        };
+        o.rowsPerItem = rowsPerItem;
+        o.selected    = &selected;
+        o.onClick     = [this](int index, int line, int column) {
+            clicked       = index;
+            clickedLine   = line;
+            clickedColumn = column;
+        };
+        o.onEnter  = [this](int index) { entered = index; };
+        o.onDelete = [this](int index) { deleted = index; };
+        return o;
+    }
+};
+
+void pickListKeys() {
+    Picked           p;
+    ftxui::Component list = uc_log::FTXUIGui::PickList(p.option(1));
+    CHECK(list->Focusable(), "pick list: items make it focusable");
+    CHECK(firstLine(list) == ">0", "pick list: the first item is picked and marked");
+    CHECK(!list->OnEvent(ftxui::Event::ArrowUp), "pick list: Up on the first item is not its");
+    CHECK(list->OnEvent(ftxui::Event::ArrowDown) && p.selected == 1, "pick list: Down");
+    CHECK(firstLine(list) == " 0", "pick list: the view stays while the item is in it");
+    for(int i = 0; i != 5; ++i) { (void)list->OnEvent(ftxui::Event::Character('j')); }
+    CHECK(p.selected == 6 && firstLine(list) == " 2", "pick list: the view follows the item down");
+    CHECK(list->OnEvent(ftxui::Event::End) && p.selected == 19, "pick list: End");
+    CHECK(firstLine(list) == " 15", "pick list: the last page");
+    CHECK(!list->OnEvent(ftxui::Event::ArrowDown), "pick list: Down on the last is not its");
+    CHECK(list->OnEvent(ftxui::Event::PageUp) && p.selected == 15, "pick list: PageUp");
+    CHECK(list->OnEvent(ftxui::Event::Home) && p.selected == 0, "pick list: Home");
+    CHECK(firstLine(list) == ">0", "pick list: back at the top");
+    CHECK(list->OnEvent(ftxui::Event::Return) && p.entered == 0, "pick list: Return");
+    (void)list->OnEvent(ftxui::Event::ArrowDown);
+    CHECK(list->OnEvent(ftxui::Event::Delete) && p.deleted == 1, "pick list: Delete");
+
+    p.selected = 12;   // moved from outside
+    CHECK(firstLine(list) == " 8", "pick list: the view follows a selection set from outside");
+    p.count = 3;
+    CHECK(firstLine(list) == " 0" && p.selected == 2, "pick list: a shorter list clamps it");
+    p.count = 0;
+    (void)firstLine(list);
+    CHECK(!list->Focusable() && !list->OnEvent(ftxui::Event::ArrowDown) && p.selected == 0,
+          "pick list: empty, it takes neither focus nor keys");
+    CHECK(!list->OnEvent(click(2, 1)), "pick list: nor a click where its items were");
+}
+
+void pickListMouse() {
+    Picked p;
+    auto   base = uc_log::FTXUIGui::PickList(p.option(2));   // 20 items of 2 rows in 5 rows
+    ftxui::Component list = base;
+    (void)firstLine(list);
+    CHECK(list->OnEvent(click(4, 2)), "pick list: a click on an item is taken");
+    CHECK(p.selected == 1 && p.clicked == 1 && p.clickedLine == 0 && p.clickedColumn == 4,
+          "pick list: row 2 of 2-row items is item 1's first, the column is passed on");
+    CHECK(list->OnEvent(click(0, 3)) && p.selected == 1 && p.clickedLine == 1,
+          "pick list: its second row too");
+    CHECK(!list->OnEvent(click(2, Height + 2)) && p.clicked == 1,
+          "pick list: not a click below it");
+    CHECK(!list->OnEvent(hover(2, 4)) && base->Hovered() == 2 && p.selected == 1,
+          "pick list: the pointer over an item marks it, the selection stays");
+    CHECK(firstLine(list) == " 0", "pick list: nothing scrolled yet");
+    CHECK(list->OnEvent(wheel(true)), "pick list: the wheel over it");
+    CHECK(firstLine(list) == "  valu" && p.selected == 1,
+          "pick list: the wheel moves the view by 3 rows, not the selection");
+    CHECK(base->Hovered() == 2, "pick list: and another item is under the pointer now");
+    CHECK(list->OnEvent(click(2, 0)) && p.selected == 1 && p.clicked == 1,
+          "pick list: the row at the top is item 1's second after the wheel");
+    CHECK(list->OnEvent(click(2, 1)) && p.selected == 2, "pick list: and the next row item 2");
+    (void)list->OnEvent(hover(2, Height + 2));
+    CHECK(base->Hovered() == -1, "pick list: the pointer gone, nothing is marked");
+
+    Picked hovering;
+    auto   option           = hovering.option(1);
+    option.hoverSelects     = true;
+    option.focusable        = false;
+    ftxui::Component follow = uc_log::FTXUIGui::PickList(std::move(option));
+    (void)firstLine(follow);
+    CHECK(!follow->Focusable(), "pick list: one fed by another component's keys has no focus");
+    (void)follow->OnEvent(hover(3, 3));
+    CHECK(hovering.selected == 3 && firstLine(follow) == " 0",
+          "pick list: hoverSelects picks under the pointer and leaves the view");
+    CHECK(follow->OnEvent(click(3, 4)) && hovering.clicked == 4, "pick list: and still clicks");
+}
+
 }   // namespace
 
 int main() {
@@ -127,6 +251,8 @@ int main() {
     wheelScrolls();
     keysScroll();
     showFollowsARow();
+    pickListKeys();
+    pickListMouse();
     if(failures == 0) { std::puts("all checks passed"); }
     return failures == 0 ? 0 : 1;
 }

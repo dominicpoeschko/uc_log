@@ -80,7 +80,7 @@ inline constexpr std::array<std::string_view, 14> PanicCauses{"assertion",
                                                               "register wait timed out",
                                                               "boot loop",
                                                               "health check starved",
-                                                              "flash image CRC mismatch"};
+                                                              "image CRC mismatch"};
 
 struct Panic {
     std::uint32_t                count{};

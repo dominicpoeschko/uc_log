@@ -374,18 +374,23 @@ namespace uc_log { namespace FTXUIGui {
         std::mutex                                       inspectorMutex;   // the pointer
         std::unique_ptr<uc_log::detail::TargetInspector> inspector;
         uc_log::detail::TargetInspector::Snapshot        inspectorView;
-        std::uint64_t            inspectorViewVersion{std::numeric_limits<std::uint64_t>::max()};
-        bool                     targetHalted{false};   // the reader's isHalted(), per frame
-        int                      selectedInspectTab{};
-        bool                     traceDelta{true};
-        bool                     traceHex{false};
-        std::string              traceRowsStr{"64"};
-        std::string              watchInput;
-        std::string              watchStatus;
-        std::string              watchCompletionsFor;
-        std::vector<std::string> watchCompletions;
-        std::vector<std::string> watchNames;
-        int                      watchSelection{0};
+        std::uint64_t inspectorViewVersion{std::numeric_limits<std::uint64_t>::max()};
+        bool          targetHalted{false};   // the reader's isHalted(), per frame
+        int           selectedInspectTab{};
+        bool          traceDelta{true};
+        bool          traceHex{false};
+        std::string   traceRowsStr{"64"};
+        std::string   watchInput;
+        std::string   watchStatus;
+        std::string   watchCompletionsFor;
+        std::uint64_t watchCompletionsMap{~std::uint64_t{}};
+        uc_log::detail::TargetInspector::Completions watchCompletions;
+        std::vector<std::string>                     watchCompletionTerms;
+        int                                          watchCompletionSelection{0};
+        std::shared_ptr<PickListBase>                watchCompletionList;
+        std::vector<std::string>                     watchNames;
+        int                                          watchSelection{0};
+        std::string watchSelectPending;   // a watch just added: selected once it is in the view
         std::vector<std::string> panicCauseEntries;
         int                      panicCauseSelection{0};
         bool                     panicArmed{false};
@@ -2890,8 +2895,9 @@ namespace uc_log { namespace FTXUIGui {
                    ftxui::text("  5       - Debugger tab"),
                    ftxui::text("  6       - Metrics tab"),
                    ftxui::text("  7       - Status tab"),
-                   ftxui::text("  8       - Health tab (sanitizer, halt, fault and panic records,"),
-                   ftxui::text("            stacks, raise a panic; session statistics)"),
+                   ftxui::text(
+                     "  8       - Health tab (sanitizer, halt, fault and panic records -"),
+                   ftxui::text("            and clearing them, stacks, raise a panic; statistics)"),
                    ftxui::text("  9       - Inspect tab (trace rings, watches, profiler)"),
                    ftxui::text("  0 / ?   - Help tab"),
                    ftxui::text(""),
@@ -2921,7 +2927,9 @@ namespace uc_log { namespace FTXUIGui {
                    ftxui::text("        says which field and why"),
                    ftxui::text("  UB N - sanitizer reports since boot (Health tab: where)"),
                    ftxui::text("  🚨 PANIC / 📕 FAULT - a record in RAM the firmware has not"),
-                   ftxui::text("        reported yet (Health tab); ⏸ HALTED - the core is halted"),
+                   ftxui::text("        reported yet (Health tab; \"Clear records\" there empties"),
+                   ftxui::text("        them); ⏸ HALTED - the core is halted: r resets it (Go"),
+                   ftxui::text("        does not leave a panic's or fault's breakpoint loop)"),
                    ftxui::text(""),
                    ftxui::text("💡 Tips") | ftxui::bold | ftxui::color(Theme::Header::warning()),
                    ftxui::text("  • Use Tab/Shift+Tab to navigate between UI elements"),
@@ -3588,6 +3596,12 @@ namespace uc_log { namespace FTXUIGui {
                 inspectorView        = inspector->snapshot();
                 watchNames.clear();
                 for(auto const& w : inspectorView.watches) { watchNames.push_back(w.name); }
+                if(auto const it = std::ranges::find(watchNames, watchSelectPending);
+                   it != watchNames.end())
+                {
+                    watchSelection = static_cast<int>(it - watchNames.begin());
+                    watchSelectPending.clear();
+                }
                 if(watchSelection >= static_cast<int>(watchNames.size())) {
                     watchSelection = std::max(0, static_cast<int>(watchNames.size()) - 1);
                 }
@@ -3613,6 +3627,14 @@ namespace uc_log { namespace FTXUIGui {
               "🔄 Read now",
               [this]() { withInspector([](auto& i) { i.refresh(); }); },
               createButtonStyle(Theme::Button::Background::reset(), Theme::Button::text()));
+            // a record no boot line takes would keep FAULT / PANIC in the status line for good
+            auto clearBtn = ftxui::Button(
+              "🧹 Clear records",
+              [this]() {
+                  bool const halted = targetHalted;
+                  withInspector([halted](auto& i) { i.clearRecords(halted); });
+              },
+              createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
             auto causeDropdown = ftxui::Dropdown(&panicCauseEntries, &panicCauseSelection);
             auto raiseBtn      = ftxui::Button(
               "🚨 Raise panic",
@@ -3626,25 +3648,30 @@ namespace uc_log { namespace FTXUIGui {
                   withInspector([cause](auto& i) { i.raisePanic(cause); });
               },
               createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
-            // the first click arms, the second raises
+            // the first click arms, the second raises; a row of its own: beside the buttons it
+            // squeezed them ("Raise pani") and was cut off itself
             auto armedRenderer = ftxui::Renderer([this]() {
                 return panicArmed ? ftxui::text(
-                                      " click again to make the core call "
+                                      " click \"Raise panic\" again to make the core call "
                                       "Kvasir::Panic::raise() - it resets or halts")
                                       | ftxui::color(Theme::Status::error()) | ftxui::bold
-                                  : ftxui::text("");
+                                  : ftxui::emptyElement();
             });
             auto controls      = ftxui::Container::Horizontal(
               {refreshBtn,
+               ftxui::Renderer([]() { return ftxui::text(" "); }),
+               clearBtn,
                ftxui::Renderer([]() { return ftxui::text("   panic cause "); }),
                causeDropdown,
                ftxui::Renderer([]() { return ftxui::text(" "); }),
-               raiseBtn,
-               armedRenderer});
+               raiseBtn});
             auto view = ScrollView(
               [this]() { return inspector::healthElement(inspectorView, targetHalted); });
-            auto left = ftxui::Container::Vertical(
-              {controls, ftxui::Renderer([]() { return ftxui::separator(); }), view | ftxui::flex});
+            auto left
+              = ftxui::Container::Vertical({controls,
+                                            armedRenderer,
+                                            ftxui::Renderer([]() { return ftxui::separator(); }),
+                                            view | ftxui::flex});
             return ftxui::Container::Horizontal(
               {left | ftxui::flex,
                ftxui::Renderer([]() { return ftxui::separator(); }),
@@ -3672,24 +3699,121 @@ namespace uc_log { namespace FTXUIGui {
               {controls, ftxui::Renderer([]() { return ftxui::separator(); }), view | ftxui::flex});
         }
 
+        static constexpr std::size_t MaxWatchCompletions = 200;
+        static constexpr int         WatchCompletionRows = 10;
+
+        // The data symbols the typed text matches, looked up again when the text or the map
+        // changed; called by everything that reads them (a key can come before the frame).
+        void refreshWatchCompletions() {
+            if(watchInput == watchCompletionsFor
+               && inspectorView.mapGeneration == watchCompletionsMap)
+            {
+                return;
+            }
+            watchCompletionsFor = watchInput;
+            watchCompletionsMap = inspectorView.mapGeneration;
+            watchCompletions    = {};
+            withInspector([this](auto& i) {
+                watchCompletions = i.completions(watchInput, MaxWatchCompletions);
+            });
+            watchCompletionTerms     = uc_log::detail::SymbolQuery{watchInput}.literals();
+            watchCompletionSelection = 0;
+            if(watchCompletionList) { watchCompletionList->ShowSelected(); }
+        }
+
+        bool isWatched(std::string const& name) const {
+            return std::ranges::find(watchNames, name) != watchNames.end();
+        }
+
+        // Watch one of the listed symbols; `toggle`: one that is watched is not any more.
+        void pickWatchCompletion(int  index,
+                                 bool toggle) {
+            if(index < 0 || index >= static_cast<int>(watchCompletions.best.size())) { return; }
+            auto const name  = watchCompletions.best[static_cast<std::size_t>(index)].name;
+            auto const shown = inspector::shortName(name);
+            if(isWatched(name)) {
+                if(toggle) {
+                    withInspector([&](auto& i) { i.removeWatch(name); });
+                    watchStatus = "no longer watching " + shown;
+                } else {
+                    watchStatus = "already watching " + shown;
+                    watchSelection
+                      = static_cast<int>(std::ranges::find(watchNames, name) - watchNames.begin());
+                }
+                return;
+            }
+            std::string result;
+            withInspector([&](auto& i) { result = i.addWatch(name); });
+            watchStatus = result.empty() ? "watching " + shown : result;
+            if(result.empty()) { watchSelectPending = name; }
+        }
+
         void addWatchFromInput() {
             if(watchInput.empty()) { return; }
+            refreshWatchCompletions();
+            if(!watchCompletions.best.empty()) {
+                pickWatchCompletion(watchCompletionSelection, false);
+                watchInput.clear();
+                return;
+            }
+            // not in the list (no size in a GNU ld map, a function): its exact name still works
             std::string result;
             withInspector([&](auto& i) { result = i.addWatch(watchInput); });
             watchStatus = result.empty() ? "watching " + watchInput : result;
-            if(result.empty()) { watchInput.clear(); }
+            if(result.empty()) {
+                watchSelectPending = watchInput;
+                watchInput.clear();
+            }
+        }
+
+        void removeWatchAt(int index) {
+            if(index < 0 || index >= static_cast<int>(inspectorView.watches.size())) { return; }
+            auto const name = inspectorView.watches[static_cast<std::size_t>(index)].name;
+            withInspector([&](auto& i) { i.removeWatch(name); });
+            watchStatus = "no longer watching " + inspector::shortName(name);
         }
 
         ftxui::Component getWatchComponent() {
             ftxui::InputOption opts;
             opts.multiline = false;
             opts.on_enter  = [this]() { addWatchFromInput(); };
-            auto input
-              = trackInput(ftxui::Input(&watchInput, "symbol or regex (Tab completes)", opts));
-            // Tab takes the first completion instead of moving the focus
+            auto input     = trackInput(
+              ftxui::Input(&watchInput, "part of a symbol's name (more parts: space)", opts));
+            // The focus stays in the input while the list under it is walked: Tab / Shift+Tab
+            // go round it, the arrows leave it at its ends (to the tabs above, the watches
+            // below), Esc empties the input.
             input       = ftxui::CatchEvent(input, [this](ftxui::Event const& e) {
-                if(e != ftxui::Event::Tab || watchCompletions.empty()) { return false; }
-                watchInput = watchCompletions.front();
+                if(e == ftxui::Event::Escape) {
+                    if(watchInput.empty()) { return false; }
+                    watchInput.clear();
+                    watchStatus.clear();
+                    return true;
+                }
+                if(e != ftxui::Event::Tab && e != ftxui::Event::TabReverse
+                   && e != ftxui::Event::ArrowDown && e != ftxui::Event::ArrowUp
+                   && e != ftxui::Event::PageDown && e != ftxui::Event::PageUp)
+                {
+                    return false;
+                }
+                refreshWatchCompletions();
+                int const n = static_cast<int>(watchCompletions.best.size());
+                if(n == 0) { return false; }
+                int& s = watchCompletionSelection;
+                if(e == ftxui::Event::Tab) {
+                    s = (s + 1) % n;
+                } else if(e == ftxui::Event::TabReverse) {
+                    s = (s + n - 1) % n;
+                } else if(e == ftxui::Event::ArrowDown) {
+                    if(s >= n - 1) { return false; }
+                    ++s;
+                } else if(e == ftxui::Event::ArrowUp) {
+                    if(s <= 0) { return false; }
+                    --s;
+                } else if(e == ftxui::Event::PageDown) {
+                    s = std::min(n - 1, s + WatchCompletionRows - 1);
+                } else {
+                    s = std::max(0, s - (WatchCompletionRows - 1));
+                }
                 return true;
             });
             auto addBtn = ftxui::Button(
@@ -3698,63 +3822,90 @@ namespace uc_log { namespace FTXUIGui {
               createButtonStyle(Theme::Button::Background::positive(), Theme::Button::text()));
             auto removeBtn = ftxui::Button(
               "✖ remove selected",
-              [this]() {
-                  auto const index = static_cast<std::size_t>(watchSelection);
-                  withInspector([index](auto& i) { i.removeWatch(index); });
-              },
+              [this]() { removeWatchAt(watchSelection); },
               createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
-            auto menu = ftxui::Menu(&watchNames, &watchSelection);
             auto controls
               = ftxui::Container::Horizontal({input | ftxui::border | ftxui::flex,
                                               addBtn,
                                               ftxui::Renderer([]() { return ftxui::text(" "); }),
                                               removeBtn});
-            auto completions = ftxui::Renderer([this]() {
-                if(watchInput != watchCompletionsFor) {
-                    watchCompletionsFor = watchInput;
-                    watchCompletions.clear();
-                    withInspector(
-                      [this](auto& i) { watchCompletions = i.completions(watchInput, 8); });
-                }
+            auto matches = ftxui::Renderer([this]() {
+                refreshWatchCompletions();
                 std::vector<ftxui::Element> rows;
                 if(!watchStatus.empty()) {
                     rows.push_back(ftxui::text(watchStatus) | ftxui::color(Theme::Status::info()));
                 }
-                for(auto const& c : watchCompletions) {
-                    rows.push_back(ftxui::text("  " + inspector::shortName(c))
+                auto const listed = watchCompletions.best.size();
+                if(watchInput.empty()) { return ftxui::vbox(std::move(rows)); }
+                if(listed == 0) {
+                    rows.push_back(ftxui::text("no data symbol of the map matches")
+                                   | ftxui::color(Theme::Status::warning()));
+                } else {
+                    rows.push_back(ftxui::text(fmt::format(
+                                     "{} match{}{}: Tab / ⇧Tab / ↑↓ choose, Enter watches, a "
+                                     "click watches or un-watches, Esc clears",
+                                     watchCompletions.total,
+                                     watchCompletions.total == 1 ? "" : "es",
+                                     watchCompletions.total > listed
+                                       ? fmt::format(", the best {} listed", listed)
+                                       : std::string{}))
                                    | ftxui::color(Theme::Text::metadata()));
                 }
                 return ftxui::vbox(std::move(rows));
             });
-            // ↑/↓ select a watch (the menu, never drawn itself) and the view follows the
-            // selection; the wheel moves the view alone
-            auto scroll = ScrollView(
-              [this]() { return inspector::watchesElement(inspectorView, watchSelection); });
-            auto view
-              = ftxui::Renderer(menu,
-                                [this, scroll, shown = -1]() mutable {
-                                    if(watchSelection != shown) {
-                                        shown = watchSelection;
-                                        scroll->Show(inspector::WatchRows * watchSelection,
-                                                     inspector::WatchRows * (watchSelection + 1)
-                                                       - 1);
-                                    }
-                                    return scroll->Render();
-                                })
-              | ftxui::CatchEvent([wheel = ftxui::Component{scroll}](ftxui::Event const& e) {
-                    return e.is_mouse() && wheel->OnEvent(e);
-                });
+
+            PickListOption pick;
+            pick.count = [this]() {
+                refreshWatchCompletions();
+                return static_cast<int>(watchCompletions.best.size());
+            };
+            pick.row = [this](int index, PickListOption::RowState state) {
+                auto const& c = watchCompletions.best[static_cast<std::size_t>(index)];
+                return inspector::completionRow(c,
+                                                watchCompletionTerms,
+                                                isWatched(c.name),
+                                                state.selected);
+            };
+            pick.selected       = &watchCompletionSelection;
+            pick.focusable      = false;
+            pick.hoverSelects   = true;
+            pick.onClick        = [this](int index, int, int) { pickWatchCompletion(index, true); };
+            watchCompletionList = PickList(std::move(pick));
+
+            PickListOption list;
+            list.count = [this]() { return static_cast<int>(inspectorView.watches.size()); };
+            list.row   = [this](int index, PickListOption::RowState state) {
+                return inspector::watchRow(inspectorView.watches[static_cast<std::size_t>(index)],
+                                           state.selected,
+                                           state.hovered,
+                                           state.focused);
+            };
+            list.empty = []() {
+                return inspector::dim(
+                  "no watches: type a part of a symbol's name above and pick one of the matches");
+            };
+            list.rowsPerItem = inspector::WatchRows;
+            list.selected    = &watchSelection;
+            list.onClick     = [this](int index, int line, int column) {
+                if(line == 0 && column < inspector::WatchRemoveColumns) { removeWatchAt(index); }
+            };
+            list.onDelete            = [this](int index) { removeWatchAt(index); };
+            ftxui::Component watches = PickList(std::move(list));
+
             return ftxui::Container::Vertical(
               {controls,
-               completions,
+               matches,
+               ftxui::Component{watchCompletionList}
+                 | ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, WatchCompletionRows),
                ftxui::Renderer([]() {
                    return ftxui::text(
-                            "untyped: a value of 1, 2, 4 or 8 bytes as numbers, "
-                            "anything else as bytes (first 64); ↑/↓ select, read 5x a second")
+                            "untyped: 1, 2, 4 or 8 bytes as numbers, else bytes (first "
+                            "64), read 5x a second; ↑↓ or a click select, Del or ✖ "
+                            "removes")
                         | ftxui::color(Theme::Text::metadata());
                }),
                ftxui::Renderer([]() { return ftxui::separator(); }),
-               view | ftxui::flex});
+               watches | ftxui::flex});
         }
 
         ftxui::Component getProfileComponent() {
@@ -4035,7 +4186,8 @@ namespace uc_log { namespace FTXUIGui {
                     },
                   .sessions = [&rttReader] { return rttReader.sessionCount(); },
                   .mapFile  = [this] { return mapFilePath; },
-                  .changed  = [this] { requestRedrawFromAnywhere(); }});
+                  .changed  = [this] { requestRedrawFromAnywhere(); },
+                  .note     = [this](std::string_view msg) { statusMessage(msg); }});
                 std::lock_guard<std::mutex> const lock{inspectorMutex};
                 inspector = std::move(created);
             }

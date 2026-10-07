@@ -152,6 +152,7 @@ struct FakeTarget {
     bool                                   halted{};
     std::uint32_t                          pcsr{0x100001f0U};
     std::atomic<int>                       calls{0};
+    std::atomic<int>                       ramWrites{0};
 
     void put(std::uint32_t              address,
              std::span<std::byte const> data) {
@@ -165,6 +166,11 @@ struct FakeTarget {
             v |= std::to_integer<std::uint32_t>(bytes[address + i]) << (8 * i);
         }
         return v;
+    }
+
+    std::uint32_t read(std::uint32_t address) {
+        std::lock_guard<std::mutex> const lock{mutex};
+        return word(address);
     }
 
     void setWord(std::uint32_t address,
@@ -190,6 +196,7 @@ struct FakeTarget {
                         setWord(0xE000EDF8U, regs[reg]);
                     }
                 } else {
+                    if((a.address >> 28) == 2U) { ++ramWrites; }
                     setWord(a.address, *a.write);
                 }
             }
@@ -213,6 +220,40 @@ static bool eventually(F&& f) {
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
     return false;
+}
+
+static void symbolMatchTests() {
+    CHECK(symbolLeaf("Kvasir::Fault::lastFault") == "lastFault", "leaf: after the last ::");
+    CHECK(symbolLeaf("counter") == "counter", "leaf: a name without scope");
+    CHECK(symbolLeaf("f(A::B)::count") == "count", "leaf: a function's static");
+    CHECK(symbolLeaf("Ring<A::B, 4u>::storage") == "storage", "leaf: :: in template arguments");
+    CHECK(symbolLeaf("Holder<A::B>") == "Holder<A::B>", "leaf: only :: in template arguments");
+    CHECK(symbolLeaf("A::") == "A::", "leaf: never empty");
+
+    auto const rank
+      = [](std::string_view query, std::string_view name) { return SymbolQuery{query}.rank(name); };
+    CHECK(rank("lastfault", "Kvasir::Fault::lastFault") == 0U, "rank: the last component");
+    CHECK(rank("last", "Kvasir::Fault::lastFault") == 1U, "rank: it starts with the text");
+    CHECK(rank("fault", "Kvasir::Panic::lastFault") == 2U, "rank: a camelCase word of it");
+    CHECK(rank("fault", "a::last_fault") == 2U, "rank: a snake_case word of it");
+    CHECK(rank("ault", "a::lastFault") == 3U, "rank: inside it");
+    CHECK(rank("fault", "Kvasir::Fault::record") == 4U, "rank: a scope starts with the text");
+    CHECK(rank("i2c", "enchantum::values<Kvasir::I2C::Answer>") == 4U
+            && rank("nswer", "enchantum::values<Kvasir::I2C::Answer>") == 5U,
+          "rank: the last component's template arguments count as scope");
+    CHECK(rank("values", "enchantum::values<Kvasir::I2C::Answer>") == 0U
+            && rank("count", "f(int)::count") == 0U,
+          "rank: its own name is the name before them");
+    CHECK(rank("asir", "Kvasir::Fault::record") == 5U, "rank: somewhere in a scope");
+    CHECK(rank("^Kv.*rec", "Kvasir::Fault::record") == 6U, "rank: only as a regex");
+    CHECK(!rank("xyz", "Kvasir::Fault::record"), "rank: no match");
+    CHECK(!rank("", "counter") && !rank(" ", "counter"), "rank: no term matches nothing");
+    CHECK(rank("fault last", "Kvasir::Fault::lastFault") == 3U, "rank: the terms' ranks add up");
+    CHECK(!rank("fault xyz", "Kvasir::Fault::lastFault"), "rank: one term missing is no match");
+    CHECK(rank("f(int", "f(int)::count") == 4U, "rank: a broken regex is still plain text");
+    CHECK(rank("(anonymous", "(anonymous namespace)::x") == 4U, "rank: text first, regex second");
+    CHECK(SymbolQuery{"Fault  LAST"}.literals() == (std::vector<std::string>{"fault", "last"}),
+          "literals: the terms in lower case");
 }
 
 static void inspectorTests() {
@@ -252,14 +293,21 @@ static void inspectorTests() {
     target.put(0x1000a884U, std::as_bytes(std::span{"button:us,level"}));
     target.put(0x20000108U, words({41}));   // counter
 
-    std::atomic<int> changes{0};
-    TargetInspector  inspector{
+    std::atomic<int>         changes{0};
+    std::mutex               notesMutex;
+    std::vector<std::string> notes;
+    TargetInspector          inspector{
       TargetInspector::Hooks{.memory = [&](std::span<InspectorAccess const> a,
                              std::chrono::milliseconds) { return target.access(a); },
                              .connected = [] { return true; },
                              .sessions  = [] { return std::uint64_t{1}; },
                              .mapFile   = [&] { return mapPath; },
-                             .changed   = [&] { ++changes; }}
+                             .changed   = [&] { ++changes; },
+                             .note =
+                               [&](std::string_view line) {
+                                   std::lock_guard<std::mutex> const lock{notesMutex};
+                                   notes.emplace_back(line);
+                               }}
     };
 
     CHECK(eventually([&] {
@@ -286,10 +334,45 @@ static void inspectorTests() {
             && s.rings[0].rows.size() == 3 && s.rings[0].rows[2].values[0] == 125,
           "ring decoded");
 
-    CHECK(inspector.completions("count", 10) == std::vector<std::string>{"counter"},
-          "completions: data symbols");
+    auto const names = [&](std::string const& query, std::size_t max = 10) {
+        std::vector<std::string> out;
+        for(auto const& c : inspector.completions(query, max).best) { out.push_back(c.name); }
+        return out;
+    };
+    using Names = std::vector<std::string>;
+    CHECK((inspector.completions("count", 10).best
+           == std::vector<TargetInspector::Completion>{
+             {"counter", 0x20000108U, 4}
+    }),
+          "completions: a data symbol with its address and size");
+    CHECK(names("last") == (Names{"Kvasir::Fault::lastFault", "Kvasir::Panic::lastPanic"}),
+          "completions: both that match, by name where the rank is the same");
+    CHECK(names("panic last") == Names{"Kvasir::Panic::lastPanic"},
+          "completions: every term has to match, in any order");
+    CHECK(names("fault") == Names{"Kvasir::Fault::lastFault"},
+          "completions: a word of the last component, without case");
+    CHECK(names("kvasir").size() == 5 && names("kvasir").front() == "Kvasir::Fault::lastFault",
+          "completions: all data symbols of a namespace, the shortest name first");
+    CHECK(names("kvasir", 2).size() == 2 && inspector.completions("kvasir", 2).total == 5,
+          "completions: cut to the best, the total still told");
+    CHECK(names("st").front() == "Kvasir::Trace::Ring<X, 4u, Y>::storage",
+          "completions: the name that starts with the text before those that hold it");
+    CHECK(names("cou.*er") == Names{"counter"}, "completions: a regex");
+    CHECK(names("ResetISR").empty() && names("onIsr").empty(), "completions: no functions");
+    CHECK(names("").empty() && names("  ").empty(), "completions: nothing typed, nothing listed");
+    CHECK(names("Kvasir::Trace::Ring<X, 4u, Y>::storage")
+            == Names{"Kvasir::Trace::Ring<X, 4u, Y>::storage"},
+          "completions: a whole name with spaces and brackets finds itself");
     CHECK(inspector.addWatch("cou.*er").empty(), "watch by regex");
     CHECK(!inspector.addWatch("Kvasir").empty(), "an ambiguous watch is refused");
+    CHECK(inspector.addWatch("Kvasir::Panic::lastPanic").empty()
+            && inspector.snapshot().watches.size() == 2,
+          "a second watch by its exact name");
+    inspector.removeWatch(std::string{"Kvasir::Panic::lastPanic"});
+    inspector.removeWatch(std::string{"not watched"});
+    CHECK(inspector.snapshot().watches.size() == 1
+            && inspector.snapshot().watches[0].name == "counter",
+          "a watch removed by its name");
     inspector.setPage(TargetInspector::Page::watch);
     CHECK(eventually([&] {
               auto const w = inspector.snapshot().watches;
@@ -317,6 +400,7 @@ static void inspectorTests() {
 
     // panic: halt, R0 = cause, xPSR without IT/ICI, PC = raise, resume
     target.regs[16] = 0x0100'2800U;   // a halt inside an IT block
+    target.regs[15] = 0x1000'01f0U;   // ... at this PC
     inspector.raisePanic(2);
     CHECK(eventually([&] { return !inspector.snapshot().panicRaise.empty(); }), "raise done");
     s = inspector.snapshot();
@@ -324,6 +408,7 @@ static void inspectorTests() {
     CHECK(target.regs[0] == 2 && target.regs[15] == 0x10000148U && target.regs[16] == 0x0100'0000U
             && !target.halted,
           "panic registers written, core resumed");
+    CHECK(target.regs[14] == 0x1000'01f3U, "LR = a call from the halted PC: the record's site");
 
     // a halt message
     inspector.noteHalt(
@@ -333,6 +418,52 @@ static void inspectorTests() {
     CHECK(s.halt && s.halt->exception == 3 && s.halt->pcWhere == "ResetISR+0x8"
             && s.halt->codeWords.size() == 1 && s.halt->codeWords[0].offset == 4,
           "halt parsed and symbolised");
+
+    // clear: refused while the core is halted; then the two magics go and nothing else, what the
+    // records held is said, the halt's capture is forgotten
+    auto const cleared = [&](std::string_view outcome) {
+        return eventually([&] { return inspector.snapshot().recordsCleared.starts_with(outcome); });
+    };
+    inspector.clearRecords(true);
+    CHECK(cleared("not cleared: halted"), "a halted core's records are not cleared");
+    std::this_thread::sleep_for(std::chrono::milliseconds{250});
+    CHECK(target.read(0x200012d4U) == FaultMagic && target.read(0x200012bcU) == PanicMagic
+            && target.ramWrites == 0 && inspector.snapshot().halt.has_value(),
+          "refused: nothing written, the halt's capture kept");
+    inspector.clearRecords(false);
+    CHECK(cleared("2 record(s) cleared"), "both records cleared");
+    CHECK(eventually([&] {
+              auto const c = inspector.snapshot();
+              return !c.fault && !c.panic;
+          }),
+          "the snapshot has no record after the clear");
+    CHECK(target.read(0x200012d4U) == 0 && target.read(0x200012bcU) == 0, "both magics are 0");
+    CHECK(target.read(0x200012d8U) == 1 && target.read(0x200012dcU) == 0x100001c5U + 4
+            && target.read(0x200012c8U) == 0x100001e9U + 6 && target.ramWrites == 2,
+          "only the two magic words were written");
+    CHECK(!inspector.snapshot().halt, "the halt's capture is forgotten with the records");
+    {
+        std::lock_guard<std::mutex> const lock{notesMutex};
+        CHECK(notes.size() == 2
+                && notes[0].starts_with("fault record cleared from the TUI: 1 fault(s), the "
+                                        "first in HardFault, pc=0x100001c9 "
+                                        "Kvasir::Nvic::DefaultIsrs::onIsr()+0x4 lr=0x100001e9 "
+                                        "ResetISR")
+                && notes[1].starts_with("panic record cleared from the TUI: 1 panic(s), the "
+                                        "first: assertion, site=0x100001ec ResetISR+0x4"),
+              notes.empty() ? "no note" : (notes[0] + " / " + notes.back()).c_str());
+    }
+    // a word without the magic is not a record (the map of another image): left alone
+    target.put(0x200012d4U, words({0x12345678U}));
+    target.put(0x200012bcU, words({PanicMagic, 3, 1, 0, 0}));
+    inspector.clearRecords(false);
+    CHECK(cleared("1 record(s) cleared"), "the panic record alone cleared");
+    CHECK(target.read(0x200012d4U) == 0x12345678U && target.read(0x200012bcU) == 0
+            && target.ramWrites == 3,
+          "a word that is no record is not written");
+    inspector.clearRecords(false);
+    CHECK(cleared("nothing to clear"), "no record: said so");
+    CHECK(target.ramWrites == 3, "nothing written");
 
     // a rebuilt image: the map moves the counter
     {
@@ -352,6 +483,7 @@ static void inspectorTests() {
 int main() {
     mapTests();
     recordTests();
+    symbolMatchTests();
     inspectorTests();
     if(failures == 0) { std::printf("all target inspector tests passed\n"); }
     return failures == 0 ? 0 : 1;

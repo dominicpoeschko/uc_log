@@ -40,7 +40,17 @@ inline std::string shortName(std::string_view name,
         }
         if(depth < 2) { out += c; }
     }
-    if(out.size() > max + 20) { out = out.substr(0, max) + "…"; }
+    if(out.size() > max + 20) {
+        // the last component says which variable or function it is: the cut goes before it
+        auto const leaf = std::string{out.substr(uc_log::detail::symbolLeafStart(out))};
+        bool const keep = leaf.size() != out.size() && leaf.size() + 12 <= max;
+        out.resize(keep ? max - leaf.size() - 2 : max);
+        // not through the middle of a "…" put in above
+        while(!out.empty() && (static_cast<unsigned char>(out.back()) & 0x80U) != 0) {
+            out.pop_back();
+        }
+        out += keep ? "…::" + leaf : std::string{"…"};
+    }
     return out;
 }
 
@@ -90,9 +100,21 @@ inline ftxui::Element ubsanSection(Snapshot const& s) {
 inline ftxui::Element haltSection(Snapshot const& s,
                                   bool            haltedNow) {
     std::vector<ftxui::Element> rows{header("⏸ Last halt (kvasir_bench.py crash)")};
+    // Kvasir::Panic::halt and the fault handler end in `while(true) bkpt`: Go stops on the next one
+    auto const wayOut = [&] {
+        if(!haltedNow) { return; }
+        rows.push_back(
+          dim("  to leave the halt: [r] resets the target (the next boot line reports "
+              "the panic or fault);"));
+        rows.push_back(
+          dim("  Go on the Debugger tab (5) continues, but a panic's or fault's halt is "
+              "a breakpoint loop"));
+        rows.push_back(dim("  and stops again at once"));
+    };
     if(!s.halt) {
         rows.push_back(
           dim(haltedNow ? "  halted, no capture yet" : "  none seen since the printer started"));
+        wayOut();
         return ftxui::vbox(std::move(rows));
     }
     auto const& h = *s.halt;
@@ -117,6 +139,7 @@ inline ftxui::Element haltSection(Snapshot const& s,
             rows.push_back(addressLine(fmt::format("sp+{}", w.offset), w.value, w.where));
         }
     }
+    wayOut();
     return ftxui::vbox(std::move(rows));
 }
 
@@ -213,17 +236,18 @@ inline ftxui::Element stacksSection(Snapshot const& s) {
 
 inline ftxui::Element healthElement(Snapshot const& s,
                                     bool            haltedNow) {
-    return ftxui::vbox({mapLine(s),
-                        ftxui::text(""),
-                        ubsanSection(s),
-                        ftxui::text(""),
-                        haltSection(s, haltedNow),
-                        ftxui::text(""),
-                        faultSection(s),
-                        ftxui::text(""),
-                        panicSection(s),
-                        ftxui::text(""),
-                        stacksSection(s)});
+    return ftxui::vbox(
+      {mapLine(s),
+       s.recordsCleared.empty() ? ftxui::text("") : dim("clear records: " + s.recordsCleared),
+       ubsanSection(s),
+       ftxui::text(""),
+       haltSection(s, haltedNow),
+       ftxui::text(""),
+       faultSection(s),
+       ftxui::text(""),
+       panicSection(s),
+       ftxui::text(""),
+       stacksSection(s)});
 }
 
 inline ftxui::Element ringsElement(Snapshot const& s,
@@ -324,41 +348,87 @@ inline std::string watchValue(std::vector<std::byte> const& v) {
     return hex;
 }
 
-/// Rows of watchesElement() per watch: the name and the value (or the error).
-inline constexpr int WatchRows = 2;
-
-inline ftxui::Element watchesElement(Snapshot const& s,
-                                     int             selected) {
-    std::vector<ftxui::Element> out;
-    if(s.watches.empty()) {
-        out.push_back(dim("no watches: type a symbol (regex) above, Tab completes, Enter adds"));
-    }
-    auto const now = std::chrono::steady_clock::now();
-    for(std::size_t i = 0; i != s.watches.size(); ++i) {
-        auto const& w      = s.watches[i];
-        bool const  recent = w.changes != 0 && now - w.changed < std::chrono::seconds{1};
-        auto        name   = ftxui::text(fmt::format("{} {}",
-                                                     static_cast<int>(i) == selected ? "▶" : " ",
-                                                     shortName(w.name, 80)))
-                           | ftxui::color(Theme::Data::name());
-        auto        head   = ftxui::hbox(
-          {name,
-           dim(fmt::format("  @{:#010x}, {} B{}",
-                           w.address,
-                           w.symbolSize,
-                           w.symbolSize > w.size ? fmt::format(" (first {} shown)", w.size)
-                                                 : std::string{}))});
-        out.push_back(head);
-        if(!w.error.empty()) {
-            out.push_back(ftxui::text("    " + w.error) | ftxui::color(Theme::Status::error()));
-            continue;
+/// A symbol's name with the typed terms marked in it: the scope in one colour, the last
+/// component in another. `plain` leaves the colours out (a row drawn inverted).
+inline ftxui::Element matchedName(std::string_view                name,
+                                  std::vector<std::string> const& lowerTerms,
+                                  bool                            plain,
+                                  std::size_t                     max = 100) {
+    auto const        shown = shortName(name, max);
+    auto const        lower = uc_log::detail::asciiLower(shown);
+    std::vector<bool> hit(shown.size(), false);
+    for(auto const& term : lowerTerms) {
+        if(term.empty()) { continue; }
+        for(auto pos = lower.find(term); pos != std::string::npos;
+            pos      = lower.find(term, pos + term.size()))
+        {
+            std::fill_n(hit.begin() + static_cast<std::ptrdiff_t>(pos), term.size(), true);
         }
-        out.push_back(
-          ftxui::hbox({ftxui::text("    " + watchValue(w.value)) | ftxui::bold
-                         | ftxui::color(recent ? Theme::Status::warning() : Theme::Data::value()),
-                       dim(fmt::format("   {} change(s)", w.changes))}));
     }
-    return ftxui::vbox(std::move(out));
+    auto const                  leaf = uc_log::detail::symbolLeafStart(shown);
+    std::vector<ftxui::Element> parts;
+    for(std::size_t i = 0; i != shown.size();) {
+        std::size_t j = i;
+        while(j != shown.size() && hit[j] == hit[i] && (j >= leaf) == (i >= leaf)) { ++j; }
+        auto part = ftxui::text(shown.substr(i, j - i));
+        if(!plain) {
+            part = part | ftxui::color(i >= leaf ? Theme::Data::name() : Theme::Data::scope());
+        }
+        if(hit[i]) { part = part | ftxui::bold | ftxui::underlined; }
+        parts.push_back(std::move(part));
+        i = j;
+    }
+    return ftxui::hbox(std::move(parts));
+}
+
+/// One line of the watch input's pick list: a data symbol the typed text matches.
+inline ftxui::Element completionRow(uc_log::detail::TargetInspector::Completion const& c,
+                                    std::vector<std::string> const&                    lowerTerms,
+                                    bool                                               watched,
+                                    bool                                               selected) {
+    auto const meta
+      = [&](std::string const& text) { return selected ? ftxui::text(text) : dim(text); };
+    auto mark = ftxui::text(watched ? "✓ " : "  ");
+    if(!selected) { mark = mark | ftxui::color(Theme::Status::success()); }
+    auto row = ftxui::hbox({ftxui::text(selected ? "▶ " : "  "),
+                            std::move(mark),
+                            meta(fmt::format("{:>6} B  ", c.size)),
+                            matchedName(c.name, lowerTerms, selected),
+                            meta(fmt::format("  @{:#010x}", c.address)),
+                            ftxui::filler()});
+    return selected ? row | ftxui::inverted : row;
+}
+
+/// Rows of watchRow(): the name and the value (or the error).
+inline constexpr int WatchRows = 2;
+/// A click in the first columns of a watch's name row removes it: the ✖ drawn there.
+inline constexpr int WatchRemoveColumns = 3;
+
+inline ftxui::Element watchRow(Snapshot::Watch const& w,
+                               bool                   selected,
+                               bool                   hovered,
+                               bool                   focused) {
+    auto const now    = std::chrono::steady_clock::now();
+    bool const recent = w.changes != 0 && now - w.changed < std::chrono::seconds{1};
+    auto       name   = ftxui::text(shortName(w.name, 80)) | ftxui::color(Theme::Data::name());
+    if(selected && focused) { name = name | ftxui::inverted; }
+    if(hovered) { name = name | ftxui::underlined; }
+    auto head = ftxui::hbox(
+      {ftxui::text(selected || hovered ? " ✖ " : "   ") | ftxui::color(Theme::UI::remove()),
+       ftxui::text(selected ? "▶ " : "  "),
+       std::move(name),
+       dim(fmt::format("  @{:#010x}, {} B{}",
+                       w.address,
+                       w.symbolSize,
+                       w.symbolSize > w.size ? fmt::format(" (first {} shown)", w.size)
+                                             : std::string{}))});
+    auto value
+      = !w.error.empty()
+        ? ftxui::text("       " + w.error) | ftxui::color(Theme::Status::error())
+        : ftxui::hbox({ftxui::text("       " + watchValue(w.value)) | ftxui::bold
+                         | ftxui::color(recent ? Theme::Status::warning() : Theme::Data::value()),
+                       dim(fmt::format("   {} change(s)", w.changes))});
+    return ftxui::vbox({std::move(head), std::move(value)});
 }
 
 inline ftxui::Element profileElement(Snapshot const& s,

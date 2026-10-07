@@ -112,29 +112,86 @@ namespace uc_log { namespace detail {
     template<typename>
     struct Log;
 
-    template<typename... Args>
-    struct Log<std::tuple<Args...>> {
+    // now() is a time_point or a duration (defined below)
+    template<typename Time>
+    constexpr auto ticks(Time time);
+
+    // What every cataloged record has around its arguments: the time stamp, the backend's record
+    // guard, the printer with its staging bytes, the record's start with the site's id and its
+    // end. Constructor and destructor are out of line, so this code exists ONCE per backend and
+    // clock; a record body (Log::record) is then a frame, two calls and its own arguments.
+    template<typename ComBackend, typename ClockTag>
+    struct RecordFrame {
+        using Ticks = decltype(ticks(LogClock<ClockTag>::now()));
+
+        // In this order: the clock is read before the guard masks anything. The guard is held
+        // for the whole record, not each write() it is made of; empty unless the backend names
+        // one (detail/LevelBoundBackend.hpp).
+        Ticks const                                                  time;
+        [[no_unique_address]] typename ComBackend::RecordGuard const guard{};
+        remote_fmt::Printer<ComBackend>                              printer;
+
+        // No stack protector (dominic, 2026-10-05): the function has no buffer of its own, and
+        // -fstack-protector-strong would guard it only because the clock hands its time back
+        // through a local - a second canary check in every log line.
+        [[gnu::noinline,
+          gnu::no_stack_protector]] explicit RecordFrame(remote_fmt::catalog_id site)
+          : time{ticks(LogClock<ClockTag>::now())} {
+            printer.beginCataloged(remote_fmt::SiteId{site});
+            printer.formatArguments(time);
+        }
+
+        [[gnu::noinline]] ~RecordFrame() { printer.endCataloged(); }
+
+        RecordFrame(RecordFrame const&)            = delete;
+        RecordFrame& operator=(RecordFrame const&) = delete;
+    };
+
+    // Ticks is the type of the time stamp every line starts with (ticks() of the clock's now()),
+    // Args the line's own arguments.
+    template<typename Ticks, typename... Args>
+    struct Log<std::tuple<Ticks, Args...>> {
         // The format with the metrics' markers put in.
         template<typename Fmt>
-        using Final
-          = decltype(injectMetricFmtString(Fmt{}, std::declval<LogArgument_t<Args>>()...));
+        using Final = decltype(injectMetricFmtString(Fmt{},
+                                                     std::declval<LogArgument_t<Ticks>>(),
+                                                     std::declval<LogArgument_t<Args>>()...));
+
+        // The record of a cataloged line: ONE body per argument list (and backend and clock),
+        // shared by every call site with these argument types. Not inlined, and the site is a
+        // run-time value: as a template argument, or inlined, each string had its own copy of
+        // the whole record (84 bytes a string on the Cortex-M0+, more with arguments). The clock
+        // is read in the frame for the same reason: a call site is its arguments, the id and
+        // one call.
+        template<typename ComBackend,
+                 typename ClockTag>
+        [[gnu::noinline]] static void record(remote_fmt::catalog_id site,
+                                             LogArgument_t<Args>... args) {
+            RecordFrame<ComBackend, ClockTag> frame{site};
+            frame.printer.formatArguments(normalizeLogArgument(args)...);
+        }
 
         // `site` is a value, not the site's lambda type: that would copy this function per
         // instantiation of the caller.
         template<typename ComBackend,
+                 typename ClockTag,
                  char... chars>
-        static constexpr void log(remote_fmt::catalog_id       site,
-                                  sc::StringConstant<chars...> fmt,
-                                  LogArgument_t<Args>... args) {
-            // Held for the whole record, not each write() it is made of; empty unless the
-            // backend names one (detail/LevelBoundBackend.hpp).
-            [[maybe_unused]] typename ComBackend::RecordGuard const guard{};
+        [[gnu::always_inline]] static constexpr void log(remote_fmt::catalog_id       site,
+                                                         sc::StringConstant<chars...> fmt,
+                                                         LogArgument_t<Args>... args) {
+            static_assert(std::is_same_v<Ticks, decltype(ticks(LogClock<ClockTag>::now()))>);
             if constexpr(remote_fmt::use_catalog) {
-                remote_fmt::Printer<ComBackend>::staticPrint(remote_fmt::SiteId{site},
-                                                             fmt,
-                                                             normalizeLogArgument(args)...);
+                // the string is needed for this check only, which makes no code
+                remote_fmt::Printer<ComBackend>::
+                  template checkCataloged<Ticks const&, decltype(normalizeLogArgument(args))...>(
+                    fmt);
+                record<ComBackend, ClockTag>(site, args...);
             } else {
-                remote_fmt::Printer<ComBackend>::staticPrint(fmt, normalizeLogArgument(args)...);
+                Ticks const time = ticks(LogClock<ClockTag>::now());
+                [[maybe_unused]] typename ComBackend::RecordGuard const guard{};
+                remote_fmt::Printer<ComBackend>::staticPrint(fmt,
+                                                             time,
+                                                             normalizeLogArgument(args)...);
             }
         }
     };
@@ -249,12 +306,10 @@ namespace detail {
                       UC_LOG_DO_NOT_USE_FMT{};                                                   \
                     UC_LOG_DO_NOT_USE_LOG::template log<                                         \
                       ::uc_log::detail::ResolveBackend<::uc_log::detail::EnvTag_t<uc_log_env_t>, \
-                                                       static_cast<::uc_log::LogLevel>(level)>>( \
+                                                       static_cast<::uc_log::LogLevel>(level)>,  \
+                      ::uc_log::detail::EnvTag_t<uc_log_env_t>>(                                 \
                       REMOTE_FMT_SITE()(UC_LOG_DO_NOT_USE_FMT),                                  \
-                      UC_LOG_DO_NOT_USE_FMT,                                                     \
-                      ::uc_log::detail::ticks(                                                   \
-                        ::uc_log::LogClock<::uc_log::detail::EnvTag_t<uc_log_env_t>>::now())     \
-                        __VA_OPT__(, ) __VA_ARGS__);                                             \
+                      UC_LOG_DO_NOT_USE_FMT __VA_OPT__(, ) __VA_ARGS__);                         \
                 }                                                                                \
             }                                                                                    \
         } while(false)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "uc_log/detail/MapSymbols.hpp"
+#include "uc_log/detail/SymbolMatch.hpp"
 #include "uc_log/detail/TargetRecords.hpp"
 
 #include <algorithm>
@@ -11,6 +12,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <format>
 #include <functional>
 #include <map>
 #include <memory>
@@ -45,18 +47,20 @@ class TargetInspector {
 public:
     struct Hooks {
         std::function<InspectorResult(std::span<InspectorAccess const>, std::chrono::milliseconds)>
-                                       memory;
-        std::function<bool()>          connected;   // a session runs and nothing is flashed
-        std::function<std::uint64_t()> sessions;    // a new session: records and map again
-        std::function<std::string()>   mapFile;
-        std::function<void()>          changed;   // something to redraw
+                                              memory;
+        std::function<bool()>                 connected;   // a session runs and nothing is flashed
+        std::function<std::uint64_t()>        sessions;    // a new session: records and map again
+        std::function<std::string()>          mapFile;
+        std::function<void()>                 changed;   // something to redraw
+        std::function<void(std::string_view)> note{};    // a line for the status log
     };
 
     /// What the UI shows; kept up to date by the worker, copied out by snapshot().
     struct Snapshot {
-        std::string mapError;   // empty: the map is read
-        bool        lldMap{};
-        std::size_t symbolCount{};
+        std::string   mapError;   // empty: the map is read
+        bool          lldMap{};
+        std::size_t   symbolCount{};
+        std::uint64_t mapGeneration{};   // counts the maps read: what was looked up in one is stale
 
         bool                          haveUbsan{};
         std::optional<records::Ubsan> ubsan;
@@ -138,7 +142,8 @@ public:
         std::vector<ProfileRow> profile;
         std::string             profileError;
 
-        std::string panicRaise;   // the last raisePanic()'s outcome
+        std::string panicRaise;       // the last raisePanic()'s outcome
+        std::string recordsCleared;   // the last clearRecords()'s outcome
     };
 
     enum class Page : std::uint8_t { none, health, trace, watch, profile };
@@ -199,33 +204,68 @@ public:
         return describeLocked(address);
     }
 
-    /// Data symbols whose name contains `pattern` (a regex; plain text when it is none), at most
-    /// `max`, shortest names first.
-    std::vector<std::string> completions(std::string const& pattern,
-                                         std::size_t        max) const {
+    struct Completion {
+        std::string   name;
+        std::uint32_t address{};
+        std::uint32_t size{};
+
+        bool operator==(Completion const&) const = default;
+    };
+
+    struct Completions {
+        std::vector<Completion> best;      // the likeliest first (SymbolQuery::rank)
+        std::size_t             total{};   // data symbols that match at all
+    };
+
+    /// The data symbols `query` matches (SymbolQuery: terms, plain text or regex), the best
+    /// `max` of them: by rank, then the shorter name.
+    Completions completions(std::string const& query,
+                            std::size_t        max) const {
+        Completions       out;
+        SymbolQuery const q{query};
+        if(q.empty()) { return out; }
         std::lock_guard<std::mutex> const lock{mutex_};
-        std::vector<std::string>          out;
-        if(pattern.empty()) { return out; }
-        auto const matches = matcher(pattern);
+
+        struct Hit {
+            unsigned         rank;
+            MapSymbol const* symbol;
+        };
+
+        std::vector<Hit> hits;
         for(auto const& s : symbols_.all()) {
-            if(!s.code && s.size != 0 && matches(s.name)) { out.push_back(s.name); }
+            if(s.code || s.size == 0 || isSiteTag(s.name)) { continue; }
+            auto const rank = q.rank(s.name);
+            // a name that repeats (static locals of inlined functions) is its first symbol
+            if(rank && symbols_.find(s.name) == &s) { hits.push_back({*rank, &s}); }
         }
-        std::ranges::sort(out, [](auto const& a, auto const& b) {
-            return a.size() != b.size() ? a.size() < b.size() : a < b;
-        });
-        out.erase(std::unique(out.begin(), out.end()), out.end());
-        if(out.size() > max) { out.resize(max); }
+        out.total       = hits.size();
+        auto const less = [](Hit const& a, Hit const& b) {
+            if(a.rank != b.rank) { return a.rank < b.rank; }
+            auto const& an = a.symbol->name;
+            auto const& bn = b.symbol->name;
+            return an.size() != bn.size() ? an.size() < bn.size() : an < bn;
+        };
+        auto const shown = std::min(max, hits.size());
+        std::partial_sort(hits.begin(),
+                          hits.begin() + static_cast<std::ptrdiff_t>(shown),
+                          hits.end(),
+                          less);
+        for(std::size_t i = 0; i != shown; ++i) {
+            auto const& s = *hits[i].symbol;
+            out.best.push_back({s.name, s.address, s.size});
+        }
         return out;
     }
 
-    /// Watch a data symbol by its exact name (or the only one matching it). Empty = done.
+    /// Watch a data symbol by its exact name (or the only one a query matches). Empty = done.
     std::string addWatch(std::string const& name) {
         {
             std::lock_guard<std::mutex> const lock{mutex_};
             auto const*                       s = symbols_.find(name);
             if(s == nullptr) {
-                auto const all = symbols_.findIf([&](MapSymbol const& m) {
-                    return !m.code && m.size != 0 && matcher(name)(m.name);
+                SymbolQuery const q{name};
+                auto const        all = symbols_.findIf([&](MapSymbol const& m) {
+                    return !m.code && m.size != 0 && q.rank(m.name).has_value();
                 });
                 if(all.size() != 1) {
                     return all.empty() ? "no data symbol " + name + " in the map"
@@ -256,6 +296,15 @@ public:
             if(index < state_.watches.size()) {
                 state_.watches.erase(state_.watches.begin() + static_cast<std::ptrdiff_t>(index));
             }
+        }
+        changed();
+    }
+
+    /// By name: an index taken from a snapshot may be a frame old.
+    void removeWatch(std::string const& name) {
+        {
+            std::lock_guard<std::mutex> const lock{mutex_};
+            std::erase_if(state_.watches, [&](auto const& w) { return w.name == name; });
         }
         changed();
     }
@@ -297,6 +346,30 @@ public:
     void raisePanic(std::uint32_t cause) {
         panicCause_ = static_cast<std::int64_t>(cause);
         wake();
+    }
+
+    /// Empty the fault and panic records in the target's RAM the way the firmware's own boot
+    /// report does (magic = 0), for a record no boot line ever takes: the status line's FAULT /
+    /// PANIC then stays for good. The last halt's capture goes too (host side only). Refused
+    /// while the core is halted: on the panic's breakpoint the reset that follows makes that
+    /// bkpt fault on the way out, and without the panic record the fault handler records it -
+    /// a FAULT in place of the PANIC just cleared (seen on an RP2350, 2026-10-05). On the worker;
+    /// the outcome lands in Snapshot::recordsCleared, and what was thrown away is said through
+    /// Hooks::note first.
+    void clearRecords(bool haltedNow) {
+        if(haltedNow) {
+            clearDone(
+              "not cleared: halted - reset first ([r]), or the reset leaves a fault "
+              "record in the panic's place");
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> const lock{mutex_};
+            state_.halt.reset();
+        }
+        clearDue_ = true;
+        wake();
+        changed();
     }
 
     // ---- parts the host tests call directly ----------------------------------------------
@@ -347,14 +420,18 @@ public:
         return 0;
     }
 
-    /// The register transfers of raisePanic(), kvasir_bench.py's panic_register_writes.
+    /// The register transfers of raisePanic(), kvasir_bench.py's panic_register_writes. LR is
+    /// raise()'s return address, which the record keeps as the panic's place: set to "called
+    /// from where the core was halted" (`pc`), or the record names whatever LR happened to hold.
     static std::vector<std::vector<std::pair<std::uint32_t,
                                              std::uint32_t>>>
     panicRegisterWrites(std::uint32_t raiseAddress,
                         std::uint32_t cause,
-                        std::uint32_t xpsr) {
+                        std::uint32_t xpsr,
+                        std::uint32_t pc) {
         return {
           {             {Dcrdr, cause},   {Dcrsr, RegWnR | RegR0}},
+          {    {Dcrdr, (pc + 2U) | 1U},   {Dcrsr, RegWnR | RegLr}},
           { {Dcrdr, xpsr & ~EpsrItIci}, {Dcrsr, RegWnR | RegXpsr}},
           {{Dcrdr, raiseAddress & ~1U},   {Dcrsr, RegWnR | RegPc}}
         };
@@ -375,6 +452,7 @@ private:
     static constexpr std::uint32_t SHalt    = 1U << 17;
     static constexpr std::uint32_t RegWnR   = 1U << 16;
     static constexpr std::uint32_t RegR0    = 0;
+    static constexpr std::uint32_t RegLr    = 14;
     static constexpr std::uint32_t RegPc    = 15;
     static constexpr std::uint32_t RegXpsr  = 16;
     // EPSR.IT/ICI, xPSR[26:25] and [15:10] (B3.5, rule RQLRN)
@@ -387,13 +465,10 @@ private:
 
     using Clock = std::chrono::steady_clock;
 
-    static std::function<bool(std::string const&)> matcher(std::string const& pattern) {
-        try {
-            auto re = std::make_shared<std::regex>(pattern, std::regex::icase);
-            return [re](std::string const& s) { return std::regex_search(s, *re); };
-        } catch(std::regex_error const&) {
-            return [pattern](std::string const& s) { return s.contains(pattern); };
-        }
+    // remote_fmt's call-site tags (catalog.hpp): one per log line, named after the whole format
+    // string, in an INFO section at address 0 - symbols of the map that are not in the target
+    static bool isSiteTag(std::string_view name) {
+        return name.ends_with("::REMOTE_FMT_SITE_TAG") || name == "remote_fmt::detail::siteAnchor";
     }
 
     std::string describeLocked(std::uint32_t address) const { return symbols_.describe(address); }
@@ -493,9 +568,10 @@ private:
         }
         state_.lldMap      = symbols_.fromLld();
         state_.symbolCount = symbols_.size();
-        auto const* ub     = symbols_.find(records::UbsanSymbol);
-        auto const* fault  = symbols_.find(records::FaultSymbol);
-        auto const* panic  = symbols_.find(records::PanicSymbol);
+        ++state_.mapGeneration;
+        auto const* ub    = symbols_.find(records::UbsanSymbol);
+        auto const* fault = symbols_.find(records::FaultSymbol);
+        auto const* panic = symbols_.find(records::PanicSymbol);
         ubsan_  = ub ? std::optional{std::pair{ub->address, std::min(ub->size, 8U)}} : std::nullopt;
         fault_ = fault ? std::optional{fault->address} : std::nullopt;
         panic_  = panic ? std::optional{std::pair{panic->address, panic->size >= 20 ? 20U : 16U}}
@@ -850,7 +926,18 @@ private:
             done("reading xPSR: " + error);
             return;
         }
-        for(auto const& step : panicRegisterWrites(*raise, cause, *xpsr)) {
+        if(!writeWord(Dcrsr, RegPc, error) || !waitFor(SRegRdy)) {
+            resume();
+            done("the core did not hand out the PC (DHCSR.S_REGRDY) " + error);
+            return;
+        }
+        auto const pc = readWord(Dcrdr, error);
+        if(!pc) {
+            resume();
+            done("reading the PC: " + error);
+            return;
+        }
+        for(auto const& step : panicRegisterWrites(*raise, cause, *xpsr, *pc)) {
             for(auto const& [address, value] : step) {
                 if(!writeWord(address, value, error)) {
                     resume();
@@ -868,6 +955,95 @@ private:
         done("raise("
              + std::string{cause < records::PanicCauses.size() ? records::PanicCauses[cause] : "?"}
              + ") called; the next boot line names it");
+        recordsDue_ = true;
+    }
+
+    void clearDone(std::string text) {
+        {
+            std::lock_guard<std::mutex> const lock{mutex_};
+            state_.recordsCleared = std::move(text);
+        }
+        changed();
+    }
+
+    void doClearRecords() {
+        std::optional<std::uint32_t>                           fault;
+        std::optional<std::pair<std::uint32_t, std::uint32_t>> panic;
+        {
+            std::lock_guard<std::mutex> const lock{mutex_};
+            fault = fault_;
+            panic = panic_;
+        }
+        // Read first: only a word that holds a record's magic is written - with the map of
+        // another image the address is anything - and what goes is said before it is gone.
+        std::vector<InspectorAccess> reads;
+        if(fault) { reads.push_back({*fault, records::FaultSize, {}}); }
+        if(panic) { reads.push_back({panic->first, panic->second, {}}); }
+        if(reads.empty()) {
+            clearDone("no fault or panic record in this image");
+            return;
+        }
+        auto r = access(reads);
+        if(!r) {
+            clearDone("not cleared: " + r.error());
+            return;
+        }
+        std::vector<InspectorAccess> writes;
+        std::vector<std::string>     gone;
+        std::size_t                  i = 0;
+        if(fault) {
+            if(auto const f = records::decodeFault((*r)[i++])) {
+                writes.push_back({*fault, 4, 0U});
+                std::lock_guard<std::mutex> const lock{mutex_};
+                gone.push_back(std::format(
+                  "fault record cleared from the TUI: {} fault(s), the first in {}, pc={:#010x} "
+                  "{} lr={:#010x} {} xpsr={:#x} exc_return={:#x}",
+                  f->count,
+                  records::exceptionName(f->exception()),
+                  f->pc,
+                  describeLocked(f->pc),
+                  f->lr,
+                  describeLocked(f->lr),
+                  f->xpsr,
+                  f->excReturn));
+            }
+        }
+        if(panic) {
+            if(auto const p = records::decodePanic((*r)[i])) {
+                writes.push_back({panic->first, 4, 0U});
+                auto const                        site = p->site();
+                std::lock_guard<std::mutex> const lock{mutex_};
+                gone.push_back(
+                  std::format("panic record cleared from the TUI: {} panic(s), the first: {}, {} "
+                              "detail={}",
+                              p->count,
+                              p->causeName(),
+                              site ? std::format("site={:#010x} {}", *site, describeLocked(*site))
+                                   : std::string{"no program site"},
+                              p->detail.value_or(0)));
+            }
+        }
+        if(writes.empty()) {
+            clearDone("nothing to clear: no fault or panic record in RAM");
+            return;
+        }
+        auto w = access(writes);
+        if(!w) {
+            clearDone("not cleared: " + w.error());
+            return;
+        }
+        for(auto const& back : *w) {
+            if(records::word(back, 0) != 0) {
+                clearDone("not cleared: the record's magic read back unchanged");
+                recordsDue_ = true;
+                return;
+            }
+        }
+        if(hooks_.note) {
+            for(auto const& line : gone) { hooks_.note(line); }
+        }
+        clearDone(
+          std::format("{} record(s) cleared; what they held is in the Status tab", gone.size()));
         recordsDue_ = true;
     }
 
@@ -902,6 +1078,7 @@ private:
                 if(auto const cause = panicCause_.exchange(-1); cause >= 0) {
                     doRaisePanic(static_cast<std::uint32_t>(cause));
                 }
+                if(clearDue_.exchange(false)) { doClearRecords(); }
                 if(now - lastUbsan >= std::chrono::seconds{1} || all) {
                     lastUbsan = now;
                     readUbsan();
@@ -940,6 +1117,7 @@ private:
                 }
             } else {
                 panicCause_ = -1;
+                if(clearDue_.exchange(false)) { clearDone("not cleared: no target session"); }
             }
             if(changedLater_.exchange(false)) { changed(); }
             std::unique_lock<std::mutex> lock{wakeMutex_};
@@ -973,6 +1151,7 @@ private:
     std::atomic<bool>          stacksDue_{true};
     std::atomic<bool>          changedLater_{false};
     std::atomic<std::int64_t>  panicCause_{-1};
+    std::atomic<bool>          clearDue_{false};
     std::atomic<bool>          profileChecked_{false};
     std::atomic<std::uint64_t> version_{0};
 

@@ -615,6 +615,16 @@ namespace uc_log { namespace FTXUIGui {
 
         int Offset() const { return state->offset; }
 
+        // the content row under a screen cell, -1 outside the view (as of the last render)
+        int RowAt(int x,
+                  int y) const {
+            return state->box.Contain(x, y) ? y - state->box.y_min + state->offset : -1;
+        }
+
+        int ColumnAt(int x) const { return x - state->box.x_min; }
+
+        int VisibleRows() const { return state->box.y_max - state->box.y_min + 1; }
+
     private:
         struct State {
             int        offset{};      // first visible row, clamped when the box is known
@@ -716,6 +726,160 @@ namespace uc_log { namespace FTXUIGui {
 
     inline std::shared_ptr<ScrollViewBase> ScrollView(std::function<ftxui::Element()> render) {
         return std::make_shared<ScrollViewBase>(std::move(render));
+    }
+
+    // A list one item of which is picked, by key or by mouse: `count()` items of `rowsPerItem`
+    // rows each, drawn anew every frame by `row()`, in a ScrollView that follows the picked
+    // item. A ftxui::Menu cannot be it: its entries are one line of plain text, and a Menu
+    // that is not drawn itself (the watch list had one for its keys) never gets a click.
+    struct PickListOption {
+        struct RowState {
+            bool selected{};
+            bool hovered{};   // the pointer is on it
+            bool focused{};   // the list has the focus
+        };
+
+        std::function<int()>                                     count;
+        std::function<ftxui::Element(int index, RowState state)> row;
+        std::function<ftxui::Element()> empty{};   // drawn while there is no item
+        int                             rowsPerItem{1};
+        int*                            selected{};   // moved from outside too: the view follows
+        // false: the list never takes the focus, its keys come from elsewhere (an input above)
+        bool focusable{true};
+        // the pointer picks by moving over an item, not only by a click
+        bool hoverSelects{false};
+        // a left click on an item, after *selected moved there: on which of the item's rows,
+        // and the column counted from the view's left edge
+        std::function<void(int index, int line, int column)> onClick{};
+        std::function<void(int index)>                       onEnter{};   // Return, focused
+        std::function<void(int index)> onDelete{};   // Delete / Backspace, focused
+    };
+
+    class PickListBase : public ftxui::ComponentBase {
+    public:
+        explicit PickListBase(PickListOption option)
+          : option_{std::move(option)}
+          , view_{std::make_shared<ScrollViewBase>([this]() { return content(); })} {}
+
+        int Hovered() const { return hovered_; }
+
+        // bring the picked item into view at the next render - for a list whose items changed
+        // under a selection that did not
+        void ShowSelected() { shown_ = -1; }
+
+    private:
+        int count() const { return std::max(0, option_.count()); }
+
+        ftxui::Element content() {
+            int const                   n = count();
+            std::vector<ftxui::Element> rows;
+            rows.reserve(static_cast<std::size_t>(n));
+            PickListOption::RowState state{};
+            state.focused = Focused();
+            for(int i = 0; i != n; ++i) {
+                state.selected = i == *option_.selected;
+                state.hovered  = i == hovered_;
+                rows.push_back(option_.row(i, state)
+                               | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, option_.rowsPerItem));
+            }
+            return ftxui::vbox(std::move(rows));
+        }
+
+        ftxui::Element OnRender() final {
+            int const n = count();
+            int&      s = *option_.selected;
+            s           = std::max(0, std::min(n - 1, s));
+            if(hovered_ >= n) { hovered_ = -1; }
+            if(n == 0) {
+                shown_ = -1;
+                return option_.empty ? option_.empty() : ftxui::emptyElement();
+            }
+            if(s != shown_) {
+                shown_ = s;
+                view_->Show(option_.rowsPerItem * s, option_.rowsPerItem * (s + 1) - 1);
+            }
+            return view_->Render();
+        }
+
+        int itemAt(ftxui::Mouse const& mouse) const {
+            int const n = count();
+            if(n == 0 || shown_ < 0) { return -1; }   // not drawn: the view's box is stale
+            int const row = view_->RowAt(mouse.x, mouse.y);
+            if(row < 0) { return -1; }
+            int const item = row / option_.rowsPerItem;
+            return item < n ? item : -1;
+        }
+
+        bool OnEvent(ftxui::Event event) final {
+            int& s = *option_.selected;
+            if(event.is_mouse()) {
+                auto const& mouse = event.mouse();
+                hovered_          = itemAt(mouse);
+                if(mouse.button == ftxui::Mouse::WheelUp || mouse.button == ftxui::Mouse::WheelDown)
+                {
+                    if(count() == 0 || shown_ < 0) { return false; }
+                    bool const taken = ftxui::Component{view_}->OnEvent(event);
+                    hovered_         = itemAt(mouse);
+                    return taken;
+                }
+                if(hovered_ < 0) { return false; }
+                if(mouse.button == ftxui::Mouse::Left && mouse.motion == ftxui::Mouse::Pressed) {
+                    s = hovered_;
+                    if(option_.focusable) { TakeFocus(); }
+                    if(option_.onClick) {
+                        option_.onClick(hovered_,
+                                        view_->RowAt(mouse.x, mouse.y) % option_.rowsPerItem,
+                                        view_->ColumnAt(mouse.x));
+                    }
+                    return true;
+                }
+                if(option_.hoverSelects && mouse.button == ftxui::Mouse::None) {
+                    // the view stays: an item under the pointer is in it already
+                    s      = hovered_;
+                    shown_ = s;
+                }
+                return false;
+            }
+            int const n = count();
+            if(n == 0) { return false; }
+            int const before = s;
+            int const page   = std::max(1, view_->VisibleRows() / option_.rowsPerItem - 1);
+            if(event == ftxui::Event::ArrowUp || event == ftxui::Event::Character('k')) {
+                --s;
+            } else if(event == ftxui::Event::ArrowDown || event == ftxui::Event::Character('j')) {
+                ++s;
+            } else if(event == ftxui::Event::PageUp) {
+                s -= page;
+            } else if(event == ftxui::Event::PageDown) {
+                s += page;
+            } else if(event == ftxui::Event::Home) {
+                s = 0;
+            } else if(event == ftxui::Event::End) {
+                s = n - 1;
+            } else if(event == ftxui::Event::Return && option_.onEnter) {
+                option_.onEnter(s);
+                return true;
+            } else if((event == ftxui::Event::Delete || event == ftxui::Event::Backspace)
+                      && option_.onDelete)
+            {
+                option_.onDelete(s);
+                return true;
+            }
+            s = std::max(0, std::min(n - 1, s));
+            // false at either end: ArrowUp on the first item moves the focus out, as in a menu
+            return s != before;
+        }
+
+        bool Focusable() const final { return option_.focusable && count() > 0; }
+
+        PickListOption                  option_;
+        std::shared_ptr<ScrollViewBase> view_;
+        int                             hovered_{-1};
+        int                             shown_{-1};   // the selection the view was moved to
+    };
+
+    inline std::shared_ptr<PickListBase> PickList(PickListOption option) {
+        return std::make_shared<PickListBase>(std::move(option));
     }
 
     inline ftxui::Element toElement(uc_log::detail::LogEntry::Channel const& channel) {
