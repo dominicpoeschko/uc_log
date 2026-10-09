@@ -70,8 +70,25 @@ template<typename Backend>
 concept LevelAware = takesAnyLevel<Backend>(
   std::make_index_sequence<static_cast<std::size_t>(LogLevel::crit) + 1>{});
 
+// A backend may declare `static constexpr LogLevel kLevelFloor`: every level from there up is
+// handled alike (a backend that only compares the level against a minimum). Those levels then
+// share one LevelBoundBackend -- and with it one Printer, record frame and formatter set,
+// instead of a copy per level. The record's level is not the backend's: it travels in the
+// format string, so nothing on the wire changes.
+template<typename Backend,
+         LogLevel Level>
+consteval LogLevel canonicalLevel() {
+    if constexpr(requires { Backend::kLevelFloor; }) {
+        return Level >= Backend::kLevelFloor ? Backend::kLevelFloor : Level;
+    } else {
+        return Level;
+    }
+}
+
 template<typename Tag, LogLevel Level>
 using ResolveBackend
-  = LevelBoundBackend<ComBackend<Tag>, LevelAware<ComBackend<Tag>> ? Level : LogLevel::info>;
+  = LevelBoundBackend<ComBackend<Tag>,
+                      LevelAware<ComBackend<Tag>> ? canonicalLevel<ComBackend<Tag>, Level>()
+                                                  : LogLevel::info>;
 
 }   // namespace uc_log::detail
