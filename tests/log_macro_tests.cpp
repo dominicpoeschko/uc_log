@@ -391,7 +391,7 @@ std::string targetModule(std::string_view signature) {
       uc_log::detail::moduleOf(uc_log::detail::scanSignature(signature), signature).view()};
 }
 
-namespace water_mix::control {
+namespace mixer::control {
     template<typename T>
     struct Regulator {
         static std::optional<uc_log::detail::LogEntry> step(T value) {
@@ -401,7 +401,7 @@ namespace water_mix::control {
 
         static std::string module() { return targetModule(__PRETTY_FUNCTION__); }
     };
-}   // namespace water_mix::control
+}   // namespace mixer::control
 
 namespace usb_driver {
     UC_LOG_SCOPE_MODULE("usb");
@@ -479,12 +479,12 @@ int main() {
         CHECK(plain && plain->entry.module.empty(),
               "no module in an anonymous namespace at the top (nothing to derive)");
 
-        auto const derived = water_mix::control::Regulator<int>::step(5);
+        auto const derived = mixer::control::Regulator<int>::step(5);
         CHECK(derived && derived->parsedOk, "a derived module's line parses");
         if(derived) {
-            CHECK_EQ(derived->module, std::string{"water_mix.control.regulator"}, "derived module");
+            CHECK_EQ(derived->module, std::string{"mixer.control.regulator"}, "derived module");
             CHECK_EQ(derived->module,
-                     water_mix::control::Regulator<int>::module(),
+                     mixer::control::Regulator<int>::module(),
                      "the printer's module is the filter's");
             // the demangled tag: the class template's arguments with either compiler
             CHECK_EQ(derived->functionName,

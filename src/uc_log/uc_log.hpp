@@ -131,7 +131,7 @@ namespace uc_log { namespace detail {
         [[no_unique_address]] typename ComBackend::RecordGuard const guard{};
         remote_fmt::Printer<ComBackend>                              printer;
 
-        // No stack protector (dominic, 2026-10-05): the function has no buffer of its own, and
+        // No stack protector: the function has no buffer of its own, and
         // -fstack-protector-strong would guard it only because the clock hands its time back
         // through a local - a second canary check in every log line.
         [[gnu::noinline,

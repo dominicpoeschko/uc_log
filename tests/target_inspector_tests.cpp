@@ -27,7 +27,7 @@ static int failures = 0;
 
 using namespace uc_log::detail;
 
-// the shape of a real lld map (test_examples 01_blink_debug.map, water_mix release.map)
+// the shape of a real lld map
 static constexpr char const* LldMap
   = "     VMA      LMA     Size Align Out     In      Symbol\n"
     "10000000 10000000     1a18     4 .text\n"

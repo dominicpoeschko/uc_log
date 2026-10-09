@@ -353,7 +353,7 @@ public:
     /// PANIC then stays for good. The last halt's capture goes too (host side only). Refused
     /// while the core is halted: on the panic's breakpoint the reset that follows makes that
     /// bkpt fault on the way out, and without the panic record the fault handler records it -
-    /// a FAULT in place of the PANIC just cleared (seen on an RP2350, 2026-10-05). On the worker;
+    /// a FAULT in place of the PANIC just cleared (seen on an RP2350). On the worker;
     /// the outcome lands in Snapshot::recordsCleared, and what was thrown away is said through
     /// Hooks::note first.
     void clearRecords(bool haltedNow) {

@@ -76,7 +76,7 @@ namespace uc_log { namespace detail {
             }
             errorMessagef(fmt::format(
               "the target's RTT log buffers are not in channel order ({}): logged by their names. "
-              "Its rtt.hpp is from before 2026-09-24 and was built with libstdc++ - rebuild it",
+              "Its rtt.hpp is an old one that was built with libstdc++ - rebuild it",
               order));
         }
     }
