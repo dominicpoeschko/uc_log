@@ -1,5 +1,5 @@
 {
-  "protocol": 1,
+  "protocol": 2,
   "request": {
     "type": "object",
     "$defs": {
@@ -309,9 +309,76 @@
           "cmd"
         ],
         "title": "write"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "halt"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "halt"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "go"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "go"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "registers"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "registers"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "write_registers"
+          },
+          "writes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "$ref": "#/$defs/uint32_t"
+                },
+                "value": {
+                  "$ref": "#/$defs/uint32_t"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "write_registers"
       }
     ],
-    "title": "std::variant<uc_log::control::Ping, uc_log::control::Status, uc_log::control::Messages, uc_log::control::Read, uc_log::control::Wait, uc_log::control::Reset, uc_log::control::Flash, uc_log::control::Subscribe, uc_log::control::Write>"
+    "title": "std::variant<uc_log::control::Ping, uc_log::control::Status, uc_log::control::Messages, uc_log::control::Read, uc_log::control::Wait, uc_log::control::Reset, uc_log::control::Flash, uc_log::control::Subscribe, uc_log::control::Write, uc_log::control::Halt, uc_log::control::Go, uc_log::control::Registers, uc_log::control::WriteRegisters>"
   },
   "answer": {
     "type": "object",
@@ -411,8 +478,14 @@
           "log_seq": {
             "$ref": "#/$defs/uint64_t"
           },
+          "probe_serial": {
+            "$ref": "#/$defs/uint32_t"
+          },
           "ram_image": {
             "type": "boolean"
+          },
+          "rtt_bytes": {
+            "$ref": "#/$defs/uint64_t"
           },
           "running": {
             "type": "boolean"
@@ -422,6 +495,9 @@
           },
           "started_us": {
             "$ref": "#/$defs/int64_t"
+          },
+          "target_lost": {
+            "$ref": "#/$defs/uint64_t"
           }
         },
         "additionalProperties": false,
@@ -573,6 +649,70 @@
         "type": "object",
         "properties": {
           "cmd": {
+            "const": "halt"
+          },
+          "halted": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "halt"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "go"
+          },
+          "halted": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "go"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "registers"
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/uint32_t"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "registers"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "write_registers"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "write_registers"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
             "const": "error"
           },
           "error": {
@@ -586,7 +726,7 @@
         "title": "error"
       }
     ],
-    "title": "std::variant<uc_log::control::PingAnswer, uc_log::control::StatusAnswer, uc_log::control::MessagesAnswer, uc_log::control::ReadAnswer, uc_log::control::WaitAnswer, uc_log::control::ResetAnswer, uc_log::control::FlashAnswer, uc_log::control::SubscribeAnswer, uc_log::control::WriteAnswer, uc_log::control::Error>"
+    "title": "std::variant<uc_log::control::PingAnswer, uc_log::control::StatusAnswer, uc_log::control::MessagesAnswer, uc_log::control::ReadAnswer, uc_log::control::WaitAnswer, uc_log::control::ResetAnswer, uc_log::control::FlashAnswer, uc_log::control::SubscribeAnswer, uc_log::control::WriteAnswer, uc_log::control::HaltAnswer, uc_log::control::GoAnswer, uc_log::control::RegistersAnswer, uc_log::control::WriteRegistersAnswer, uc_log::control::Error>"
   },
   "event": {
     "type": "object",
@@ -750,8 +890,24 @@
           "cmd"
         ],
         "title": "backlog_end"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "dropped"
+          },
+          "lines": {
+            "$ref": "#/$defs/uint64_t"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "dropped"
       }
     ],
-    "title": "std::variant<uc_log::control::LogLine, uc_log::control::StatusMessage, uc_log::control::MetricSample, uc_log::control::BacklogEnd>"
+    "title": "std::variant<uc_log::control::LogLine, uc_log::control::StatusMessage, uc_log::control::MetricSample, uc_log::control::BacklogEnd, uc_log::control::Dropped>"
   }
 }

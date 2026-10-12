@@ -50,6 +50,34 @@ struct LevelBoundBackend : RecordGuardOf<Backend> {
             Backend::finalizeTransfer();
         }
     }
+
+    // An RTT backend counts the boots that logged (detail/RttEpoch.hpp); RecordFrame calls this before each record.
+    static void noteRecord()
+        requires requires { Backend::noteRecord(); }
+    {
+        Backend::noteRecord();
+    }
+
+    // LossPolicy::Counted (LossPolicy.hpp): RecordFrame asks before a record whether its ring
+    // dropped records nobody announced yet. Only a counting backend has them; for any other this
+    // makes no code (RecordFrame checks with requires).
+    static auto lossMark()
+        requires(
+          requires { Backend::template lossMark<Level>(); } || requires { Backend::lossMark(); })
+    {
+        if constexpr(requires { Backend::template lossMark<Level>(); }) {
+            return Backend::template lossMark<Level>();
+        } else {
+            return Backend::lossMark();
+        }
+    }
+
+    template<typename Mark>
+    static void lossSettle(Mark const mark)
+        requires requires { Backend::lossSettle(mark); }
+    {
+        Backend::lossSettle(mark);
+    }
 };
 
 template<typename Backend, LogLevel Level>

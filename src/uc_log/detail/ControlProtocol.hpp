@@ -15,7 +15,7 @@
 namespace uc_log::control {
 
 /// Raised whenever a line changes meaning; clients refuse any other version.
-inline constexpr int ProtocolVersion = 1;
+inline constexpr int ProtocolVersion = 2;
 
 inline constexpr std::string_view SocketName = "control.sock";
 
@@ -75,6 +75,26 @@ struct Reset {};
 /// Downloads the printer's hex file; answered once the log runs again.
 struct Flash {};
 
+/// Halts / resumes the core through the probe's own calls (the J-Link DLL's halt and go): a halt or resume written
+/// into DHCSR behind the probe's back hangs the J-Link DLL, so `write` refuses DHCSR. Answered with the state after.
+struct Halt {};
+
+struct Go {};
+
+/// The core's registers through the probe's own calls, only while it is halted (`halt` first): r0..r12, sp, lr, pc,
+/// xpsr, msp, psp in that order.
+struct Registers {};
+
+/// Core registers written through the probe's own calls, only while halted; `index` as in Registers (0..18).
+struct RegisterWrite {
+    std::uint32_t index{};
+    std::uint32_t value{};
+};
+
+struct WriteRegisters {
+    std::vector<RegisterWrite> writes;
+};
+
 /// Filters apply to the log stream only. `since_seq` / `last` send the history first, then a
 /// BacklogEnd; `follow` false closes the connection after it.
 struct Subscribe {
@@ -87,7 +107,19 @@ struct Subscribe {
     bool                         follow{true};
 };
 
-using Request = std::variant<Ping, Status, Messages, Read, Wait, Reset, Flash, Subscribe, Write>;
+using Request = std::variant<Ping,
+                             Status,
+                             Messages,
+                             Read,
+                             Wait,
+                             Reset,
+                             Flash,
+                             Subscribe,
+                             Write,
+                             Halt,
+                             Go,
+                             Registers,
+                             WriteRegisters>;
 
 struct PingAnswer {
     int protocol{ProtocolVersion};
@@ -110,6 +142,13 @@ struct StatusAnswer {
     std::int64_t  started_us{};   // seqs are only valid for this start
     // started with --ram_image: flash and reset load the image into RAM and start it there
     bool ram_image{};
+    // log records the target said it dropped (its "N log records lost" lines, LossPolicy::Counted)
+    // since the printer started
+    std::uint64_t target_lost{};
+    // bytes of log the printer read from the target's rings since it started (a throughput measurement's counter)
+    std::uint64_t rtt_bytes{};
+    // the serial number of the J-Link it holds (0 before the first session)
+    std::uint32_t probe_serial{};
 };
 
 /// A line of the Status tab.
@@ -146,6 +185,20 @@ struct ResetAnswer {};
 
 struct FlashAnswer {};
 
+struct HaltAnswer {
+    bool halted{};
+};
+
+struct GoAnswer {
+    bool halted{};
+};
+
+struct RegistersAnswer {
+    std::vector<std::uint32_t> values;   // Registers' order
+};
+
+struct WriteRegistersAnswer {};
+
 struct SubscribeAnswer {
     int protocol{ProtocolVersion};
 };
@@ -163,6 +216,10 @@ using Answer = std::variant<PingAnswer,
                             FlashAnswer,
                             SubscribeAnswer,
                             WriteAnswer,
+                            HaltAnswer,
+                            GoAnswer,
+                            RegistersAnswer,
+                            WriteRegistersAnswer,
                             Error>;
 
 /// The columns of a .rttlog row, and `seq`: numbered from 0 at the printer's start.
@@ -194,7 +251,13 @@ struct BacklogEnd {
     std::uint64_t lost{};
 };
 
-using Event = std::variant<LogLine, StatusMessage, MetricSample, BacklogEnd>;
+/// Events this client did not get: its send queue was full (it read too slowly), so `lines` events were dropped for it
+/// alone. Sent once the queue has room again, in the stream where the gap is.
+struct Dropped {
+    std::uint64_t lines{};
+};
+
+using Event = std::variant<LogLine, StatusMessage, MetricSample, BacklogEnd, Dropped>;
 
 }   // namespace uc_log::control
 
@@ -234,7 +297,11 @@ struct glz::meta<uc_log::control::Request> {
                                                        "reset",
                                                        "flash",
                                                        "subscribe",
-                                                       "write"};
+                                                       "write",
+                                                       "halt",
+                                                       "go",
+                                                       "registers",
+                                                       "write_registers"};
 };
 
 template<>
@@ -249,13 +316,17 @@ struct glz::meta<uc_log::control::Answer> {
                                                        "flash",
                                                        "subscribe",
                                                        "write",
+                                                       "halt",
+                                                       "go",
+                                                       "registers",
+                                                       "write_registers",
                                                        "error"};
 };
 
 template<>
 struct glz::meta<uc_log::control::Event> {
     static constexpr std::string_view tag = "cmd";
-    static constexpr auto             ids = std::array{"log", "message", "metric", "backlog_end"};
+    static constexpr auto ids = std::array{"log", "message", "metric", "backlog_end", "dropped"};
 };
 
 namespace uc_log::control {
@@ -382,7 +453,10 @@ inline std::optional<std::string> subscribeError(Subscribe const& s) {
 
 template<typename T>
 constexpr Stream streamOf() {
-    if constexpr(std::is_same_v<T, LogLine> || std::is_same_v<T, BacklogEnd>) {
+    // Dropped: per client, never published; it counts with the log stream for whoever visits every event
+    if constexpr(std::is_same_v<T, LogLine> || std::is_same_v<T, BacklogEnd>
+                 || std::is_same_v<T, Dropped>)
+    {
         return Stream::log;
     } else if constexpr(std::is_same_v<T, StatusMessage>) {
         return Stream::messages;

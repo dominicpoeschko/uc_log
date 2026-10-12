@@ -1,5 +1,5 @@
-{"name":"ping","stable":true,"request":"{\"cmd\":\"ping\"}","answer":{"cmd":"ping","protocol":1}}
-{"name":"status","stable":true,"request":"{\"cmd\":\"status\"}","answer":{"cmd":"status","running":true,"halted":false,"flashing":false,"sessions":1,"firmware":{"state":"match","build":305441741},"errors":1,"log_seq":0,"started_us":0,"ram_image":false}}
+{"name":"ping","stable":true,"request":"{\"cmd\":\"ping\"}","answer":{"cmd":"ping","protocol":2}}
+{"name":"status","stable":true,"request":"{\"cmd\":\"status\"}","answer":{"cmd":"status","running":true,"halted":false,"flashing":false,"sessions":1,"firmware":{"state":"match","build":305441741},"errors":1,"log_seq":0,"started_us":0,"ram_image":false,"target_lost":0,"rtt_bytes":0,"probe_serial":0}}
 {"name":"messages","stable":true,"request":"{\"cmd\":\"messages\"}","answer":{"cmd":"messages","messages":[{"time":"2025-09-21T10:00:00.000Z","level":"status","text":"firmware matches build"},{"time":"2025-09-21T10:00:01.000Z","level":"error","text":"RTT buffer 0 overflow"},{"time":"2025-09-21T10:00:02.000Z","level":"tool","text":"control socket up"}]}}
 {"name":"messages_2","stable":true,"request":"{\"cmd\":\"messages\",\"count\":2}","answer":{"cmd":"messages","messages":[{"time":"2025-09-21T10:00:01.000Z","level":"error","text":"RTT buffer 0 overflow"},{"time":"2025-09-21T10:00:02.000Z","level":"tool","text":"control socket up"}]}}
 {"name":"read_one","stable":true,"request":"{\"cmd\":\"read\",\"pieces\":[{\"address\":536870928,\"size\":4}]}","answer":{"cmd":"read","unix_us":1758448800000000,"data":["10111213"]}}
@@ -16,11 +16,16 @@
 {"name":"wait_no_value","stable":true,"request":"{\"cmd\":\"wait\",\"piece\":{\"address\":536870912,\"size\":4},\"condition\":\"eq\",\"timeout_ms\":10}","answer":{"cmd":"error","error":"wait: this condition needs a value"}}
 {"name":"wait_too_long","stable":true,"request":"{\"cmd\":\"wait\",\"piece\":{\"address\":536870912,\"size\":4},\"condition\":\"changed\",\"timeout_ms\":600001}","answer":{"cmd":"error","error":"wait: timeout_ms is at most 600000"}}
 {"name":"reset","stable":true,"request":"{\"cmd\":\"reset\"}","answer":{"cmd":"reset"}}
+{"name":"halt","stable":true,"request":"{\"cmd\":\"halt\"}","answer":{"cmd":"halt","halted":true}}
+{"name":"registers","stable":true,"request":"{\"cmd\":\"registers\"}","answer":{"cmd":"registers","values":[4096,4097,4098,4099,4100,4101,4102,4103,4104,4105,4106,4107,4108,4109,4110,4111,4112,4113,4114]}}
+{"name":"write_registers","stable":true,"request":"{\"cmd\":\"write_registers\",\"writes\":[{\"index\":0,\"value\":7},{\"index\":15,\"value\":268443648}]}","answer":{"cmd":"write_registers"}}
+{"name":"write_registers_bad","stable":true,"request":"{\"cmd\":\"write_registers\",\"writes\":[{\"index\":19,\"value\":0}]}","answer":{"cmd":"error","error":"write_registers: no register 19 (0..18)"}}
+{"name":"go","stable":true,"request":"{\"cmd\":\"go\"}","answer":{"cmd":"go","halted":false}}
 {"name":"flash","stable":true,"request":"{\"cmd\":\"flash\"}","answer":{"cmd":"error","error":"no hex file"}}
 {"name":"write_two","stable":true,"request":"{\"cmd\":\"write\",\"words\":[{\"address\":1342177292,\"value\":0},{\"address\":1342177296,\"value\":305419896}]}","answer":{"cmd":"write","unix_us":1758448800000000,"data":["00000000","78563412"]}}
 {"name":"write_nothing","stable":true,"request":"{\"cmd\":\"write\",\"words\":[]}","answer":{"cmd":"error","error":"write: nothing to write"}}
 {"name":"write_unaligned","stable":true,"request":"{\"cmd\":\"write\",\"words\":[{\"address\":1342177294,\"value\":0}]}","answer":{"cmd":"error","error":"write: 0x5000000e is not word aligned"}}
 {"name":"write_disconnected","stable":true,"request":"{\"cmd\":\"write\",\"words\":[{\"address\":3758096384,\"value\":1}]}","answer":{"cmd":"error","error":"the target is not connected"}}
 {"name":"not_json","stable":true,"request":"read 20000010:4","answer":{"cmd":"error","error":"bad line: 1:1: no_matching_variant_type\n   read 20000010:4\n   ^"}}
-{"name":"unknown_cmd","stable":true,"request":"{\"cmd\":\"poke\",\"pieces\":[]}","answer":{"cmd":"error","error":"bad line: 1:14: no_matching_variant_type\n   {\"cmd\":\"poke\",\"pieces\":[]}\n                ^ supported types: ping, status, messages, read, wait, reset, flash, subscribe, write"}}
+{"name":"unknown_cmd","stable":true,"request":"{\"cmd\":\"poke\",\"pieces\":[]}","answer":{"cmd":"error","error":"bad line: 1:14: no_matching_variant_type\n   {\"cmd\":\"poke\",\"pieces\":[]}\n                ^ supported types: ping, status, messages, read, wait, reset, flash, subscribe, write, halt, go, registers, write_registers"}}
 {"name":"unknown_key","stable":true,"request":"{\"cmd\":\"ping\",\"verbose\":true}","answer":{"cmd":"error","error":"bad line: 1:24: unknown_key\n   {\"cmd\":\"ping\",\"verbose\":true}\n                          ^"}}

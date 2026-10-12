@@ -10,6 +10,7 @@
 #include "uc_log/detail/LogEntry.hpp"
 #include "uc_log/detail/LogFormat.hpp"
 #include "uc_log/detail/TargetInspector.hpp"
+#include "uc_log/detail/TargetOp.hpp"
 #include "uc_log/detail/TcpPortStatus.hpp"
 #include "uc_log/metric_utils.hpp"
 #include "uc_log/theme.hpp"
@@ -314,6 +315,10 @@ namespace uc_log { namespace FTXUIGui {
         bool        lastFlashing{false};
 
         std::size_t statusErrorCount{0};
+
+        // log records the target dropped (LossPolicy::Counted, detail/TargetLoss.hpp); nullopt while
+        // the firmware does not count them
+        std::optional<std::uint64_t> targetLostCount;
 
         FirmwareState firmwareState{FirmwareState::unchecked};
         std::size_t   firmwareMismatchCount{0};
@@ -1100,6 +1105,7 @@ namespace uc_log { namespace FTXUIGui {
                   formatErrorCount      = 0;
                   statusErrorCount      = 0;
                   firmwareMismatchCount = 0;
+                  if(targetLostCount) { targetLostCount = 0; }
               },
               createButtonStyle(Theme::Button::Background::destructive(), Theme::Button::text()));
 
@@ -3464,6 +3470,16 @@ namespace uc_log { namespace FTXUIGui {
                                                           : Theme::Status::error())
                      | (statusErrorCount == 0 ? ftxui::nothing : ftxui::bold),
                    ftxui::separator(),
+                   // records the target dropped: "-" when the firmware does not count them
+                   ftxui::text(!targetLostCount
+                                 ? std::string{"📉 -"}
+                                 : fmt::format("📉 {}",
+                                               FTXUIGui::formatNumber(
+                                                 static_cast<std::uint32_t>(*targetLostCount))))
+                     | ftxui::color(targetLostCount.value_or(0) == 0 ? Theme::Text::normal()
+                                                                     : Theme::Status::error())
+                     | (targetLostCount.value_or(0) == 0 ? ftxui::nothing : ftxui::bold),
+                   ftxui::separator(),
                    ftxui::text([this]() -> std::string {
                        auto const n = firmwareMismatchCount == 0
                                       ? std::string{}
@@ -4036,6 +4052,23 @@ namespace uc_log { namespace FTXUIGui {
             requestRedrawFromAnywhere();
         }
 
+        // the firmware counts dropped log records (its map has ::lossLedger), or does not
+        void targetLossCounted(bool counted) {
+            std::lock_guard<std::mutex> const lock{mutex};
+            if(!counted) {
+                targetLostCount.reset();
+            } else if(!targetLostCount) {
+                targetLostCount = 0;
+            }
+            requestRedrawFromAnywhere();
+        }
+
+        void targetRecordsLost(std::uint64_t n) {
+            std::lock_guard<std::mutex> const lock{mutex};
+            targetLostCount = targetLostCount.value_or(0) + n;
+            requestRedrawFromAnywhere();
+        }
+
         void firmwareChecked(FirmwareState state) {
             std::lock_guard<std::mutex> const lock{mutex};
             firmwareState = state;
@@ -4168,17 +4201,21 @@ namespace uc_log { namespace FTXUIGui {
             {
                 using uc_log::detail::InspectorAccess;
                 using uc_log::detail::TargetInspector;
-                using Access = typename Reader::MemoryAccess;
                 auto created = std::make_unique<TargetInspector>(TargetInspector::Hooks{
                   .memory =
                     [&rttReader](std::span<InspectorAccess const> accesses,
                                  std::chrono::milliseconds        timeout) {
-                        std::vector<Access> converted;
-                        converted.reserve(accesses.size());
+                        namespace to = uc_log::detail::target_op;
+                        std::vector<uc_log::detail::TargetOp> ops;
+                        ops.reserve(accesses.size());
                         for(auto const& a : accesses) {
-                            converted.push_back(Access{a.address, a.size, a.write});
+                            if(a.write) {
+                                ops.emplace_back(to::WriteWord{a.address, *a.write});
+                            } else {
+                                ops.emplace_back(to::Read{a.address, a.size});
+                            }
                         }
-                        return rttReader.accessMemory(converted, timeout);
+                        return rttReader.accessTarget(ops, timeout);
                     },
                   .connected =
                     [&rttReader] {

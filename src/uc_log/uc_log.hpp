@@ -137,11 +137,26 @@ namespace uc_log { namespace detail {
         [[gnu::noinline,
           gnu::no_stack_protector]] explicit RecordFrame(remote_fmt::catalog_id site)
           : time{ticks(LogClock<ClockTag>::now())} {
+            if constexpr(requires { ComBackend::noteRecord(); }) { ComBackend::noteRecord(); }
+            // LossPolicy::Counted: records this ring dropped come first, as one line
+            if constexpr(requires { ComBackend::lossMark(); }) {
+                if(auto const mark = ComBackend::lossMark(); mark.pending != 0) [[unlikely]] {
+                    reportLost(mark);
+                }
+            }
             printer.beginCataloged(remote_fmt::SiteId{site});
             printer.formatArguments(time);
         }
 
         [[gnu::noinline]] ~RecordFrame() { printer.endCataloged(); }
+
+        // "⚠ N log records lost on this channel", a warn line of module uc_log with this frame's
+        // printer and time (the first moment the target knew the loss had ended: the lines were
+        // lost before it). Its own drop is not counted (lossSettle). Defined below the macros.
+        template<typename Mark>
+        [[gnu::noinline,
+          gnu::cold]] void
+        reportLost(Mark mark);
 
         RecordFrame(RecordFrame const&)            = delete;
         RecordFrame& operator=(RecordFrame const&) = delete;
@@ -323,6 +338,44 @@ namespace detail {
                                                           fmt __VA_OPT__(, ) __VA_ARGS__)         \
                                 : 0);                                                             \
         } while(false)
+#endif
+
+#ifdef USE_UC_LOG
+template<typename ComBackend,
+         typename ClockTag>
+template<typename Mark>
+void uc_log::detail::RecordFrame<ComBackend,
+                                 ClockTag>::reportLost(Mark const mark) {
+    if constexpr(globalFloor() <= static_cast<std::uint8_t>(LogLevel::warn)) {
+        using namespace ::remote_fmt::detail;
+        using namespace ::sc::literals;
+        // UC_LOG_DETAIL_FMT reads uc_log_env_t: this scope's, as UC_LOG_ENV declares it
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wshadow"
+        using uc_log_env_t
+          = ExtendEnv_t<Env<>, setting::Backend<ClockTag>, setting::Module<decltype("uc_log"_sc)>>;
+    #pragma GCC diagnostic pop
+        constexpr auto fmt = UC_LOG_DETAIL_FMT(
+          LogLevel::warn,
+          __LINE__,
+          __FILE_NAME__,
+          "⚠ {} log records lost on this channel (ring full, or no debugger)"_sc);
+        remote_fmt::Printer<ComBackend>::template checkCataloged<Ticks const&,
+                                                                 std::uint32_t const&>(fmt);
+        printer.beginCataloged(remote_fmt::SiteId{REMOTE_FMT_SITE()(fmt)});
+        printer.formatArguments(time, mark.pending);
+        printer.endCataloged();
+    }
+    ComBackend::lossSettle(mark);
+}
+#else
+template<typename ComBackend,
+         typename ClockTag>
+template<typename Mark>
+void uc_log::detail::RecordFrame<ComBackend,
+                                 ClockTag>::reportLost(Mark const mark) {
+    ComBackend::lossSettle(mark);
+}
 #endif
 
 #define UC_LOG(level, fmt, ...)                                                 \

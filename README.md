@@ -196,6 +196,66 @@ their last template argument. It decides how the records of interrupts at differ
 With the Kvasir SDK, Startup checks the policy against the priorities the init steps set and fails the build when they
 do not fit, so an application whose logging interrupts use more than one level has to choose a policy.
 
+## RTT throughput, ring sizes, and the two ways the printer reads RTT
+
+A ring holds what the target logs while the printer is busy elsewhere: **its size divided by the log rate is the time
+it bridges.** At 100 KB/s a KiB is ~10 ms; at 600 KB/s (about what one SWD probe carries) a KiB is ~1.7 ms. The
+printer reads a whole ring in one pass when only one ring has bytes, and at most half of each when several have, so a
+ring should bridge a few of its own passes: as a rule, at least 50 ms of the image's peak log rate (16 KiB for a
+thread that logs 300 KB/s in bursts, 4 KiB for an interrupt that logs 80 KB/s). What does not fit is dropped whole and
+announced ("⚠ N log records lost on this channel"), never torn.
+
+The sizes are template arguments of the backend: `DefaultRttComBackend<..., MainBufferSize, IsrBufferSize, ...>`
+(the thread ring, then each ISR ring), `MultiChannelRttComBackend` / `MulticoreRttComBackend` take
+`ChannelSizes<thread, isr..., thread, isr...>` (per logical channel or core, the thread ring then its ISR rings). They
+cost RAM one to one.
+
+Measured with a J-Link at 15 MHz SWD on an RP2350, one producer logging as fast as asked (records of ~42 bytes),
+nothing else on the probe's USB bus; "lossless up to" is the highest rate of the sweep (5k, 10k, 12.5k, 15k, 20k ...
+records/s, each rate repeated) without a dropped record; near the edge single runs lose a few records now and then
+(host scheduling), so the default reader's ISR figure is the rate where most runs lose nothing:
+
+| | 16 KiB thread ring: lossless up to / saturated | 4 KiB ISR ring: lossless up to / saturated |
+|---|---|---|
+| the printer's own RTT reader (default) | ~430 KB/s / ~590 KB/s | ~275 KB/s (at ~340 KB/s 0.1-1.9 % lost) / ~400-450 KB/s |
+| the J-Link DLL's RTT (`UC_LOG_RTT_VIA_DLL=1`) | ~540 KB/s / ~665 KB/s | ~580 KB/s / ~650 KB/s |
+
+The raw probe reads ~710 KB/s. A small ring suffers most with the default reader (4 KiB bridge ~6 ms at that rate,
+about one pass): give an interrupt that logs hard a bigger ring.
+
+**The default reader** (the printer reads the rings through memory accesses itself) moves a ring's read offset only
+past bytes the printer holds: a stop, a reset or a flash leaves every unread byte in the target for the next session,
+and a reset nobody announced is fenced by the image's RTT epoch, so no line arrives twice. Its memory reads are
+synchronous (read over SWD, then ship over USB), which costs ~10 % of throughput against the DLL.
+
+**`UC_LOG_RTT_VIA_DLL=1`** in the printer's environment reads RTT through the J-Link DLL's own RTT, which polls from the
+probe: the probe's full throughput, for measurements of very high log rates. Its known weaknesses: when a session ends
+(the printer stops, resets or flashes the target) the DLL drops what it had read from the target and not yet handed
+over, without a message; and after a reset nobody announced it can read part of the old ring a second time. Use it
+for throughput, not where every line counts.
+
+## Reboots, the RTT epoch and boots nobody read
+
+The backends keep three words first in `.noInitLowRam` (`uc_log_boot_words`): an RTT epoch that is odd while a boot
+re-initialises the control block and even once it is the new boot's (`preMemoryInit` / `postMemoryInit` in Startup),
+and a count of boots that logged at least one record, with its complement as a check word
+(`uc_log::bootsThatLogged()`). The printer reads the epoch after each ring's read-offset write: a boot since the
+session began drops what that pass read and the next session reads the new boot from its first byte. From the count it
+says how many boots passed unread between two sessions ("N boot(s) passed unread"), and when its own download wrote
+over the count ("the boot count starts again").
+
+## Chip settings the printer takes
+
+`target_add_uc_log_rtt_jlink` writes the printer's arguments for the chip to `<build>/<target>.printer_args` (tools such as
+`kvasir_bench.py` start the printer from it). Besides probe, device and speed the chip package can set:
+
+| option | what |
+|---|---|
+| `--flash_ready_signature` | `<address>,<mask>,<value>[+...]`: register words that hold while the flash is mapped; the firmware check and control-socket reads in the flash window wait for them (an XIP read while a boot ROM drives the flash can hang it) |
+| `--flash_window` | `<base>,<size>`: the address range those reads are gated in |
+| `--park_signature`, `--stall_signature` | register words of a chip parked or stalled in its boot ROM, and the writes that undo a stall; the printer recovers such a chip by itself |
+| `--pre_reset_command`, `--flash_uncached_offset` | J-Link commands before a reset; the uncached alias of the flash for the firmware check |
+
 ## The printer's control socket
 
 `uc_log_printer` serves one socket for tools: `control.sock` in the log directory (`build/rtt_log/<target>/`; too
@@ -210,12 +270,22 @@ tagged by `"cmd"`:
 | | `read` | target memory while the core runs, hex per piece, with the host time it came back |
 | | `wait` | read a value until a condition holds or a timeout runs out |
 | | `reset`, `flash` | done through the printer's own probe connection; the log session survives |
-| stream | `subscribe` (`log`, `messages`, `metrics`; module and level filters) | after the answer only `log` / `message` / `metric` events |
+| | `halt`, `go` | the core halted / resumed through the probe's own calls, answered with `halted`; `write` refuses DHCSR (a halt written there behind the J-Link DLL's back hangs the DLL for good) |
+| stream | `subscribe` (`log`, `messages`, `metrics`; module and level filters) | after the answer only `log` / `message` / `metric` events, and `dropped` (`lines`) where events were dropped for this client |
 | history | `subscribe` with `since_seq` or `last` (log stream) | the kept log lines from that seq on / the newest n through the filters, a `backlog_end` (`next_seq`, `lost`), then live lines - or, with `"follow":false`, the connection closes |
 
 Every log line carries `seq`, counted from 0 at the printer's start. The printer keeps its log lines for the history,
 oldest dropped past `--control_history_mb` (128 MiB); a `backlog_end` counts what was asked for but dropped. History
 and live lines join without a gap or a repeat, and the history goes out as fast as the client reads it.
+
+Clients do not hold each other up. A subscriber that stops reading has its own send queue (4 MiB), and the lines
+past it are dropped for that subscriber only. The gap does not stay silent: once the queue has room again, the
+client gets a `{"cmd":"dropped","lines":N}` event where the gap is, with N the exact number of events it missed.
+The event comes ahead of the next line, or within a second when no line follows. `kvasir_bench wait-for` fails on
+it with exit 5. `ping` and `subscribe` need no target, so the socket thread answers
+them itself: they still answer when every worker waits in a probe call. A self-check notices when the socket thread
+has not turned for 10 s, or when no worker has been free for that long. It writes one Status line saying so, with
+each target request in flight and how long it has run, and writes another when it is over.
 
 Failures answer `{"cmd":"error","error":"..."}`. The protocol is the glaze structs in
 `src/uc_log/detail/ControlProtocol.hpp`. `doc/control_protocol/` holds what is generated from them - `schema.json`,

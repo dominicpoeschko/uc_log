@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -17,8 +18,10 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <functional>
+#include <list>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <poll.h>
 #include <shared_mutex>
 #include <span>
@@ -42,11 +45,18 @@ struct ControlTarget {
     /// Gets `cancelled`: true once the printer stops or the client is gone.
     using Action = std::function<std::expected<void, std::string>(std::function<bool()> const&)>;
 
-    MemoryReader                                                    read{};
-    MemoryWriter                                                    write{};
-    std::function<control::StatusAnswer()>                          status{};
-    Action                                                          reset{};
-    Action                                                          flash{};
+    MemoryReader                           read{};
+    MemoryWriter                           write{};
+    std::function<control::StatusAnswer()> status{};
+    Action                                 reset{};
+    Action                                 flash{};
+    /// halt (true) or resume (false) the core; the halted state after
+    std::function<std::expected<bool, std::string>(bool)> core{};
+    /// the core's registers (control::Registers' order); only while halted
+    std::function<std::expected<std::vector<std::uint32_t>, std::string>()> registers{};
+    /// core registers written (index, value); only while halted
+    std::function<std::expected<void, std::string>(std::span<control::RegisterWrite const>)>
+                                                                    writeRegisters{};
     std::function<std::vector<control::StatusMessage>(std::size_t)> messages{};
     /// µs clocks; empty = the real ones.
     std::function<std::int64_t()> unixMicros{};
@@ -240,6 +250,43 @@ namespace control_detail {
         return action(t.flash, t, cancelled, control::FlashAnswer{});
     }
 
+    inline control::Answer answer(control::Halt const&,
+                                  ControlTarget const& t) {
+        if(!t.core) { return error("no target here"); }
+        auto const result = t.core(true);
+        if(!result) { return error(result.error()); }
+        return control::HaltAnswer{.halted = *result};
+    }
+
+    inline control::Answer answer(control::Go const&,
+                                  ControlTarget const& t) {
+        if(!t.core) { return error("no target here"); }
+        auto const result = t.core(false);
+        if(!result) { return error(result.error()); }
+        return control::GoAnswer{.halted = *result};
+    }
+
+    inline control::Answer answer(control::Registers const&,
+                                  ControlTarget const& t) {
+        if(!t.registers) { return error("no target here"); }
+        auto result = t.registers();
+        if(!result) { return error(result.error()); }
+        return control::RegistersAnswer{.values = std::move(*result)};
+    }
+
+    inline control::Answer answer(control::WriteRegisters const& w,
+                                  ControlTarget const&           t) {
+        if(!t.writeRegisters) { return error("no target here"); }
+        for(auto const& r : w.writes) {
+            if(r.index > 18) {
+                return error(fmt::format("write_registers: no register {} (0..18)", r.index));
+            }
+        }
+        auto const result = t.writeRegisters(w.writes);
+        if(!result) { return error(result.error()); }
+        return control::WriteRegistersAnswer{};
+    }
+
     inline control::Answer answer(control::Subscribe const&,
                                   ControlTarget const&) {
         return error("subscribe: only on a connection to the server");
@@ -315,10 +362,13 @@ public:
                   std::move(socketPath)} {
         listener_.start(port);
         sweep();
-        ioThread_ = std::jthread{[this] { ioc_.run(); }};
+        ioThread_    = std::jthread{[this] { ioc_.run(); }};
+        watchThread_ = std::jthread{[this](std::stop_token const& stop) { watch(stop); }};
     }
 
     ~ControlServer() {
+        watchThread_.request_stop();
+        if(watchThread_.joinable()) { watchThread_.join(); }
         ioc_.stop();
         if(ioThread_.joinable()) { ioThread_.join(); }
         targetStop_ = true;
@@ -371,6 +421,10 @@ public:
     std::uint64_t droppedBytes() const { return droppedBytes_.load(); }
 
     std::size_t requestsInFlight() const { return inFlight_.load(); }
+
+    /// The self-check's limit: a socket thread that has not turned, or a pool with no free worker,
+    /// for that long is reported through errorf (once, and again when it is over).
+    void setStuckLimit(std::chrono::milliseconds limit) { stuckLimit_ = limit; }
 
     bool wants(control::Stream stream) const {
         return subscribers_[static_cast<std::size_t>(stream)].load(std::memory_order_relaxed) != 0;
@@ -438,6 +492,8 @@ private:
         }
 
         std::atomic<bool> streaming{false};
+        // lines dropped for this client since the last Dropped event it got (send())
+        std::atomic<std::uint64_t> droppedLines{0};
         // guarded by clientsMutex_
         control::Subscribe  filter;
         std::array<bool, 3> streams{};
@@ -470,7 +526,124 @@ private:
     boost::asio::steady_timer sweepTimer_{ioc_};
     boost::asio::thread_pool  pool_{Workers};
     std::atomic<std::size_t>  longRequests_{0};
-    std::jthread              ioThread_;
+
+    // the self-check (watch())
+    using Clock = std::chrono::steady_clock;
+
+    struct Running {
+        std::string_view  cmd;
+        Clock::time_point since;
+    };
+
+    std::atomic<std::chrono::milliseconds> stuckLimit_{std::chrono::seconds{10}};
+    std::atomic<Clock::time_point>         ioTurn_{Clock::time_point::min()};
+    std::atomic<Clock::time_point>         poolTurn_{Clock::time_point::min()};
+    std::mutex                             runningMutex_;
+    std::list<Running>                     running_;   // guarded by runningMutex_
+
+    std::jthread ioThread_;
+    std::jthread watchThread_;
+
+    // own thread, 1 Hz: both the socket thread and the pool take a turn, or a status line says
+    // which of them is stuck and what the workers are doing - so a control path that goes quiet
+    // shows its cause in the log instead of only in its clients' timeouts
+    void watch(std::stop_token const& stop) {
+        std::mutex                  mutex;
+        std::condition_variable_any wake;
+        bool                        ioStuck   = false;
+        bool                        poolStuck = false;
+        // a turn asked for at `asked` is taken once the stamp reaches it; one asked at a time
+        auto       ioAsked   = Clock::time_point::min();
+        auto       poolAsked = Clock::time_point::min();
+        auto const ask
+          = [](auto& executor, std::atomic<Clock::time_point>& turn, Clock::time_point& asked) {
+                if(turn.load() < asked) { return; }
+                asked = Clock::now();
+                boost::asio::post(executor, [&turn] { turn = Clock::now(); });
+            };
+        while(!stop.stop_requested()) {
+            {
+                std::unique_lock<std::mutex> lock{mutex};
+                wake.wait_for(
+                  lock,
+                  stop,
+                  std::chrono::milliseconds{std::max<long>(stuckLimit_.load().count() / 4, 10)},
+                  [] { return false; });
+            }
+            if(stop.stop_requested()) { return; }
+            ask(ioc_, ioTurn_, ioAsked);
+            ask(pool_, poolTurn_, poolAsked);
+            auto const now   = Clock::now();
+            auto const limit = stuckLimit_.load();
+            auto const ms    = [](Clock::duration d) {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
+            };
+            auto const age
+              = [now](std::atomic<Clock::time_point> const& turn, Clock::time_point asked) {
+                    return turn.load() < asked ? now - asked : Clock::duration::zero();
+                };
+            auto const ioAge   = age(ioTurn_, ioAsked);
+            auto const poolAge = age(poolTurn_, poolAsked);
+            if(!ioStuck && ioAge > limit) {
+                ioStuck = true;
+                report(
+                  fmt::format("the socket thread has not turned for {} ms: no client is "
+                              "accepted, read or written",
+                              ms(ioAge)));
+            } else if(ioStuck && ioAge <= limit) {
+                ioStuck = false;
+                report("the socket thread turns again");
+            }
+            if(!poolStuck && poolAge > limit) {
+                poolStuck = true;
+                std::string what;
+                {
+                    std::lock_guard<std::mutex> const lock{runningMutex_};
+                    for(auto const& r : running_) {
+                        what += fmt::format("{}{} for {} ms",
+                                            what.empty() ? "" : ", ",
+                                            r.cmd,
+                                            ms(now - r.since));
+                    }
+                }
+                report(
+                  fmt::format("no worker free for {} ms, requests wait: {} of {} workers "
+                              "busy (in the target: {})",
+                              ms(poolAge),
+                              inFlight_.load(),
+                              Workers,
+                              what.empty() ? "none in a request" : what));
+            } else if(poolStuck && poolAge <= limit) {
+                poolStuck = false;
+                report("a worker is free again");
+            }
+        }
+    }
+
+    // a request in running_ while it is answered
+    struct RunningEntry {
+        ControlServer&               server;
+        std::list<Running>::iterator at;
+
+        RunningEntry(ControlServer& s UC_LOG_LIFETIMEBOUND,
+                     std::string_view cmd)
+          : server{s} {
+            std::lock_guard<std::mutex> const lock{server.runningMutex_};
+            at = server.running_.insert(server.running_.end(), Running{cmd, Clock::now()});
+        }
+
+        RunningEntry(RunningEntry const&)            = delete;
+        RunningEntry& operator=(RunningEntry const&) = delete;
+
+        ~RunningEntry() {
+            std::lock_guard<std::mutex> const lock{server.runningMutex_};
+            server.running_.erase(at);
+        }
+    };
+
+    void report(std::string_view what) {
+        if(errorf_) { errorf_(fmt::format("self-check: {}", what)); }
+    }
 
     template<typename T>
     void publishEvent(T const& value) {
@@ -485,11 +658,24 @@ private:
         }
     }
 
-    void send(Client const&    client,
+    // A line that does not fit the client's queue is dropped for that client and counted; the count goes to it as a
+    // Dropped event ahead of the next line that fits, so the gap shows in its stream where it is.
+    void send(Client&          client,
               std::string_view text) {
-        if(!client.session->trySend(std::as_bytes(std::span{text}))) {
+        if(!sendDropped(client) || !client.session->trySend(std::as_bytes(std::span{text}))) {
             droppedBytes_ += text.size();
+            ++client.droppedLines;
         }
+    }
+
+    // false: the Dropped event did not fit either
+    bool sendDropped(Client& client) {
+        auto const lines = client.droppedLines.load();
+        if(lines == 0) { return true; }
+        auto const marker = control::toLine(control::Event{control::Dropped{.lines = lines}});
+        if(!client.session->trySend(std::as_bytes(std::span{marker}))) { return false; }
+        client.droppedLines -= lines;
+        return true;
     }
 
     // socket thread
@@ -554,9 +740,57 @@ private:
                    control::Answer{control::Error{.error = "too many requests queued"}}));
         }
         if(newline != std::string::npos && !client->busy) {
+            // what needs no target is answered right here: workers stuck in target requests (a
+            // probe call that does not come back) must not take ping and subscribe with them
+            while(true) {
+                auto const end = client->pending.find('\n');
+                if(end == std::string::npos) { return; }
+                auto const quick
+                  = answerWithoutTarget(client, std::string_view{client->pending}.substr(0, end));
+                if(quick == Quick::subscribed) {
+                    client->pending.clear();
+                    return;
+                }
+                if(quick == Quick::needsTarget) { break; }
+                client->pending.erase(0, end + 1);
+            }
             client->busy = true;
             boost::asio::post(pool_, [this, client] { serve(client); });
         }
+    }
+
+    enum class Quick { answered, subscribed, needsTarget };
+
+    // socket thread or worker: answers `line` if that needs no target (and so no worker); a request that needs the
+    // target is handed out in `needed`
+    Quick answerWithoutTarget(std::shared_ptr<Client> const&   client,
+                              std::string_view                 line,
+                              std::optional<control::Request>* needed = nullptr) {
+        if(line == TooLongMarker) {
+            send(*client,
+                 control::toLine(control::Answer{control::Error{.error = "line too long"}}));
+            return Quick::answered;
+        }
+        auto const parsed = control::parseRequest(line);
+        if(auto const* e = std::get_if<control::Error>(&parsed)) {
+            send(*client, control::toLine(control::Answer{*e}));
+            return Quick::answered;
+        }
+        auto const& request = std::get<control::Request>(parsed);
+        if(std::holds_alternative<control::Ping>(request)) {
+            send(*client, control::toLine(control::Answer{control::PingAnswer{}}));
+            return Quick::answered;
+        }
+        if(auto const* s = std::get_if<control::Subscribe>(&request)) {
+            if(auto const why = control::subscribeError(*s)) {
+                send(*client, control::toLine(control::Answer{control::Error{.error = *why}}));
+                return Quick::answered;
+            }
+            subscribe(client, *s);
+            return Quick::subscribed;
+        }
+        if(needed != nullptr) { *needed = request; }
+        return Quick::needsTarget;
     }
 
     // socket thread, 1 Hz: a half-closed client is only seen closing through hungUp() (a unix
@@ -570,6 +804,8 @@ private:
                 std::lock_guard<std::mutex> const lock{clientsMutex_};
                 for(auto const& client : clients_) {
                     if(client->halfClosed && client->hungUp()) { leaving.push_back(client); }
+                    // a gap with no line after it: its Dropped event once the queue has room
+                    if(client->streaming) { (void)sendDropped(*client); }
                 }
             }
             for(auto const& client : leaving) {
@@ -612,31 +848,19 @@ private:
                 line = client->pending.substr(0, end);
                 client->pending.erase(0, end + 1);
             }
-            if(line == TooLongMarker) {
-                send(*client,
-                     control::toLine(control::Answer{control::Error{.error = "line too long"}}));
-                continue;
-            }
-            auto const parsed = control::parseRequest(line);
-            if(auto const* e = std::get_if<control::Error>(&parsed)) {
-                send(*client, control::toLine(control::Answer{*e}));
-                continue;
-            }
-            auto const& request = std::get<control::Request>(parsed);
-            if(auto const* s = std::get_if<control::Subscribe>(&request)) {
-                if(auto const why = control::subscribeError(*s)) {
-                    send(*client, control::toLine(control::Answer{control::Error{.error = *why}}));
-                    continue;
-                }
-                subscribe(client, *s);
+            std::optional<control::Request> needed;
+            auto const                      quick = answerWithoutTarget(client, line, &needed);
+            if(quick == Quick::answered) { continue; }
+            if(quick == Quick::subscribed) {
                 std::lock_guard<std::mutex> const lock{client->mutex};
                 client->pending.clear();
                 client->busy = false;
                 return;
             }
-            bool const isLong = std::holds_alternative<control::Wait>(request)
-                             || std::holds_alternative<control::Reset>(request)
-                             || std::holds_alternative<control::Flash>(request);
+            auto const& request = *needed;
+            bool const  isLong  = std::holds_alternative<control::Wait>(request)
+                               || std::holds_alternative<control::Reset>(request)
+                               || std::holds_alternative<control::Flash>(request);
             if(isLong && longRequests_.fetch_add(1) >= MaxLongRequests) {
                 --longRequests_;
                 send(*client,
@@ -645,7 +869,10 @@ private:
                                             MaxLongRequests)}}));
                 continue;
             }
-            auto answer = answerRequest(request, [&client] { return client->hungUp(); });
+            auto answer = [&] {
+                RunningEntry const entry{*this, glz::meta<control::Request>::ids[request.index()]};
+                return answerRequest(request, [&client] { return client->hungUp(); });
+            }();
             if(isLong) { --longRequests_; }
             send(*client, answer);
         }
@@ -653,9 +880,6 @@ private:
 
     std::string answerRequest(control::Request const&      request,
                               std::function<bool()> const& cancelled) {
-        if(std::holds_alternative<control::Ping>(request)) {
-            return control::toLine(control::Answer{control::PingAnswer{}});
-        }
         std::shared_lock<std::shared_mutex> const lock{targetMutex_};
         if(!hasTarget_) {
             return control::toLine(

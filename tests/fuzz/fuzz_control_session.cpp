@@ -120,7 +120,7 @@ extern "C" int LLVMFuzzerTestOneInput(std::uint8_t const* data,
         answer = drain(probe, 2000, true);
         ::close(probe);
     }
-    if(answer != "{\"cmd\":\"ping\",\"protocol\":1}\n") {
+    if(answer != uc_log::control::toLine(uc_log::control::Answer{uc_log::control::PingAnswer{}})) {
         std::fprintf(stderr,
                      "server holds %zu client(s), %zu request(s) in flight\n",
                      f.server.getClientCount(),

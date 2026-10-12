@@ -57,8 +57,7 @@ static bool drain(RttChannel& ch,
       {0, "hello"},
       {1, "world"},
     };
-    return ch
-      .drain([]() { return false; }, sink.printF(), 0, catalog, sink.errorF(), haltedRecently);
+    return ch.drain(sink.printF(), 0, catalog, sink.errorF(), haltedRecently);
 }
 
 int main() {
@@ -162,6 +161,48 @@ int main() {
         CHECK(sink.messages.size() == 1 && sink.messages[0] == "hello",
               "cap resync recovered the trailing valid frame");
         CHECK(ch.buffer.empty(), "buffer drained after cap resync");
+    }
+
+    // 7: a ring's worth of stale stuck frames (a target that restarted without a reset while the
+    // DLL read) is dropped in one resync after one timeout, not one frame per timeout
+    {
+        RttChannel             ch;
+        Sink                   sink;
+        std::vector<std::byte> stale;
+        for(int i = 0; i != 200; ++i) {
+            stale.insert(stale.end(),
+                         {Start,
+                          remote_fmt::detail::fmtStringTypeIdentifier<
+                            remote_fmt::detail::FmtStringType::cataloged_normal>(
+                            remote_fmt::detail::RangeSize::_1),
+                          std::byte{0}});
+            stale.insert(stale.end(), 9, std::byte{0x00});
+        }
+        auto const valid = makeFrame(1);
+        stale.insert(stale.end(), valid.begin(), valid.end());
+        ch.append(stale);
+        drain(ch, sink);
+        CHECK(sink.messages.empty(), "stale frames block before the timeout");
+        std::this_thread::sleep_for(RttChannel::FrameTimeout + 20ms);
+        drain(ch, sink);
+        CHECK(sink.messages.size() == 1 && sink.messages[0] == "world",
+              "one timeout resyncs through all stale frames to the valid one");
+        CHECK(ch.buffer.empty(), "nothing left after the bulk resync");
+        std::size_t resyncs{};
+        for(auto const& e : sink.errors) {
+            if(e.find("resync") != std::string::npos) { ++resyncs; }
+        }
+        CHECK(resyncs == 1, "one resync message for the whole stall");
+
+        // the last frame start may still be arriving: kept for its own timeout
+        RttChannel             tail;
+        Sink                   tailSink;
+        std::vector<std::byte> two{stale.begin(), std::next(stale.begin(), 24)};
+        tail.append(two);
+        drain(tail, tailSink);
+        std::this_thread::sleep_for(RttChannel::FrameTimeout + 20ms);
+        drain(tail, tailSink);
+        CHECK(tail.buffer.size() == 12, "the last frame start is kept after a bulk resync");
     }
 
     if(failures == 0) {

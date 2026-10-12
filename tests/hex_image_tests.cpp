@@ -62,6 +62,43 @@ int main() {
         auto const dead
           = compareImage(*image, [](std::uint32_t, std::span<std::byte>) { return false; });
         CHECK(dead.result == ImageCheck::Result::unreadable, "a target that cannot be read");
+
+        // a flash behind a cache, its uncached alias 0x03000000 above: one cache line that is not the flash's
+        static constexpr std::uint32_t Alias     = 0x0300'0000U;
+        auto const                     staleLine = [&](std::uint32_t a, std::span<std::byte> out) {
+            flash(a >= 0x1300'0000U ? a - Alias : a, out);
+            if(a < 0x1300'0000U && a <= 0x1000'0004U && a + out.size() > 0x1000'0004U) {
+                out[0x1000'0004U - a] = std::byte{0xEE};
+            }
+            return true;
+        };
+        auto const stale = checkFlash(*image, staleLine, Alias);
+        CHECK(
+          stale.flash.result == ImageCheck::Result::match && stale.cacheDiffers()
+            && stale.cached.firstDifference == 0x10000004,
+          "the flash matches through the alias, the cached view does not: said as a cache line");
+        auto const clean = checkFlash(
+          *image,
+          [&](std::uint32_t a, std::span<std::byte> out) {
+              return flash(a >= 0x1300'0000U ? a - Alias : a, out);
+          },
+          Alias);
+        CHECK(clean.flash.result == ImageCheck::Result::match && !clean.cacheDiffers(),
+              "flash and cache agree");
+        auto const otherFlash = checkFlash(
+          *image,
+          [&](std::uint32_t a, std::span<std::byte> out) {
+              flash(a >= 0x1300'0000U ? a - Alias : a, out);
+              if(a >= 0x1300'0000U) { out[1] = std::byte{0}; }
+              return true;
+          },
+          Alias);
+        CHECK(otherFlash.flash.result == ImageCheck::Result::different
+                && otherFlash.flash.firstDifference == 0x10000001 && !otherFlash.cacheDiffers(),
+              "another firmware in the flash is judged by the flash, at the image's own address");
+        auto const noAlias = checkFlash(*image, staleLine, 0);
+        CHECK(noAlias.flash.result == ImageCheck::Result::different,
+              "without an alias the cached view is all there is");
     }
 
     std::istringstream broken{":0400000001020304F3\n"};

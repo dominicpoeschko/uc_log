@@ -37,6 +37,7 @@ struct FakeTarget {
     std::atomic<std::uint32_t> counter{0};
     std::atomic<std::int64_t>  steady{0};
     std::function<void()>      onReset{};
+    bool                       coreHalted{};
 
     detail::MemoryResult read(std::span<ctl::Piece const> pieces) {
         std::vector<std::vector<std::byte>> out;
@@ -99,6 +100,21 @@ struct FakeTarget {
           .flash = [](std::function<bool()> const&) -> std::expected<void, std::string> {
               return std::unexpected{std::string{"no hex file"}};
           },
+          .core = [this](bool halt) -> std::expected<bool, std::string> {
+              coreHalted = halt;
+              return coreHalted;
+          },
+          // each transcript request runs against a fresh target: whether the core is halted is the reader's
+          // check (rtt_reader_tests), not this fake's
+          .registers = []() -> std::expected<std::vector<std::uint32_t>, std::string> {
+              std::vector<std::uint32_t> values;
+              for(std::uint32_t r = 0; r != 19; ++r) { values.push_back(0x1000U + r); }
+              return values;
+          },
+          .writeRegisters
+          = [](std::span<ctl::RegisterWrite const>) -> std::expected<void, std::string> {
+              return {};
+          },
           .messages =
             [](std::size_t count) {
                 auto const all = allMessages();
@@ -150,6 +166,12 @@ inline std::vector<Exchange> exchanges() {
       {"wait_too_long",
        R"({"cmd":"wait","piece":{"address":536870912,"size":4},"condition":"changed","timeout_ms":600001})"},
       {"reset", R"({"cmd":"reset"})"},
+      {"halt", R"({"cmd":"halt"})"},
+      {"registers", R"({"cmd":"registers"})"},
+      {"write_registers",
+       R"({"cmd":"write_registers","writes":[{"index":0,"value":7},{"index":15,"value":268443648}]})"},
+      {"write_registers_bad", R"({"cmd":"write_registers","writes":[{"index":19,"value":0}]})"},
+      {"go", R"({"cmd":"go"})"},
       {"flash", R"({"cmd":"flash"})"},
       {"write_two",
        R"({"cmd":"write","words":[{"address":1342177292,"value":0},{"address":1342177296,"value":305419896}]})"},

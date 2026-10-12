@@ -2,6 +2,7 @@
 
 #include "remote_fmt/parser.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <fmt/format.h>
@@ -27,6 +28,8 @@ namespace uc_log { namespace detail {
 
         std::vector<std::byte> buffer;
         Clock::time_point      lastValidRead{Clock::now()};
+        // what the image's catalog says about its frames (remote_fmt::FrameCheck): set at each session start
+        remote_fmt::FrameCheck frameCheck{remote_fmt::FrameCheck::either};
 
         void append(std::span<std::byte const> data) {
             buffer.insert(buffer.end(), data.begin(), data.end());
@@ -34,12 +37,11 @@ namespace uc_log { namespace detail {
 
         // drain all complete frames, one printF(channel, message, catalog id) call per decoded
         // message. haltedRecently gates the timeout-based resync (a halted target legitimately
-        // pauses mid-frame), the size cap does not. Returns true when at least one message was decoded.
-        template<typename StopRequestedF,
-                 typename PrintF,
+        // pauses mid-frame), the size cap does not. Never cut short: what was read from the target
+        // is decoded whole. Returns true when at least one message was decoded.
+        template<typename PrintF,
                  typename ErrorMessageF>
-        bool drain(StopRequestedF&&                       stopRequested,
-                   PrintF&&                               printF,
+        bool drain(PrintF&&                               printF,
                    std::size_t                            channelId,
                    std::unordered_map<std::uint16_t,
                                       std::string> const& stringConstantsMap,
@@ -50,59 +52,89 @@ namespace uc_log { namespace detail {
                 return false;
             }
 
-            bool                       gotMessage{};
-            std::size_t                unparsedTotal{};
-            std::span<std::byte const> remaining{buffer};
-            while(!stopRequested()) {
-                auto const parsed
-                  = remote_fmt::parseMessage(remaining, stringConstantsMap, errorMessagef);
-                remaining = parsed.remaining;
-                unparsedTotal += parsed.discarded;
-                if(parsed.message) {
-                    lastValidRead = Clock::now();
-                    gotMessage    = true;
-                    printF(channelId, *parsed.message, parsed.catalogId);
-                    continue;
+            bool        gotMessage{};
+            std::size_t unparsedTotal{};
+            auto const  decode = [&] {
+                std::span<std::byte const> remaining{buffer};
+                while(true) {
+                    auto const parsed = remote_fmt::parseMessage(remaining,
+                                                                 stringConstantsMap,
+                                                                 errorMessagef,
+                                                                 frameCheck);
+                    remaining         = parsed.remaining;
+                    unparsedTotal += parsed.discarded;
+                    if(parsed.message) {
+                        lastValidRead = Clock::now();
+                        gotMessage    = true;
+                        printF(channelId, *parsed.message, parsed.catalogId);
+                        continue;
+                    }
+                    break;
                 }
-                break;
+                // single compaction per pass instead of one front-erase per message
+                buffer.erase(buffer.begin(),
+                             std::next(buffer.begin(),
+                                       static_cast<std::make_signed_t<std::size_t>>(
+                                         buffer.size() - remaining.size())));
+            };
+            decode();
+
+            if(!buffer.empty()) {
+                bool const oversized = buffer.size() > MaxBufferSize;
+                bool const timedOut
+                  = !haltedRecently && Clock::now() > lastValidRead + FrameTimeout;
+                if(oversized || timedOut) {
+                    // The head has been stuck for a whole timeout: what lies behind it arrived in
+                    // the same stall, so a head that is not the buffer's last frame start is stuck
+                    // too - resync through all of them now, not one per timeout (a target that
+                    // restarts without a reset while the DLL reads can hand over a ring's worth of
+                    // stale bytes: one frame per timeout took minutes for those). The last frame
+                    // start may still be arriving; it gets its own timeout.
+                    std::size_t dropped{};
+                    std::size_t frames{};
+                    do {
+                        dropped += dropHeadFrame();
+                        ++frames;
+                        decode();
+                    } while(hasLaterFrameStart());
+                    lastValidRead = Clock::now();
+                    errorMessagef(
+                      fmt::format("channel {} resync: dropped {} byte{} of {} stuck frame{}",
+                                  channelId,
+                                  dropped,
+                                  dropped == 1 ? "" : "s",
+                                  frames,
+                                  frames == 1 ? "" : "s"));
+                }
             }
-            // single compaction per drain instead of one front-erase per message
-            buffer.erase(buffer.begin(),
-                         std::next(buffer.begin(),
-                                   static_cast<std::make_signed_t<std::size_t>>(
-                                     buffer.size() - remaining.size())));
             if(unparsedTotal != 0) {
                 errorMessagef(fmt::format("channel {} corrupted data removed {} byte{}",
                                           channelId,
                                           unparsedTotal,
                                           unparsedTotal == 1 ? "" : "s"));
             }
-
-            if(!buffer.empty()) {
-                bool const oversized = buffer.size() > MaxBufferSize;
-                bool const timedOut
-                  = !haltedRecently && Clock::now() > lastValidRead + FrameTimeout;
-                if(oversized || timedOut) { resyncToNextFrame(channelId, errorMessagef); }
-            }
             return gotMessage;
         }
 
     private:
         // the frame at the head is stuck (incomplete or corrupt): drop it up to the next
-        // start marker in one step
-        template<typename ErrorMessageF>
-        void resyncToNextFrame(std::size_t     channelId,
-                               ErrorMessageF&& errorMessagef) {
-            auto const next    = std::find(std::next(buffer.begin()),
-                                           buffer.end(),
-                                           remote_fmt::protocol::Start_marker);
+        // start marker in one step; returns the bytes dropped
+        std::size_t dropHeadFrame() {
+            auto const next
+              = std::find_if(std::next(buffer.begin()), buffer.end(), [this](std::byte b) {
+                    return remote_fmt::isFrameStart(b, frameCheck);
+                });
             auto const dropped = static_cast<std::size_t>(std::distance(buffer.begin(), next));
             buffer.erase(buffer.begin(), next);
-            lastValidRead = Clock::now();
-            errorMessagef(fmt::format("channel {} resync: dropped {} byte{} of stuck frame",
-                                      channelId,
-                                      dropped,
-                                      dropped == 1 ? "" : "s"));
+            return dropped;
+        }
+
+        // a start marker behind the head's
+        bool hasLaterFrameStart() const {
+            return buffer.size() > 1
+                && std::find_if(std::next(buffer.begin()), buffer.end(), [this](std::byte b) {
+                       return remote_fmt::isFrameStart(b, frameCheck);
+                   }) != buffer.end();
         }
     };
 

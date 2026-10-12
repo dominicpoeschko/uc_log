@@ -2,6 +2,7 @@
 
 #include "jlink/JLink.hpp"
 #include "uc_log/detail/HexImage.hpp"
+#include "uc_log/detail/Le32.hpp"
 
 #include <charconv>
 #include <cstddef>
@@ -64,14 +65,8 @@ ramImageStart(std::istream&               map,
     if(!table) { return std::unexpected{table.error()}; }
     for(auto const& s : image) {
         if(s.address > *table || *table - s.address + 8 > s.data.size()) { continue; }
-        auto const word = [&](std::size_t at) {
-            std::uint32_t v{};
-            for(std::size_t i = 0; i != 4; ++i) {
-                v |= std::to_integer<std::uint32_t>(s.data[*table - s.address + at + i]) << (8 * i);
-            }
-            return v;
-        };
-        JLink::RamImageStart const start{*table, word(0), word(4)};
+        auto const vectors = std::span<std::byte const>{s.data}.subspan(*table - s.address);
+        JLink::RamImageStart const start{*table, le32(vectors, 0), le32(vectors, 4)};
         if((start.initialSp & 3U) != 0 || (start.resetVector & 1U) == 0) {
             return std::unexpected{std::format(
               "implausible vector table at {:#010x}: SP {:#010x}, reset {:#010x} (SP must be "

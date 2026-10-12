@@ -40,7 +40,10 @@ private:
     std::chrono::milliseconds                maxHold;
     std::condition_variable_any              cv;
     std::mutex                               m;
-    std::jthread                             thread;
+    // one hand-out at a time, from collecting to the last f(): a flush() from another thread must not interleave
+    // its batch with the queue thread's
+    std::mutex   handOutMutex;
+    std::jthread thread;
 
     // `all` ignores the waiting times
     std::deque<QEntry>* next(Clock::time_point now,
@@ -68,7 +71,8 @@ private:
     }
 
     void handOut(bool all) {
-        std::vector<QEntry> batch;
+        std::lock_guard<std::mutex> const handOutLock{handOutMutex};
+        std::vector<QEntry>               batch;
         {
             std::lock_guard<std::mutex> const lock{m};
             auto const                        now = Clock::now();
@@ -112,6 +116,12 @@ public:
         thread.join();
         handOut(true);   // rule 4
     }
+
+    // Hands out everything queued now, in the merge order. For a boundary the times of the channels do not cross:
+    // a new session after a reset, whose lines start again at time 0 - left in the queue, the old boot's last lines
+    // of one channel would come out AFTER the new boot's first lines of another (a stress test saw 798 records of
+    // a new boot in front of the old boot's tail).
+    void flush() { handOut(true); }
 
     template<typename E>
     void append(E&& entry) {

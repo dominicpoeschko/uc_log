@@ -251,12 +251,16 @@ function(target_add_uc_log_rtt_jlink targetname)
         MAP_FILE
         PREFIX
         CONTROL_PORT
-        METRICS_PORT
         DUPLEX_BASE_PORT
         TRANSPORT
-        HEX_FILE)
+        HEX_FILE
+        PARK_SIGNATURE
+        STALL_SIGNATURE
+        FLASH_READY_SIGNATURE
+        FLASH_WINDOW
+        FLASH_UNCACHED_OFFSET)
     # PRE_RESET_COMMANDS: `w4 <address> <value>` lines written before every reset and download (e.g. RP core 1 parking).
-    set(multiValueArgs PRE_RESET_COMMANDS)
+    set(multiValueArgs PRE_RESET_COMMANDS STALL_RECOVERY)
 
     cmake_parse_arguments(PARSE_ARGV 1 PARSED_ARGS "${options}" "${oneValueArgs}" "${multiValueArgs}")
 
@@ -290,12 +294,6 @@ function(target_add_uc_log_rtt_jlink targetname)
         set(PARSED_ARGS_PREFIX "log_")
     endif()
 
-    if(PARSED_ARGS_METRICS_PORT)
-        message(DEPRECATION "target_add_uc_log_rtt_jlink: METRICS_PORT is deprecated, use CONTROL_PORT")
-        if(NOT PARSED_ARGS_CONTROL_PORT)
-            set(PARSED_ARGS_CONTROL_PORT ${PARSED_ARGS_METRICS_PORT})
-        endif()
-    endif()
     if(NOT PARSED_ARGS_CONTROL_PORT)
         set(PARSED_ARGS_CONTROL_PORT 34565)
     elseif(${PARSED_ARGS_CONTROL_PORT} LESS 1024 OR PARSED_ARGS_CONTROL_PORT GREATER 65535)
@@ -316,6 +314,88 @@ function(target_add_uc_log_rtt_jlink targetname)
     endif()
 
     target_generate_string_constants(${targetname})
+
+    # What a printer needs to know about this target - the chip, the probe, the image's files, the chip package's reset
+    # commands and signatures - in one list: the log_ target below passes it, and <target>.printer_args holds it for
+    # every other way a printer starts, one argument per line as it stands in argv. A new option goes here and nowhere
+    # else.
+    set(printer_args
+        --device
+        ${PARSED_ARGS_TARGET_MPU}
+        --speed
+        ${PARSED_ARGS_SWD_SPEED}
+        --map_file
+        ${PARSED_ARGS_MAP_FILE}
+        --hex_file
+        ${PARSED_ARGS_HEX_FILE}
+        --string_constants_file
+        "${targetname}_string_constants.json")
+
+    if(PARSED_ARGS_JLINK_IP AND NOT PARSED_ARGS_JLINK_IP STREQUAL "")
+        set(_val "${PARSED_ARGS_JLINK_IP}")
+        # Expand $ENV{VAR} if that's what the string is
+        if(_val MATCHES "^\\$ENV\\{([^}]+)\\}$")
+            set(_env_name "${CMAKE_MATCH_1}")
+            set(JLINK_IP_EXPANDED "$ENV{${_env_name}}")
+        else()
+            set(JLINK_IP_EXPANDED "${_val}")
+        endif()
+
+        list(APPEND printer_args --host ${JLINK_IP_EXPANDED})
+    endif()
+
+    if(PARSED_ARGS_JLINK_PROBE AND NOT PARSED_ARGS_JLINK_PROBE STREQUAL "")
+        list(APPEND printer_args --probe "${PARSED_ARGS_JLINK_PROBE}")
+    endif()
+
+    foreach(pre_reset_command IN LISTS PARSED_ARGS_PRE_RESET_COMMANDS)
+        list(APPEND printer_args --pre_reset_command "${pre_reset_command}")
+    endforeach()
+
+    # FLASH_UNCACHED_OFFSET <offset>: the firmware check reads the flash through its uncached alias (address + offset)
+    if(PARSED_ARGS_FLASH_UNCACHED_OFFSET AND NOT PARSED_ARGS_FLASH_UNCACHED_OFFSET STREQUAL "")
+        list(APPEND printer_args --flash_uncached_offset "${PARSED_ARGS_FLASH_UNCACHED_OFFSET}")
+    endif()
+
+    # PARK_SIGNATURE "<address>,<mask>,<value>": the chip's sign of a boot ROM park after a debug access during its
+    # reboot (the printer then resets it)
+    if(PARSED_ARGS_PARK_SIGNATURE AND NOT PARSED_ARGS_PARK_SIGNATURE STREQUAL "")
+        list(APPEND printer_args --park_signature "${PARSED_ARGS_PARK_SIGNATURE}")
+    endif()
+
+    # STALL_SIGNATURE "<address>,<mask>,<value>" and STALL_RECOVERY "w4 <a> <v>"...: a stall the chip package can
+    # recognise while the target is quiet, and the register writes that undo it
+    if(PARSED_ARGS_STALL_SIGNATURE AND NOT PARSED_ARGS_STALL_SIGNATURE STREQUAL "")
+        list(APPEND printer_args --stall_signature "${PARSED_ARGS_STALL_SIGNATURE}")
+    endif()
+    foreach(stall_recovery IN LISTS PARSED_ARGS_STALL_RECOVERY)
+        list(APPEND printer_args --stall_recovery "${stall_recovery}")
+    endforeach()
+
+    # FLASH_READY_SIGNATURE "<address>,<mask>,<value>[+...]": the register words of a mapped flash - the firmware check
+    # reads the flash only then, never while a boot ROM drives it by hand
+    if(PARSED_ARGS_FLASH_READY_SIGNATURE AND NOT PARSED_ARGS_FLASH_READY_SIGNATURE STREQUAL "")
+        list(APPEND printer_args --flash_ready_signature "${PARSED_ARGS_FLASH_READY_SIGNATURE}")
+    endif()
+    # FLASH_WINDOW "<base>,<size>": control-socket reads there go through the same gate
+    if(PARSED_ARGS_FLASH_WINDOW AND NOT PARSED_ARGS_FLASH_WINDOW STREQUAL "")
+        list(APPEND printer_args --flash_window "${PARSED_ARGS_FLASH_WINDOW}")
+    endif()
+
+    if(PARSED_ARGS_RAM_IMAGE)
+        list(APPEND printer_args --ram_image)
+    endif()
+
+    # the compile-time log filter the firmware was built with (LogFilter.hpp), for the printer to show
+    if(PARSED_ARGS_LOG_FILTER)
+        list(APPEND printer_args --log_filter "${PARSED_ARGS_LOG_FILTER}")
+    endif()
+
+    list(JOIN printer_args "\n" printer_args_text)
+    file(
+        GENERATE
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${targetname}.printer_args"
+        CONTENT "${printer_args_text}\n")
 
     if(NOT UC_LOG_BUILD_PRINTER)
         return()
@@ -350,50 +430,11 @@ function(target_add_uc_log_rtt_jlink targetname)
         ${PARSED_ARGS_DUPLEX_BASE_PORT}
         --transport
         ${PARSED_ARGS_TRANSPORT}
-        --device
-        ${PARSED_ARGS_TARGET_MPU}
-        --speed
-        ${PARSED_ARGS_SWD_SPEED}
-        --map_file
-        ${PARSED_ARGS_MAP_FILE}
-        --hex_file
-        ${PARSED_ARGS_HEX_FILE}
-        --string_constants_file
-        "${targetname}_string_constants.json"
+        ${printer_args}
         --build_command
         "cmake --build . --target=${targetname}"
         --log_dir
         ${CMAKE_CURRENT_BINARY_DIR}/rtt_log/${targetname})
-
-    if(PARSED_ARGS_JLINK_IP AND NOT PARSED_ARGS_JLINK_IP STREQUAL "")
-        set(_val "${PARSED_ARGS_JLINK_IP}")
-        # Expand $ENV{VAR} if that's what the string is
-        if(_val MATCHES "^\\$ENV\\{([^}]+)\\}$")
-            set(_env_name "${CMAKE_MATCH_1}")
-            set(JLINK_IP_EXPANDED "$ENV{${_env_name}}")
-        else()
-            set(JLINK_IP_EXPANDED "${_val}")
-        endif()
-
-        list(APPEND command --host ${JLINK_IP_EXPANDED})
-    endif()
-
-    if(PARSED_ARGS_JLINK_PROBE AND NOT PARSED_ARGS_JLINK_PROBE STREQUAL "")
-        list(APPEND command --probe "${PARSED_ARGS_JLINK_PROBE}")
-    endif()
-
-    foreach(pre_reset_command IN LISTS PARSED_ARGS_PRE_RESET_COMMANDS)
-        list(APPEND command --pre_reset_command "${pre_reset_command}")
-    endforeach()
-
-    if(PARSED_ARGS_RAM_IMAGE)
-        list(APPEND command --ram_image)
-    endif()
-
-    # the compile-time log filter the firmware was built with (LogFilter.hpp), for the printer to show
-    if(PARSED_ARGS_LOG_FILTER)
-        list(APPEND command --log_filter "${PARSED_ARGS_LOG_FILTER}")
-    endif()
 
     add_custom_target(
         ${PARSED_ARGS_PREFIX}${targetname}

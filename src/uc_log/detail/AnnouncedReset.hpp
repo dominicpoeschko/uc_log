@@ -1,5 +1,7 @@
 #pragma once
 
+#include "uc_log/detail/Le32.hpp"
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -53,14 +55,7 @@ struct Block {
 
 inline Block decode(std::span<std::byte const,
                               BlockSize> raw) {
-    auto const word = [&](std::size_t at) {
-        std::uint32_t v{};
-        for(std::size_t i = 0; i != 4; ++i) {
-            v |= std::to_integer<std::uint32_t>(raw[at + i]) << (8 * i);
-        }
-        return v;
-    };
-    return Block{word(0), word(4), word(8), word(12)};
+    return Block{le32(raw, 0), le32(raw, 4), le32(raw, 8), le32(raw, 12)};
 }
 
 namespace detail {
@@ -85,15 +80,16 @@ namespace detail {
     }
 
     // the symbol as a name of its own: not a part of a longer identifier
-    inline bool namesSymbol(std::string_view line) {
-        for(auto at = line.find(Symbol); at != std::string_view::npos;
-            at      = line.find(Symbol, at + 1))
+    inline bool namesSymbol(std::string_view line,
+                            std::string_view symbol = Symbol) {
+        for(auto at = line.find(symbol); at != std::string_view::npos;
+            at      = line.find(symbol, at + 1))
         {
             auto const isIdent = [](char c) {
                 return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
                     || c == '_';
             };
-            auto const after = at + Symbol.size();
+            auto const after = at + symbol.size();
             if((at == 0 || !isIdent(line[at - 1]))
                && (after == line.size() || !isIdent(line[after])))
             {
@@ -111,7 +107,8 @@ namespace detail {
 /// Every line that names the symbol and starts with an address gives that address.
 inline std::expected<std::uint32_t,
                      std::string>
-addressFromMap(std::istream& map) {
+addressFromMap(std::istream&    map,
+               std::string_view symbol = Symbol) {
     std::string line;
     bool        sectionLinePending = false;
     bool        discarded          = false;   // GNU ld's list of what --gc-sections dropped
@@ -133,23 +130,24 @@ addressFromMap(std::istream& map) {
             sectionLinePending = false;
             if(auto const a = detail::firstHex(text); found(a)) { return *a; }
         }
-        if(!detail::namesSymbol(text)) { continue; }
+        if(!detail::namesSymbol(text, symbol)) { continue; }
         if(auto const a = detail::firstHex(text); found(a)) { return *a; }
         // GNU ld section line: the name first, the address after it or on the next line
-        auto const at   = text.find(Symbol);
-        auto const rest = text.substr(at + Symbol.size());
+        auto const at   = text.find(symbol);
+        auto const rest = text.substr(at + symbol.size());
         if(auto const a = detail::firstHex(rest); found(a)) { return *a; }
         sectionLinePending = !detail::firstHex(rest).has_value();
     }
-    return std::unexpected{std::format("no {} in the map file", Symbol)};
+    return std::unexpected{std::format("no {} in the map file", symbol)};
 }
 
 inline std::expected<std::uint32_t,
                      std::string>
-addressFromMap(std::string const& mapFile) {
+addressFromMap(std::string const& mapFile,
+               std::string_view   symbol = Symbol) {
     std::ifstream map{mapFile};
     if(!map) { return std::unexpected{std::format("cannot open {:?}", mapFile)}; }
-    return addressFromMap(map);
+    return addressFromMap(map, symbol);
 }
 
 }   // namespace uc_log::detail::announced_reset

@@ -24,6 +24,12 @@ uc_log_add_test(uc_log_test_time_delayed_queue time_delayed_queue_tests.cpp)
 uc_log_add_test(uc_log_test_entry_store entry_store_tests.cpp)
 uc_log_add_test(uc_log_test_tcp_server tcp_server_tests.cpp)
 uc_log_add_test(uc_log_test_rtt_reader rtt_reader_tests.cpp)
+uc_log_add_test(uc_log_test_direct_rtt direct_rtt_tests.cpp)
+uc_log_add_test(uc_log_test_decode_worker decode_worker_tests.cpp)
+uc_log_add_test(uc_log_test_segger_terms segger_terms_tests.cpp)
+uc_log_add_test(uc_log_test_map_facts map_facts_tests.cpp)
+uc_log_add_test(uc_log_test_boot_ledger boot_ledger_tests.cpp)
+uc_log_add_test(uc_log_test_row_file row_file_tests.cpp)
 if(JLINK_USE_FAKE_DLL)
     uc_log_add_test(uc_log_test_jlink jlink_tests.cpp)
 endif()
@@ -31,6 +37,7 @@ uc_log_add_test(uc_log_test_hex_image hex_image_tests.cpp)
 uc_log_add_test(uc_log_test_ram_image ram_image_tests.cpp)
 uc_log_add_test(uc_log_test_announced_reset announced_reset_tests.cpp)
 uc_log_add_test(uc_log_test_target_inspector target_inspector_tests.cpp)
+uc_log_add_test(uc_log_test_target_loss target_loss_tests.cpp)
 uc_log_add_test(uc_log_test_scroll_view scroll_view_tests.cpp)
 
 # RTT ring layout wants 4-byte pointers: -m32 where that links, with the directory's stdlib options (libc++ has no
@@ -54,6 +61,18 @@ if(UC_LOG_HAS_M32)
     target_link_libraries(uc_log_test_rtt_ring PRIVATE Threads::Threads)
     add_test(NAME uc_log_test_rtt_ring COMMAND uc_log_test_rtt_ring)
     set_tests_properties(uc_log_test_rtt_ring PROPERTIES ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
+
+    # LossPolicy::Counted's ledger against a real ring (src/uc_log/detail/LossLedger.hpp)
+    add_executable(uc_log_test_loss_ledger loss_ledger_tests.cpp)
+    target_include_directories(uc_log_test_loss_ledger PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../rtt/src
+                                                               ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+    target_compile_features(uc_log_test_loss_ledger PRIVATE cxx_std_26)
+    target_compile_options(uc_log_test_loss_ledger PRIVATE -m32 -Wall -Wextra -Wconversion -Wsign-conversion -Werror)
+    target_link_options(uc_log_test_loss_ledger PRIVATE -m32)
+    target_link_libraries(uc_log_test_loss_ledger PRIVATE Threads::Threads)
+    add_test(NAME uc_log_test_loss_ledger COMMAND uc_log_test_loss_ledger)
+    set_tests_properties(uc_log_test_loss_ledger PROPERTIES ENVIRONMENT
+                                                            "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
 endif()
 
 # Golden files in doc/control_protocol/: `update_control_protocol` rewrites them.
@@ -106,6 +125,19 @@ if(UC_LOG_BUILD_FUZZERS)
                 "${uc_log_fuzz_seeds}/${fuzzer}" "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/regressions/${fuzzer}")
         set_tests_properties(${fuzz_target} PROPERTIES FIXTURES_REQUIRED uc_log_fuzz_seeds)
     endforeach()
+
+    # the printer's frame extraction over arbitrary streams in arbitrary pieces (fuzz/fuzz_rtt_stream.cpp)
+    add_executable(uc_log_fuzz_rtt_stream fuzz/fuzz_rtt_stream.cpp)
+    target_link_libraries(uc_log_fuzz_rtt_stream PRIVATE remote_fmt::parser fmt::fmt uc_log::uc_log
+                                                         enchantum::enchantum)
+    target_add_default_build_options(uc_log_fuzz_rtt_stream PRIVATE)
+    target_compile_definitions(uc_log_fuzz_rtt_stream PRIVATE REMOTE_FMT_USE_CATALOG=false)
+    target_compile_options(uc_log_fuzz_rtt_stream PRIVATE -fsanitize=fuzzer,address,undefined
+                                                          -fno-sanitize-recover=undefined)
+    target_link_options(uc_log_fuzz_rtt_stream PRIVATE -fsanitize=fuzzer,address,undefined)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fuzz_corpus/rtt_stream")
+    add_test(NAME uc_log_fuzz_rtt_stream COMMAND uc_log_fuzz_rtt_stream -runs=20000 -max_total_time=30 -timeout=10
+                                                 "${CMAKE_CURRENT_BINARY_DIR}/fuzz_corpus/rtt_stream")
 endif()
 
 find_package(Python3 COMPONENTS Interpreter)
@@ -133,6 +165,14 @@ target_compile_definitions(uc_log_test_log_macro PRIVATE USE_UC_LOG)
 set(uc_log_test_log_macro_catalog "${CMAKE_CURRENT_BINARY_DIR}/uc_log_test_log_macro_string_constants.json")
 target_generate_string_constants(uc_log_test_log_macro)
 target_compile_definitions(uc_log_test_log_macro PRIVATE UC_LOG_TEST_CATALOG_JSON="${uc_log_test_log_macro_catalog}")
+
+# FanOutBackend: every record in every sink, the primary's lost line in the primary only (catalog mode, like above).
+uc_log_add_test(uc_log_test_fan_out fan_out_tests.cpp)
+target_compile_definitions(uc_log_test_fan_out PRIVATE USE_UC_LOG)
+target_generate_string_constants(uc_log_test_fan_out)
+target_compile_definitions(
+    uc_log_test_fan_out
+    PRIVATE UC_LOG_TEST_CATALOG_JSON="${CMAKE_CURRENT_BINARY_DIR}/uc_log_test_fan_out_string_constants.json")
 
 # mp-units for the quantity metric test (optional). Same pin as remote_fmt/tests.
 option(UC_LOG_TESTS_WITH_MP_UNITS "fetch mp-units for the quantity metric test" ON)
@@ -228,6 +268,28 @@ foreach(fail_case IN LISTS log_macro_fail_cases)
     endif()
 endforeach()
 
+# What a backend's LossPolicy parameter must NOT accept, the same way. Keep in step with loss_policy_fail.cpp.
+set(loss_policy_fail_cases 0 1)
+
+foreach(fail_case IN LISTS loss_policy_fail_cases)
+    add_executable(loss_policy_fail_${fail_case} EXCLUDE_FROM_ALL loss_policy_fail.cpp)
+    target_link_libraries(loss_policy_fail_${fail_case} PRIVATE uc_log::uc_log)
+    target_add_default_build_options(loss_policy_fail_${fail_case} PRIVATE)
+    target_compile_definitions(loss_policy_fail_${fail_case} PRIVATE UC_LOG_FAIL_CASE=${fail_case})
+
+    if(fail_case EQUAL 0)
+        set(test_name loss_policy_accepts_control)
+    else()
+        set(test_name loss_policy_rejects_${fail_case})
+    endif()
+    add_test(NAME ${test_name} COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target
+                                       loss_policy_fail_${fail_case} --config $<CONFIG>)
+    set_tests_properties(${test_name} PROPERTIES RESOURCE_LOCK log_macro_fail_build)
+    if(NOT fail_case EQUAL 0)
+        set_tests_properties(${test_name} PROPERTIES WILL_FAIL TRUE)
+    endif()
+endforeach()
+
 # Policy configurations IsrPolicy.hpp must NOT accept, the same way, case 0 again the control. Keep in step with
 # isr_policy_fail.cpp.
 set(isr_policy_fail_cases 0 1 2 3 4)
@@ -250,3 +312,15 @@ foreach(fail_case IN LISTS isr_policy_fail_cases)
         set_tests_properties(${test_name} PROPERTIES WILL_FAIL TRUE)
     endif()
 endforeach()
+
+# The stress stream's host side (src/uc_log/stress/Records.hpp and a firmware that logs it): the checker against
+# synthetic streams and remote_fmt's own encoder, and the command-line checker for a real run's .rttlog files.
+uc_log_add_test(uc_log_test_log_stress_check stress/log_stress_check_tests.cpp)
+target_compile_definitions(uc_log_test_log_stress_check PRIVATE REMOTE_FMT_USE_CATALOG=false REMOTE_FMT_FRAME_CHECK=0)
+# the same with the frame check (REMOTE_FMT_FRAME_CHECK): checked frames through the same decoder
+uc_log_add_test(uc_log_test_log_stress_check_framed stress/log_stress_check_tests.cpp)
+target_compile_definitions(uc_log_test_log_stress_check_framed PRIVATE REMOTE_FMT_USE_CATALOG=false
+                                                                       REMOTE_FMT_FRAME_CHECK=1)
+add_executable(uc_log_log_stress_check stress/log_stress_check.cpp)
+target_link_libraries(uc_log_log_stress_check PRIVATE remote_fmt::parser fmt::fmt uc_log::uc_log enchantum::enchantum)
+target_add_default_build_options(uc_log_log_stress_check PRIVATE)

@@ -137,6 +137,14 @@ int main() {
     }
     CHECK(errorOf(ask(R"({"cmd":"flash"})")) == "no hex file", "a failed flash says why");
     {
+        auto const halted = ask(R"({"cmd":"halt"})");
+        CHECK(as<ctl::HaltAnswer>(halted) != nullptr && as<ctl::HaltAnswer>(halted)->halted,
+              "halt: halted after");
+        auto const running = ask(R"({"cmd":"go"})");
+        CHECK(as<ctl::GoAnswer>(running) != nullptr && !as<ctl::GoAnswer>(running)->halted,
+              "go: running after");
+    }
+    {
         uc_log::detail::ControlTarget const bare{};
         auto const                          answer = ctl::fromLine<ctl::Answer>(
           uc_log::detail::controlAnswerLine(R"({"cmd":"flash"})", bare));

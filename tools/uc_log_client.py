@@ -11,7 +11,7 @@ from pathlib import Path
 
 # ---- the printer's control socket -------------------------------------------------------------
 
-PROTOCOL = 1   # ControlProtocol.hpp ProtocolVersion
+PROTOCOL = 2   # ControlProtocol.hpp ProtocolVersion
 
 
 class ControlError(Exception):
@@ -118,6 +118,30 @@ def req_messages(count: int | None = None) -> dict:
 
 def req_read(pieces: list[tuple[int, int]]) -> dict:
     return {"cmd": "read", "pieces": [{"address": a, "size": n} for a, n in pieces]}
+
+
+def req_halt() -> dict:
+    """the core halted through the probe's own call (a DHCSR write is refused: it hangs the J-Link DLL)"""
+    return {"cmd": "halt"}
+
+
+def req_go() -> dict:
+    return {"cmd": "go"}
+
+
+REGISTER_NAMES = [f"r{i}" for i in range(
+    13)] + ["sp", "lr", "pc", "xpsr", "msp", "psp"]
+
+
+def req_write_registers(writes: list[tuple[int, int]]) -> dict:
+    """core registers (REGISTER_NAMES' indices) written through the probe's own calls, only while halted"""
+    return {"cmd": "write_registers", "writes": [{"index": i, "value": v} for i, v in writes]}
+
+
+def req_registers() -> dict:
+    """the core's registers through the probe's own calls, only while halted (req_halt first);
+    the answer's `values` in REGISTER_NAMES' order"""
+    return {"cmd": "registers"}
 
 
 def req_write(words: list[tuple[int, int]]) -> dict:

@@ -244,9 +244,32 @@ void destructorHandsOutTheRest() {
     CHECK(out.size() == 500, "shutdown: all 500 handed out");
     CHECK(perChannelIntact(out, count, "shutdown"), "shutdown: per channel in order");
 }
+
+// A reset between two sessions: the old boot's last lines (late target times) are still queued on channel 0 when the
+// new boot's first lines (times from 0) come on channel 1. flush() at the session start hands the old ones out
+// first; without it the merge puts the new boot in front of the old boot's tail.
+void flushAtSessionStart() {
+    for(bool const flushed : {false, true}) {
+        Harness h{200ms, 1000ms};
+        for(int i = 0; i != 5; ++i) { h.append({0, 600'000 + i, i}); }   // the old boot, 600 s in
+        if(flushed) { h.queue->flush(); }
+        for(int i = 0; i != 5; ++i) { h.append({1, 1 + i, i}); }   // the new boot
+        auto const out      = h.finish();
+        bool       oldFirst = out.size() == 10;
+        for(std::size_t i = 0; i < out.size(); ++i) {
+            oldFirst = oldFirst && (out[i].line.channel == 0) == (i < 5);
+        }
+        if(flushed) {
+            CHECK(oldFirst, "flush: the old session's lines come out before the new one's");
+        } else {
+            CHECK(!oldFirst, "without flush the new boot sorts first (what flush is for)");
+        }
+    }
+}
 }   // namespace
 
 int main() {
+    flushAtSessionStart();
     backlogBurst();
     randomReads();
     mergesByTime();

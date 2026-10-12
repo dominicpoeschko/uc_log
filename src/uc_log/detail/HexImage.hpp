@@ -140,4 +140,32 @@ ImageCheck compareImage(std::span<HexSegment const> segments,
     if(check.comparedBytes == 0) { check.error = "the image has nothing below the SRAM"; }
     return check;
 }
+
+/// The firmware check of a chip whose flash sits behind a cache: `flash` compares through the uncached alias
+/// (address + uncachedOffset), the verdict on what is in the flash; `cached` compares the view the cores fetch from,
+/// only when the flash matches and there is an alias (uncachedOffset != 0) - a difference there is a cache line that
+/// is not what the flash holds.
+struct FlashCheck {
+    ImageCheck flash{};
+    ImageCheck cached{};
+
+    [[nodiscard]] bool cacheDiffers() const {
+        return flash.result == ImageCheck::Result::match
+            && cached.result == ImageCheck::Result::different;
+    }
+};
+
+template<typename ReadF>
+FlashCheck checkFlash(std::span<HexSegment const> segments,
+                      ReadF&&                     read,
+                      std::uint32_t               uncachedOffset) {
+    FlashCheck check{};
+    check.flash = compareImage(segments, [&](std::uint32_t address, std::span<std::byte> out) {
+        return read(address + uncachedOffset, out);
+    });
+    if(check.flash.result == ImageCheck::Result::match && uncachedOffset != 0) {
+        check.cached = compareImage(segments, read);
+    }
+    return check;
+}
 }   // namespace uc_log::detail

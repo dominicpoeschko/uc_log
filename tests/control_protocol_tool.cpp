@@ -100,7 +100,9 @@ int main(int    argc,
         for(auto const& e : fx::streamEvents()) {
             std::visit(
               [&]<typename T>(T const& value) {
-                  if constexpr(!std::is_same_v<T, uc_log::control::BacklogEnd>) {
+                  if constexpr(!std::is_same_v<T, uc_log::control::BacklogEnd>
+                               && !std::is_same_v<T, uc_log::control::Dropped>)
+                  {
                       server.publish(value);
                   }
               },

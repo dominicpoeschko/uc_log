@@ -64,15 +64,9 @@ struct Reader {
     bool isFlashing() const { return false; }
 
     // the Health and Inspect tabs' target access: this demo has no target memory
-    struct MemoryAccess {
-        std::uint32_t                address{};
-        std::uint32_t                size{};
-        std::optional<std::uint32_t> write{};
-    };
-
     std::expected<std::vector<std::vector<std::byte>>,
                   std::string>
-    accessMemory(std::span<MemoryAccess const>,
+    accessTarget(std::span<uc_log::detail::TargetOp const>,
                  std::chrono::milliseconds) {
         return std::unexpected{std::string{"no target in the gui demo"}};
     }

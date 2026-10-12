@@ -66,8 +66,8 @@ inline std::optional<Fault> decodeFault(std::span<std::byte const> raw) {
 inline constexpr std::string_view PanicSymbol{"Kvasir::Panic::lastPanic"};
 inline constexpr std::uint32_t    PanicMagic = 0x9A41'C0DEU;
 
-/// Kvasir::Panic::Cause, in order (Panic.hpp's name()).
-inline constexpr std::array<std::string_view, 14> PanicCauses{"assertion",
+/// Kvasir::Panic::Cause, in order (Panic.hpp's name()); the SDK's tests/panic_cross_tests.cpp checks it.
+inline constexpr std::array<std::string_view, 15> PanicCauses{"assertion",
                                                               "abort",
                                                               "stack smash",
                                                               "division by zero",
@@ -80,7 +80,8 @@ inline constexpr std::array<std::string_view, 14> PanicCauses{"assertion",
                                                               "register wait timed out",
                                                               "boot loop",
                                                               "health check starved",
-                                                              "image CRC mismatch"};
+                                                              "image CRC mismatch",
+                                                              "clock restart failed"};
 
 struct Panic {
     std::uint32_t                count{};
