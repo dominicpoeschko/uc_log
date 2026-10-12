@@ -2,6 +2,7 @@
 
 #include "uc_log/detail/MapSymbols.hpp"
 #include "uc_log/detail/SymbolMatch.hpp"
+#include "uc_log/detail/TargetOp.hpp"
 #include "uc_log/detail/TargetRecords.hpp"
 
 #include <algorithm>
@@ -53,6 +54,9 @@ public:
         std::function<std::string()>          mapFile;
         std::function<void()>                 changed;   // something to redraw
         std::function<void(std::string_view)> note{};    // a line for the status log
+        // halt, registers, go: the reader's own ops (a DHCSR write behind the J-Link DLL's back
+        // hangs it, and the reader refuses one)
+        std::function<InspectorResult(std::span<TargetOp const>, std::chrono::milliseconds)> core{};
     };
 
     /// What the UI shows; kept up to date by the worker, copied out by snapshot().
@@ -341,7 +345,7 @@ public:
     }
 
     /// Make the core call Kvasir::Panic::raise(cause), as `kvasir_bench.py panic`: halt, R0 =
-    /// cause, xPSR without IT/ICI, PC = raise, run. On the worker; the outcome lands in
+    /// cause, xPSR without IT/ICI, PC = raise, run - through Hooks::core. On the worker; the outcome lands in
     /// Snapshot::panicRaise.
     void raisePanic(std::uint32_t cause) {
         panicCause_ = static_cast<std::int64_t>(cause);
@@ -420,41 +424,30 @@ public:
         return 0;
     }
 
-    /// The register transfers of raisePanic(), kvasir_bench.py's panic_register_writes. LR is
-    /// raise()'s return address, which the record keeps as the panic's place: set to "called
-    /// from where the core was halted" (`pc`), or the record names whatever LR happened to hold.
-    static std::vector<std::vector<std::pair<std::uint32_t,
-                                             std::uint32_t>>>
-    panicRegisterWrites(std::uint32_t raiseAddress,
-                        std::uint32_t cause,
-                        std::uint32_t xpsr,
-                        std::uint32_t pc) {
+    /// The register writes of raisePanic(), kvasir_bench.py's panic_register_writes (J-Link
+    /// register indices). LR is raise()'s return address, which the record keeps as the panic's
+    /// place: set to "called from where the core was halted" (`pc`), or the record names whatever
+    /// LR happened to hold. PC without bit 0: xPSR.T stays set.
+    static std::vector<target_op::WriteRegister> panicRegisterWrites(std::uint32_t raiseAddress,
+                                                                     std::uint32_t cause,
+                                                                     std::uint32_t xpsr,
+                                                                     std::uint32_t pc) {
         return {
-          {             {Dcrdr, cause},   {Dcrsr, RegWnR | RegR0}},
-          {    {Dcrdr, (pc + 2U) | 1U},   {Dcrsr, RegWnR | RegLr}},
-          { {Dcrdr, xpsr & ~EpsrItIci}, {Dcrsr, RegWnR | RegXpsr}},
-          {{Dcrdr, raiseAddress & ~1U},   {Dcrsr, RegWnR | RegPc}}
+          {  RegR0,              cause},
+          {  RegLr,     (pc + 2U) | 1U},
+          {RegXpsr,  xpsr & ~EpsrItIci},
+          {  RegPc, raiseAddress & ~1U}
         };
     }
 
     static constexpr std::string_view PanicRaise{"Kvasir::Panic::raise(Kvasir::Panic::Cause)"};
 
 private:
-    // Armv6-M/v7-M/v8-M debug registers (DDI0553B.y D1.2.33 DCRDR, D1.2.34 DCRSR, D1.2.39
-    // DHCSR; DDI0419E C1.6): a DCRSR write while the core is not halted is ignored.
-    static constexpr std::uint32_t Dhcsr    = 0xE000'EDF0U;
-    static constexpr std::uint32_t Dcrsr    = 0xE000'EDF4U;
-    static constexpr std::uint32_t Dcrdr    = 0xE000'EDF8U;
-    static constexpr std::uint32_t DbgKey   = 0xA05F'0000U;
-    static constexpr std::uint32_t CDebugEn = 1U << 0;
-    static constexpr std::uint32_t CHalt    = 1U << 1;
-    static constexpr std::uint32_t SRegRdy  = 1U << 16;
-    static constexpr std::uint32_t SHalt    = 1U << 17;
-    static constexpr std::uint32_t RegWnR   = 1U << 16;
-    static constexpr std::uint32_t RegR0    = 0;
-    static constexpr std::uint32_t RegLr    = 14;
-    static constexpr std::uint32_t RegPc    = 15;
-    static constexpr std::uint32_t RegXpsr  = 16;
+    // J-Link register indices, the order of target_op::ReadRegisters
+    static constexpr std::uint32_t RegR0   = 0;
+    static constexpr std::uint32_t RegLr   = 14;
+    static constexpr std::uint32_t RegPc   = 15;
+    static constexpr std::uint32_t RegXpsr = 16;
     // EPSR.IT/ICI, xPSR[26:25] and [15:10] (B3.5, rule RQLRN)
     static constexpr std::uint32_t EpsrItIci = (0b11U << 25) | (0x3FU << 10);
     // DEMCR.TRCENA (bit 24) turns the DWT on; DWT_PCSR (D1.2.68 / TRM 100230 C3.2)
@@ -898,58 +891,39 @@ private:
             done("Kvasir::Panic::raise is not in the map: a firmware without Kvasir::Panic?");
             return;
         }
-        std::string error;
-        auto const  resume  = [&] { writeWord(Dhcsr, DbgKey | CDebugEn, error); };
-        auto const  waitFor = [&](std::uint32_t bit) {
-            auto const end = Clock::now() + std::chrono::seconds{1};
-            while(Clock::now() < end) {
-                auto const v = readWord(Dhcsr, error);
-                if(!v) { return false; }
-                if((*v & bit) != 0) { return true; }
-            }
-            return false;
+        if(!hooks_.core) {
+            done("this printer cannot halt the core");
+            return;
+        }
+        auto const drive = [&](std::vector<TargetOp> const& ops) {
+            return hooks_.core(ops, std::chrono::milliseconds{2000});
         };
-        if(!writeWord(Dhcsr, DbgKey | CDebugEn | CHalt, error) || !waitFor(SHalt)) {
+        auto const resume = [&] { static_cast<void>(drive({target_op::Go{}})); };
+        auto const halted = drive({target_op::Halt{}});
+        if(!halted || halted->front().empty() || halted->front()[0] != std::byte{1}) {
             resume();
-            done("the core did not halt (DHCSR.S_HALT) " + error);
+            done("the core did not halt" + (halted ? std::string{} : ": " + halted.error()));
             return;
         }
-        // a DCRSR write while the core runs is ignored: S_HALT first (D1.2.34)
-        if(!writeWord(Dcrsr, RegXpsr, error) || !waitFor(SRegRdy)) {
+        auto const regs = drive({target_op::ReadRegisters{}});
+        if(!regs || regs->front().size() < (RegXpsr + 1U) * 4U) {
             resume();
-            done("the core did not hand out xPSR (DHCSR.S_REGRDY) " + error);
+            done("reading the registers" + (regs ? std::string{} : ": " + regs.error()));
             return;
         }
-        auto const xpsr = readWord(Dcrdr, error);
-        if(!xpsr) {
-            resume();
-            done("reading xPSR: " + error);
-            return;
+        auto const&           words = regs->front();
+        std::vector<TargetOp> writes;
+        for(auto const& w : panicRegisterWrites(*raise,
+                                                cause,
+                                                records::word(words, RegXpsr * 4U),
+                                                records::word(words, RegPc * 4U)))
+        {
+            writes.emplace_back(w);
         }
-        if(!writeWord(Dcrsr, RegPc, error) || !waitFor(SRegRdy)) {
+        if(auto const written = drive(writes); !written) {
             resume();
-            done("the core did not hand out the PC (DHCSR.S_REGRDY) " + error);
+            done("register write: " + written.error());
             return;
-        }
-        auto const pc = readWord(Dcrdr, error);
-        if(!pc) {
-            resume();
-            done("reading the PC: " + error);
-            return;
-        }
-        for(auto const& step : panicRegisterWrites(*raise, cause, *xpsr, *pc)) {
-            for(auto const& [address, value] : step) {
-                if(!writeWord(address, value, error)) {
-                    resume();
-                    done("register write: " + error);
-                    return;
-                }
-            }
-            if(!waitFor(SRegRdy)) {
-                resume();
-                done("the core did not take a register write (DHCSR.S_REGRDY)");
-                return;
-            }
         }
         resume();
         done("raise("

@@ -2,6 +2,7 @@
 // against a fake target - what kvasir_bench.py crash/ub/stack/trace/peek/profile/panic read.
 #include "uc_log/detail/MapSymbols.hpp"
 #include "uc_log/detail/TargetInspector.hpp"
+#include "uc_log/detail/TargetOp.hpp"
 #include "uc_log/detail/TargetRecords.hpp"
 
 #include <atomic>
@@ -144,11 +145,11 @@ static void recordTests() {
           "ring layout");
 }
 
-// A target of words; DHCSR/DCRSR behave enough for raisePanic().
+// A target of words; halt, go and the registers through core(), DHCSR refused as the reader does.
 struct FakeTarget {
     std::mutex                             mutex;
     std::map<std::uint32_t, std::byte>     bytes;
-    std::map<std::uint32_t, std::uint32_t> regs;   // DCRSR register file
+    std::map<std::uint32_t, std::uint32_t> regs;   // J-Link register indices
     bool                                   halted{};
     std::uint32_t                          pcsr{0x100001f0U};
     std::atomic<int>                       calls{0};
@@ -187,26 +188,42 @@ struct FakeTarget {
         for(auto const& a : accesses) {
             if(a.write) {
                 if(a.address == 0xE000EDF0U) {
-                    halted = (*a.write & 2U) != 0;
-                } else if(a.address == 0xE000EDF4U) {
-                    auto const reg = *a.write & 0x7FU;
-                    if(*a.write & (1U << 16)) {
-                        if(halted) { regs[reg] = word(0xE000EDF8U); }
-                    } else {
-                        setWord(0xE000EDF8U, regs[reg]);
-                    }
-                } else {
-                    if((a.address >> 28) == 2U) { ++ramWrites; }
-                    setWord(a.address, *a.write);
+                    return std::unexpected{std::string{"DHCSR is the probe's"}};
                 }
-            }
-            if(a.address == 0xE000EDF0U) {
-                setWord(a.address, (halted ? (1U << 17) : 0U) | (1U << 16));
+                if((a.address >> 28) == 2U) { ++ramWrites; }
+                setWord(a.address, *a.write);
             }
             if(a.address == 0xE000101CU) { setWord(a.address, halted ? 0xFFFFFFFFU : pcsr); }
             std::vector<std::byte> d;
             auto const             n = a.write ? 4U : a.size;
             for(std::uint32_t i = 0; i != n; ++i) { d.push_back(bytes[a.address + i]); }
+            out.push_back(std::move(d));
+        }
+        return out;
+    }
+
+    InspectorResult core(std::span<TargetOp const> ops) {
+        namespace to = uc_log::detail::target_op;
+        std::lock_guard<std::mutex> const   lock{mutex};
+        std::vector<std::vector<std::byte>> out;
+        for(auto const& op : ops) {
+            std::vector<std::byte> d;
+            if(std::holds_alternative<to::Halt>(op) || std::holds_alternative<to::Go>(op)) {
+                halted = std::holds_alternative<to::Halt>(op);
+                d.push_back(std::byte{halted ? std::uint8_t{1} : std::uint8_t{0}});
+            } else if(!halted) {
+                return std::unexpected{std::string{"the core runs: halt it first"}};
+            } else if(std::holds_alternative<to::ReadRegisters>(op)) {
+                for(std::uint32_t r = 0; r != 19; ++r) {
+                    for(std::uint32_t i = 0; i != 4; ++i) {
+                        d.push_back(static_cast<std::byte>(regs[r] >> (8 * i)));
+                    }
+                }
+            } else if(auto const* w = std::get_if<to::WriteRegister>(&op)) {
+                regs[w->index] = w->value;
+            } else {
+                return std::unexpected{std::string{"not a core op"}};
+            }
             out.push_back(std::move(d));
         }
         return out;
@@ -307,7 +324,8 @@ static void inspectorTests() {
                                [&](std::string_view line) {
                                    std::lock_guard<std::mutex> const lock{notesMutex};
                                    notes.emplace_back(line);
-                               }}
+                               }, .core = [&](std::span<TargetOp const> ops,
+                             std::chrono::milliseconds) { return target.core(ops); }}
     };
 
     CHECK(eventually([&] {

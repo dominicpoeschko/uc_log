@@ -546,6 +546,7 @@ private:
             if(std::holds_alternative<to::Go>(op) && wasHalted) {
                 jlink.go();
                 haltRequested_ = false;
+                resumed_       = true;
             }
             halted_ = jlink.isHalted();
             return std::vector<std::byte>(1U,
@@ -1331,7 +1332,10 @@ private:
 
     // A halt a client asked for is no crash: said as a tool message, so a wait for a log line beside it (kvasir_bench
     // wait-for ends on "core halted") does not fail. Any other halt is captured (the fault handler's bkpt).
+    // A go from a request ran the core even when it halts again before the next pass (a raised panic's bkpt is
+    // microseconds away): that halt is a new one.
     void noteHalt(Session& s) {
+        if(std::exchange(resumed_, false)) { s.wasHalted = false; }
         bool const halted = halted_;
         if(halted) {
             s.lastHaltDetected = Clock::now();
@@ -1640,6 +1644,7 @@ private:
     std::function<void()> bootCountRestartCallback_;   // unreadBootsMutex_
     std::atomic<bool>     halted_{false};
     bool              haltRequested_{false};   // reader thread: the halt came from a halt request
+    bool              resumed_{false};   // reader thread: a go request ran the core since noteHalt
     std::atomic<bool> pausedForReset_{false};
     // guarded by connectionMutex; empty or nullopt: the image has no announced-reset block
     std::function<std::optional<std::uint32_t>()> announcedResetAddressCallback;

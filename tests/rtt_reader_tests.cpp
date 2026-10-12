@@ -96,6 +96,7 @@ struct FakeTransport {
         JLink::RamImageStart lastRamStart{};   // guarded by mutex
         std::atomic<int>     haltPolls{0};
         std::atomic<int>     goCalls{0};
+        std::atomic<bool>    haltsOnGo{false};   // go() runs into a bkpt at once (a raised panic)
         std::atomic<bool>    stackUnreadable{false};    // reads near sp throw
         std::atomic<bool>    holdSessionStart{false};   // startRtt waits while set
         std::atomic<bool> coreWasReset{false};   // DHCSR.S_RESET_ST: set by a reset, read clears it
@@ -304,7 +305,7 @@ struct FakeTransport {
         if(shared->resetSinceGo.exchange(false) && !shared->wedgeOutlivesBoot) {
             shared->wedged = false;
         }
-        shared->halted = false;
+        shared->halted = shared->haltsOnGo.load();
     }
 
     void halt() {
@@ -801,6 +802,19 @@ int main() {
               "no session restart");
         shared.halted          = false;
         shared.stackUnreadable = false;
+        CHECK(polled(2), "the reader saw the core run again");
+
+        // halt request, then go into an immediate bkpt (the TUI's and kvasir_bench's panic): a new halt, captured
+        namespace to = uc_log::detail::target_op;
+        std::array<uc_log::detail::TargetOp, 1> const halt{to::Halt{}};
+        std::array<uc_log::detail::TargetOp, 1> const go{to::Go{}};
+        CHECK(reader.accessTarget(halt, 2000ms).has_value() && polled(3), "halted by a request");
+        shared.haltsOnGo = true;
+        auto const ran   = reader.accessTarget(go, 2000ms);
+        CHECK(ran && waitFor([&]() { return haltEntries().size() == 3; }, 3000ms),
+              "a halt right after a requested go is captured");
+        shared.haltsOnGo = false;
+        shared.halted    = false;
         CHECK(polled(2), "the reader saw the core run again");
     }
 

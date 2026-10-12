@@ -4224,7 +4224,12 @@ namespace uc_log { namespace FTXUIGui {
                   .sessions = [&rttReader] { return rttReader.sessionCount(); },
                   .mapFile  = [this] { return mapFilePath; },
                   .changed  = [this] { requestRedrawFromAnywhere(); },
-                  .note     = [this](std::string_view msg) { statusMessage(msg); }});
+                  .note     = [this](std::string_view msg) { statusMessage(msg); },
+                  .core =
+                    [&rttReader](std::span<uc_log::detail::TargetOp const> ops,
+                                 std::chrono::milliseconds                 timeout) {
+                        return rttReader.accessTarget(ops, timeout);
+                    }});
                 std::lock_guard<std::mutex> const lock{inspectorMutex};
                 inspector = std::move(created);
             }
