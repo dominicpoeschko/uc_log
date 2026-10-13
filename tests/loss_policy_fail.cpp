@@ -24,6 +24,6 @@ using Backend = uc_log::DefaultRttComBackend<uc_log::AlwaysAttached,
                                              uc_log::IsrPolicy::SingleLevel<>,
                                              Loss>;
 
-[[maybe_unused]] Backend const* backend = nullptr;
+[[maybe_unused]] static Backend const* backend = nullptr;
 
 int main() {}

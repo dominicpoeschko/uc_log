@@ -25,6 +25,12 @@ static int failures = 0;
         }                                                       \
     } while(0)
 
+// fmt's locale and unicode settings must match the compiled fmt library (see uc_log's CMakeLists.txt)
+static_assert(FMT_USE_LOCALE == 1,
+              "FMT_USE_LOCALE must match the compiled fmt library");
+static_assert(FMT_UNICODE == 1,
+              "FMT_UNICODE must match the compiled fmt library");
+
 static constexpr std::byte Start{0x55};
 static constexpr std::byte End{0xAA};
 
@@ -61,6 +67,9 @@ static bool drain(RttChannel& ch,
 }
 
 int main() {
+    // 0: a locale-specific spec formats (the decode path of a replacement field such as {:LF})
+    CHECK(fmt::format(fmt::runtime("{:LF}"), 1.5) == "1.500000", "a {:L} spec formats");
+
     // 1: single frame decodes, buffer fully consumed
     {
         RttChannel ch;

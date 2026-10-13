@@ -485,7 +485,8 @@ std::optional<PrinterOptions> parseOptions(int    argc,
       "arrive again.\n"
       "  Default: the printer's reader (every byte once, every loss announced). Ring sizes and "
       "rates: uc_log README,\n"
-      "  \"RTT throughput, ring sizes\".");
+      "  \"RTT throughput, ring sizes\".\n"
+      "UC_LOG_STALL_FIRST_STEP=2|3 (a test switch) starts the stall recovery ladder at that step.");
     options.add_options()(
       "transport",
       "control server and duplex channels: 'unix' (control.sock, duplex.<n>.sock in the log "
@@ -911,6 +912,10 @@ uc_log::detail::ControlTarget controlTarget(JLinkRttReader& rttReader,
         [&rttReader](std::function<bool()> const& cancelled) {
             return rttReader.resetAndWait(std::chrono::seconds{20}, cancelled);
         },
+      .resetLine =
+        [&rttReader](std::function<bool()> const& cancelled) {
+            return rttReader.resetAndWait(std::chrono::seconds{20}, cancelled, true);
+        },
       .flash =
         [&rttReader](std::function<bool()> const& cancelled) {
             return rttReader.flashAndWait(std::chrono::seconds{90}, cancelled);
@@ -1135,6 +1140,18 @@ int main(int    argc,
           "UC_LOG_RTT_VIA_DLL=1: RTT through the J-Link DLL (max throughput; a stop or reset can "
           "drop "
           "or repeat lines without a message)");
+    }
+    // UC_LOG_STALL_FIRST_STEP=2|3: a test switch - a stall starts the recovery ladder at that step (2: SYSRESETREQ in the
+    // session, 3: the reset line), so the later steps can be checked on a board without a stall that outlasts step 1
+    if(auto const* step = std::getenv("UC_LOG_STALL_FIRST_STEP");
+       step != nullptr && (std::string_view{step} == "2" || std::string_view{step} == "3"))
+    {
+        rttReader.setStallFirstStep(step[0] - '0');
+        gui.toolStatusMessage(
+          fmt::format("UC_LOG_STALL_FIRST_STEP={}: a stall starts the recovery ladder at step {} "
+                      "(a test switch)",
+                      step,
+                      step));
     }
     // the image's own word on its frames (the session's catalog, loaded just before)
     rttReader.setFrameCheckSource([&catalog, &gui] {

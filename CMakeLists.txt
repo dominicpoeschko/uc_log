@@ -151,6 +151,17 @@ if(UC_LOG_BUILD_PRINTER)
             12.2.0
             GIT_BRANCH
             master)
+        # FMT_USE_LOCALE / FMT_UNICODE as the compiled fmt library has them, in every host translation unit:
+        # string_constant.hpp defaults both to 0 (targets have no locale), which makes fmt::locale_ref an empty class
+        # here but a pointer in the library - an ODR violation, and a "{:L...}" spec reads a garbage locale pointer.
+        if(TARGET fmt)
+            target_compile_definitions(fmt PUBLIC FMT_USE_LOCALE=1 FMT_UNICODE=1)
+        elseif(TARGET fmt::fmt)
+            set_property(
+                TARGET fmt::fmt
+                APPEND
+                PROPERTY INTERFACE_COMPILE_DEFINITIONS FMT_USE_LOCALE=1 FMT_UNICODE=1)
+        endif()
 
         find_or_fetch_package(
             cxxopts

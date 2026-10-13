@@ -54,6 +54,7 @@ BUILT = {
     "wait_too_wide": kb.req_wait(0x20000000, 9, "changed", 10),
     "wait_too_long": kb.req_wait(0x20000000, 4, "changed", 600001),
     "reset": kb.req_reset(),
+    "reset_line": kb.req_reset(line=True),
     "halt": kb.req_halt(),
     "go": kb.req_go(),
     "registers": kb.req_registers(),

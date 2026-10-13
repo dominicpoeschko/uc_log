@@ -5,8 +5,10 @@
 #include "remote_fmt/catalog_helpers.hpp"
 #include "remote_fmt/parser.hpp"
 #include "uc_log/AlwaysAttached.hpp"
+#include "uc_log/ChannelRouter.hpp"
 #include "uc_log/DefaultRttComBackend.hpp"
 #include "uc_log/FanOutBackend.hpp"
+#include "uc_log/MultiChannelRttComBackend.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 #include "uc_log/uc_log.hpp"
 
@@ -332,6 +334,186 @@ void lossPendingWhileTheOtherCoreLogs() {
     }
 }
 
+// A sink that takes the record's level, as an RTT backend that routes levels to channels does, or a queue that only
+// takes warn and up: what it saw per level, and a pending loss per level (one ring per level).
+using uc_log::LogLevel;
+constexpr std::size_t Levels = static_cast<std::size_t>(LogLevel::crit) + 1;
+
+struct LevelSink {
+    static inline std::array<int, Levels>           inits{};
+    static inline std::array<int, Levels>           writes{};
+    static inline std::array<int, Levels>           finals{};
+    static inline std::array<std::uint32_t, Levels> pending{};
+
+    struct Mark {
+        std::uint32_t pending;
+        LogLevel      level;
+    };
+
+    template<LogLevel L>
+    static void initTransfer() {
+        ++inits[static_cast<std::size_t>(L)];
+    }
+
+    template<LogLevel L>
+    static void write(std::span<std::byte const>) {
+        ++writes[static_cast<std::size_t>(L)];
+    }
+
+    template<LogLevel L>
+    static void finalizeTransfer() {
+        ++finals[static_cast<std::size_t>(L)];
+    }
+
+    template<LogLevel L>
+    static Mark lossMark() {
+        return {pending[static_cast<std::size_t>(L)], L};
+    }
+
+    static void lossSettle(Mark const m) { pending[static_cast<std::size_t>(m.level)] = 0; }
+
+    static void reset() {
+        inits   = {};
+        writes  = {};
+        finals  = {};
+        pending = {};
+    }
+};
+
+using LevelFan = uc_log::FanOutBackendWith<FakeContexts, LevelSink, Other>;
+
+static_assert(!Fan::levelAware && !uc_log::detail::LevelAware<Fan>,
+              "level-blind sinks: one record path for every level");
+static_assert(LevelFan::levelAware && uc_log::detail::LevelAware<LevelFan>,
+              "a sink that takes the level makes the fan-out take it");
+static_assert(uc_log::FanOutBackendWith<FakeContexts,
+                                        Other,
+                                        LevelSink>::levelAware,
+              "also when it is not the primary");
+
+template<typename B>
+concept HasLevelLossMark = requires { B::template lossMark<LogLevel::warn>(); };
+static_assert(HasLevelLossMark<LevelFan> && !HasLossMark<LevelFan>,
+              "the primary's per-level lossMark, per level");
+static_assert(!HasLevelLossMark<uc_log::FanOutBackendWith<FakeContexts,
+                                                          Other,
+                                                          LevelSink>>,
+              "another sink's losses are not the fan-out's");
+
+// The record's level reaches the sink that takes it; the level-blind sink beside it gets every record whole.
+void levelReachesTheSinkThatTakesIt() {
+    resetAll();
+    LevelSink::reset();
+    std::array<std::byte, 3> const bytes{};
+    LevelFan::initTransfer<LogLevel::info>();
+    LevelFan::write<LogLevel::info>(bytes);
+    LevelFan::write<LogLevel::info>(bytes);
+    LevelFan::finalizeTransfer<LogLevel::info>();
+    LevelFan::initTransfer<LogLevel::error>();
+    LevelFan::write<LogLevel::error>(bytes);
+    LevelFan::finalizeTransfer<LogLevel::error>();
+    auto const at = [](auto const& a, LogLevel l) { return a[static_cast<std::size_t>(l)]; };
+    CHECK(at(LevelSink::inits, LogLevel::info) == 1 && at(LevelSink::writes, LogLevel::info) == 2
+            && at(LevelSink::finals, LogLevel::info) == 1,
+          "info: one record of two writes, at info");
+    CHECK(at(LevelSink::inits, LogLevel::error) == 1 && at(LevelSink::writes, LogLevel::error) == 1
+            && at(LevelSink::finals, LogLevel::error) == 1,
+          "error: one record, at error");
+    CHECK(at(LevelSink::writes, LogLevel::warn) == 0, "nothing at another level");
+    CHECK(Other::records().size() == 2 && Other::records()[0].size() == 6
+            && Other::records()[1].size() == 3,
+          "the level-blind sink: both records, whole");
+}
+
+// A pending loss on the primary's warn ring: that record goes to the primary alone until it is settled, and a mark
+// at another level (another ring) routes nothing.
+void levelLossMarkRoutesThePrimaryOnly() {
+    resetAll();
+    LevelSink::reset();
+    LevelSink::pending[static_cast<std::size_t>(LogLevel::warn)] = 2;
+    std::array<std::byte, 4> const bytes{};
+    auto const                     quiet = LevelFan::lossMark<LogLevel::info>();
+    CHECK(quiet.pending == 0 && !Fan::primaryOnly[slotNow()], "info ring: nothing pending");
+    LevelFan::lossSettle(quiet);
+    auto const mark = LevelFan::lossMark<LogLevel::warn>();
+    CHECK(mark.pending == 2 && LevelFan::primaryOnly[slotNow()], "warn ring: the lost line");
+    LevelFan::initTransfer<LogLevel::warn>();
+    LevelFan::write<LogLevel::warn>(bytes);
+    LevelFan::finalizeTransfer<LogLevel::warn>();
+    CHECK(Other::records().empty(), "the lost line stays in the primary");
+    LevelFan::lossSettle(mark);
+    CHECK(!LevelFan::primaryOnly[slotNow()]
+            && LevelSink::pending[static_cast<std::size_t>(LogLevel::warn)] == 0,
+          "settled");
+    LevelFan::initTransfer<LogLevel::warn>();
+    LevelFan::write<LogLevel::warn>(bytes);
+    LevelFan::finalizeTransfer<LogLevel::warn>();
+    CHECK(Other::records().size() == 1, "the record after it reaches the other sink");
+}
+
+// Startup's ISR contract (IsrPolicy.hpp): the one sink that declares it hands it on.
+struct SingleContract {
+    static constexpr bool               singleIsrPriorityLevel = true;
+    static constexpr std::array<int, 1> silentIsrPriorityLevels{0};
+
+    [[maybe_unused]] static void write(std::span<std::byte const>) {}
+};
+
+struct LevelsContract {
+    static constexpr std::array<int, 2> isrPriorityLevels{1, 3};
+    static constexpr std::array<int, 0> silentIsrPriorityLevels{};
+
+    [[maybe_unused]] static void write(std::span<std::byte const>) {}
+};
+
+template<typename B>
+concept HasSingleContract = requires { B::singleIsrPriorityLevel; };
+template<typename B>
+concept HasLevelsContract = requires { B::isrPriorityLevels; };
+
+static_assert(!HasSingleContract<Fan> && !HasLevelsContract<Fan>,
+              "no sink declares one: none");
+static_assert(uc_log::FanOutBackendWith<FakeContexts,
+                                        NoCount,
+                                        SingleContract>::singleIsrPriorityLevel
+                && uc_log::FanOutBackendWith<FakeContexts,
+                                             NoCount,
+                                             SingleContract>::silentIsrPriorityLevels[0]
+                     == 0,
+              "single level, from another sink");
+static_assert(uc_log::FanOutBackendWith<FakeContexts,
+                                        LevelsContract,
+                                        Other>::isrPriorityLevels[1]
+                  == 3
+                && !HasSingleContract<uc_log::FanOutBackendWith<FakeContexts,
+                                                                LevelsContract,
+                                                                Other>>,
+              "served levels, from the primary");
+
+// the real things: the RTT backends' contracts and levels through a fan-out
+using RouterRtt = uc_log::MultiChannelRttComBackend<
+  uc_log::AlwaysAttached,
+  uc_log::LevelSplitRouter<LogLevel::warn, LogLevel::error, LogLevel::crit>,
+  rtt::BufferMode::skip,
+  uc_log::ChannelSizes<64, 64, 64, 64>>;
+static_assert(uc_log::FanOutBackendWith<FakeContexts,
+                                        RouterRtt,
+                                        Other>::levelAware,
+              "a level-routing RTT backend: the fan-out takes the level");
+static_assert(uc_log::FanOutBackendWith<FakeContexts,
+                                        RouterRtt,
+                                        Other>::singleIsrPriorityLevel,
+              "and hands on its SingleLevel contract");
+static_assert(uc_log::FanOutBackendWith<FakeContexts,
+                                        uc_log::DefaultRttComBackend<uc_log::AlwaysAttached,
+                                                                     64>,
+                                        Other>::singleIsrPriorityLevel
+                && !uc_log::FanOutBackendWith<FakeContexts,
+                                              uc_log::DefaultRttComBackend<uc_log::AlwaysAttached,
+                                                                           64>,
+                                              Other>::levelAware,
+              "a level-blind RTT backend: its contract, no level");
+
 }   // namespace
 
 int main() {
@@ -340,6 +522,8 @@ int main() {
     lossPendingAcrossAContextSwitch();
     lossPendingWhileTheOtherCoreLogs();
     preMemoryInitReachesEverySink();
+    levelReachesTheSinkThatTakesIt();
+    levelLossMarkRoutesThePrimaryOnly();
     if(failures != 0) {
         std::printf("%d FAILURE(S)\n", failures);
         return 1;

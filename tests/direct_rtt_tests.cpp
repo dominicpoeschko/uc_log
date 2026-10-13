@@ -649,9 +649,105 @@ void controlBlockLayout() {
     CHECK(rb::View{std::span{raw}.first(24 + 23)}.descriptorsRead() == 0,
           "a cut descriptor is not read");
 }
+
+// Every place the ring's end can fall: each start offset of the 97-byte ring x each record length 1..96 x read chunks
+// of 1, 7, 40, 96 and 97 bytes x both caps x two writer habits (fill the ring, then read it in passes; one record a
+// pass). Deterministic, one thread: the bytes of every record the target took arrive once, in order, the read offset
+// ends where the reads did, and a ring the printer emptied always takes the next record.
+void wrapSweep() {
+    constexpr std::array<std::size_t, 5> Chunks{1, 7, 40, 96, 97};
+    std::size_t                          cases = 0, bad = 0;
+    for(std::uint32_t start = 0; start != Target::UpSize; ++start) {
+        for(std::uint32_t len = 1; len != Target::UpSize; ++len) {
+            for(auto const chunkSize : Chunks) {
+                for(auto const cap : {Rtt::Cap::halfWhenShared, Rtt::Cap::none}) {
+                    for(int habit = 0; habit != 2; ++habit) {
+                        Target       target;
+                        SimTransport bus{target};
+                        target.put(Target::UpDesc + 12, start);
+                        target.put(Target::UpDesc + 16, start);
+                        auto rtt = Rtt::open(bus, Target::Base, 2);
+                        if(!rtt) {
+                            ++bad;
+                            continue;
+                        }
+                        // records whose bytes count on from 0; 3 ring laps of them
+                        std::uint32_t const    total = 3 * Target::UpSize;
+                        std::uint32_t          next = 0, got = 0, wrong = 0;
+                        std::vector<std::byte> chunk(chunkSize);
+                        bool                   refusedWhileEmpty = false;
+                        std::uint32_t          passes            = 0;
+                        auto const             produceOne        = [&]() {
+                            std::vector<std::uint8_t> rec(len);
+                            for(std::uint32_t i = 0; i != len; ++i) {
+                                rec[i] = static_cast<std::uint8_t>(next + i);
+                            }
+                            bool const empty
+                              = target.get(Target::UpDesc + 12) == target.get(Target::UpDesc + 16);
+                            if(target.produce(rec)) {
+                                next += len;
+                                return true;
+                            }
+                            refusedWhileEmpty = refusedWhileEmpty || empty;
+                            return false;
+                        };
+                        auto const readPass = [&]() {
+                            std::array<std::span<std::byte>, 1> const outs{std::span{chunk}};
+                            auto const data = rtt->readAll(bus, outs, cap)[0];
+                            for(auto const b : data) {
+                                if(std::to_integer<std::uint8_t>(b)
+                                   != static_cast<std::uint8_t>(got))
+                                {
+                                    ++wrong;
+                                }
+                                ++got;
+                            }
+                            ++passes;
+                            return data.size();
+                        };
+                        while(next < total && passes < 10 * total) {
+                            if(habit == 0) {
+                                while(next < total && produceOne()) {}
+                                while(readPass() != 0) {}
+                            } else {
+                                produceOne();
+                                readPass();
+                            }
+                        }
+                        while(readPass() != 0) {}
+                        ++cases;
+                        auto const wr = target.get(Target::UpDesc + 12);
+                        auto const rd = target.get(Target::UpDesc + 16);
+                        bool const ok = wrong == 0 && got == next && next >= total && rd == wr
+                                     && rd == (start + next) % Target::UpSize && !refusedWhileEmpty;
+                        if(!ok && bad++ < 3) {
+                            std::printf(
+                              "  wrap: start %u len %u chunk %zu cap %d habit %d: got %u of %u, "
+                              "wrong %u, rd %u wr %u, refused while empty %d\n",
+                              start,
+                              len,
+                              chunkSize,
+                              cap == Rtt::Cap::none ? 1 : 0,
+                              habit,
+                              got,
+                              next,
+                              wrong,
+                              rd,
+                              wr,
+                              refusedWhileEmpty ? 1 : 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    CHECK(bad == 0, "wrap sweep: every byte once, in order, the read offset where the reads ended");
+    std::printf("wrap sweep: %zu cases\n", cases);
+}
 }   // namespace
 
 int main() {
+    wrapSweep();
     controlBlockLayout();
     reinitInsideAnAccess();
     reinitBetweenPasses();

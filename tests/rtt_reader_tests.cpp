@@ -108,8 +108,11 @@ struct FakeTransport {
         std::atomic<bool> blockGone{false};   // no RTT id at the block address (a boot ROM runs)
         std::atomic<int>  slowWriteMs{0};     // a writeWord takes this long (a busy probe)
         // the DLL holds data the printer has not fetched yet: rttRead hands it out only after stopRtt
-        std::atomic<bool>               holdUntilRttStop{false};
-        std::function<void()>           onReset;
+        std::atomic<bool>     holdUntilRttStop{false};
+        std::function<void()> onReset;
+        // after every word the printer writes into RAM, with mutex held (a target that refills its ring at once:
+        // a flood that does not depend on a thread getting the CPU)
+        std::function<void()>           afterRamWrite;                 // guarded by mutex
         std::vector<JLink::MemoryWrite> preResetAtLastReset;           // guarded by mutex
         std::vector<std::pair<std::uint32_t, std::uint32_t>> writes;   // guarded by mutex
         // the RTT control block at 0x20000100 with one buffer, as words (id, counts, descriptor);
@@ -350,6 +353,7 @@ struct FakeTransport {
         std::lock_guard<std::mutex> const lock{shared->mutex};
         if(shared->inRam(address, 4)) {
             shared->putRam(address, value);
+            if(shared->afterRamWrite) { shared->afterRamWrite(); }
             return;
         }
         shared->writes.emplace_back(address, value);
@@ -848,6 +852,16 @@ int main() {
         CHECK(during.has_value() && shared.resets.load() > resetsBefore,
               "resetAndWait during a session start waits for its reset");
         CHECK(reader.sessionCount() > sessionAtReset.load(), "and for a session begun after it");
+
+        // through the reset line ("reset" with "line": true): that one reset by J-Link reset type 2 (the fake counts
+        // it), the next ordinary reset by the configured type again
+        auto const lineBefore = shared.resetLineResets.load();
+        auto const viaLine    = reader.resetAndWait(5000ms, {}, true);
+        CHECK(viaLine.has_value() && shared.resetLineResets.load() == lineBefore + 1,
+              "resetAndWait through the reset line: a reset by the line");
+        auto const plain = reader.resetAndWait(5000ms);
+        CHECK(plain.has_value() && shared.resetLineResets.load() == lineBefore + 1,
+              "the reset after it is the ordinary one again");
         shared.onReset = nullptr;
         {
             std::lock_guard<std::mutex> const lock{shared.mutex};
@@ -1433,6 +1447,134 @@ int main() {
         }
     }
 
+    // The halt state under a flood: read every BusyHaltPoll, not every HaltPoll (each read is a probe round trip of a
+    // pass), yet a core that halts while another floods on is still seen before RttChannel's frame timeout (100 ms):
+    // a core halted mid-frame must not have its frame resynced away. Quiet again: back to the HaltPoll rate.
+    {
+        constexpr std::uint32_t        RingSize = 1024;
+        static constexpr std::uint32_t Block    = FakeTransport::Shared::RamBase;
+        constexpr std::uint32_t        Desc     = Block + 24;
+        constexpr std::uint32_t        Ring     = Block + 0x100;
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.ram.assign(0x800, std::byte{});
+            std::memcpy(shared.ram.data(), "SEGGER RTT", 10);
+            shared.putRam(Block + 16, 1);   // up buffers
+            shared.putRam(Block + 20, 0);   // down buffers
+            shared.putRam(Desc + 4, Ring);
+            shared.putRam(Desc + 8, RingSize);
+            shared.ramReadDelay = 1ms;
+            shared.halted       = false;
+        }
+        // the flood: the ring is refilled right after each read-offset write, so every pass finds bytes however
+        // loaded the machine is (a starved producer thread would leave passes empty, which poll at HaltPoll)
+        auto const refill = [&shared]() {   // with shared.mutex held
+            auto const frame = makeFrame(0);
+            for(;;) {
+                auto const wr   = shared.getRam(Desc + 12);
+                auto const rd   = shared.getRam(Desc + 16);
+                auto const free = rd > wr ? rd - wr - 1 : RingSize - 1 - (wr - rd);
+                if(free < frame.size()) { return; }
+                auto pos = wr;
+                for(auto const b : frame) {
+                    shared.ram[Ring - FakeTransport::Shared::RamBase + pos] = b;
+                    pos                                                     = (pos + 1) % RingSize;
+                }
+                shared.putRam(Desc + 12, pos);
+            }
+        };
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            refill();
+            shared.afterRamWrite = refill;
+        }
+        Collected busy;
+        auto      r = std::make_unique<BasicJLinkRttReader<FakeTransport>>(
+          "",
+          "fake",
+          4000,
+          "",
+          []() { return RttBlockInfo{Block, 1}; },
+          []() { return std::string{"fake.hex"}; },
+          []() {
+              return std::unordered_map<std::uint16_t, std::string>{
+                {0, "hello busy"}
+              };
+          },
+          [&busy](std::size_t, std::string_view msg, std::optional<remote_fmt::catalog_id>) {
+              std::lock_guard<std::mutex> const lock{busy.mutex};
+              busy.entries.emplace_back(msg);
+          },
+          [&busy](std::string_view msg) {
+              std::lock_guard<std::mutex> const lock{busy.mutex};
+              busy.messages.emplace_back(msg);
+          },
+          [&busy](std::string_view msg) {
+              std::lock_guard<std::mutex> const lock{busy.mutex};
+              busy.errors.emplace_back(msg);
+          },
+          [&busy](std::string_view msg) {
+              std::lock_guard<std::mutex> const lock{busy.mutex};
+              busy.tools.emplace_back(msg);
+          },
+          [](std::string_view) {});
+        auto const entries = [&]() {
+            std::lock_guard<std::mutex> const lock{busy.mutex};
+            return busy.entries.size();
+        };
+        // the halt polls within `span`
+        auto const pollsIn = [&](std::chrono::milliseconds span) {
+            auto const from = shared.haltPolls.load();
+            std::this_thread::sleep_for(span);
+            return shared.haltPolls.load() - from;
+        };
+        CHECK(waitFor([&]() { return entries() > 200; }, 5000ms),
+              "busy: the reader decodes the flood");
+        auto const busyPolls = pollsIn(1000ms);
+        CHECK(busyPolls >= 5 && busyPolls <= 25,
+              "busy: the halt state every ~50 ms, not every pass");
+        if(busyPolls < 5 || busyPolls > 25) {
+            std::printf("  halt polls in 1 s of flood: %d\n", busyPolls);
+        }
+        // a core halts while the flood goes on (core 1 beside a core 0 on its breakpoint); the worst of 5 halts
+        auto const halts = [&]() {
+            std::lock_guard<std::mutex> const lock{busy.mutex};
+            return std::count_if(busy.errors.begin(), busy.errors.end(), [](std::string const& e) {
+                return e.find("core halted") != std::string::npos;
+            });
+        };
+        std::chrono::steady_clock::duration worst{};
+        for(int i = 0; i != 5; ++i) {
+            auto const before = halts();
+            auto const t0     = std::chrono::steady_clock::now();
+            shared.halted     = true;
+            CHECK(waitFor([&]() { return halts() > before; }, 3000ms),
+                  "busy: a halt under a flood is captured");
+            worst         = std::max(worst, std::chrono::steady_clock::now() - t0);
+            shared.halted = false;
+            std::this_thread::sleep_for(120ms);   // seen running again, busy polling again
+        }
+        CHECK(worst < uc_log::detail::RttChannel::FrameTimeout,
+              "busy: every halt is seen before a stuck frame times out");
+        if(worst >= uc_log::detail::RttChannel::FrameTimeout) {
+            std::printf("  a halt seen only after %lld ms\n",
+                        static_cast<long long>(
+                          std::chrono::duration_cast<std::chrono::milliseconds>(worst).count()));
+        }
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.afterRamWrite = nullptr;
+        }
+        std::this_thread::sleep_for(200ms);   // the ring read empty
+        // ~90 a second at HaltPoll on an idle machine; at BusyHaltPoll it could not pass 21
+        auto const quietPolls = pollsIn(1000ms);
+        CHECK(quietPolls >= 30, "quiet: the halt state every ~10 ms again");
+        if(quietPolls < 30) { std::printf("  halt polls in 1 s quiet: %d\n", quietPolls); }
+        r.reset();
+        CHECK(!busy.anyErrorContains("corrupted") && !busy.anyErrorContains("resync"),
+              "busy: no damaged frame");
+    }
+
     // A quiet target whose chip package can tell a stall from one word (the RP2350's QMI stuck BUSY): said as an
     // error, the package's recovery writes run, and a session ends for the new boot. A word that matches only now and
     // then is not a stall.
@@ -1591,6 +1733,52 @@ int main() {
             if(pause < 1'400'000) { std::printf("  connect %lld us after the recovery\n", pause); }
             shared.sysresetFrees = false;
             shared.stuckWord     = 0;
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.putRam(Word, 0);
+        }
+        // The test switch UC_LOG_STALL_FIRST_STEP: a stall starts the ladder at the step asked for - step 2 writes
+        // SYSRESETREQ and step 3 resets through the reset line, neither after the package's recovery (the steps a board
+        // test cannot reach while step 1 frees every stall it meets).
+        for(int const first : {2, 3}) {
+            {
+                std::lock_guard<std::mutex> const lock{quiet.mutex};
+                quiet.errors.clear();
+            }
+            auto const recoveryWrites = [&]() {
+                std::lock_guard<std::mutex> const lock{shared.mutex};
+                return std::ranges::count(
+                  shared.writes,
+                  std::pair<std::uint32_t, std::uint32_t>{0x400d'8000, 0x8000'0000});
+            };
+            auto const writesBefore = recoveryWrites();
+            shared.stuckWord        = Word;
+            shared.sysresets        = 0;
+            shared.resetLineResets  = 0;
+            auto r                  = start(0x0301'0803);   // EN and BUSY: stuck
+            r->setStallFirstStep(first);
+            auto const said = fmt::format("({} of 3)", first);
+            CHECK(waitFor([&]() { return quiet.anyErrorContains(said); }, 20000ms),
+                  "first step: the ladder starts at the step asked for");
+            CHECK(!quiet.anyErrorContains("(1 of 3)") && recoveryWrites() <= writesBefore,
+                  "first step: the steps before it do not run");
+            if(quiet.anyErrorContains("(1 of 3)") || recoveryWrites() > writesBefore) {
+                std::printf("  first step %d: recovery writes %lld -> %lld\n",
+                            first,
+                            static_cast<long long>(writesBefore),
+                            static_cast<long long>(recoveryWrites()));
+                std::lock_guard<std::mutex> const lock{quiet.mutex};
+                for(auto const& e : quiet.errors) { std::printf("    %s\n", e.c_str()); }
+            }
+            if(first == 2) {
+                CHECK(waitFor([&]() { return shared.sysresets.load() >= 1; }, 3000ms),
+                      "first step 2: a SYSRESETREQ");
+            } else {
+                CHECK(waitFor([&]() { return shared.resetLineResets.load() >= 1; }, 5000ms)
+                        && shared.sysresets.load() == 0,
+                      "first step 3: the reset line, no SYSRESETREQ before it");
+            }
+            r.reset();
+            shared.stuckWord = 0;
             std::lock_guard<std::mutex> const lock{shared.mutex};
             shared.putRam(Word, 0);
         }

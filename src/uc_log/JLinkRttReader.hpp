@@ -74,11 +74,20 @@ private:
     static constexpr std::size_t RttBufferChunkSize = 32768;
     static constexpr std::size_t DuplexChunkSize    = 4096;
     static constexpr auto        HaltPoll           = std::chrono::milliseconds{10};
-    using Health                                    = uc_log::detail::TargetHealth<TransportT>;
-    static constexpr auto          StallCheckAfter  = Health::StallCheckAfter;
-    static constexpr auto          HaltGracePeriod  = std::chrono::seconds{60};
-    static constexpr std::uint32_t HaltStackWords   = 24;
-    static constexpr unsigned      FlashAttempts    = 3;
+    // J-Link reset type 2: through the probe's nRESET pin (the reset line; the stall ladder's step 3 uses it too)
+    static constexpr std::uint8_t ResetTypeLine = 2;
+    // The halt/S_RESET_ST poll interval while passes read bytes: each poll is a probe round trip, and a target that
+    // halts or resets stops filling the rings, so the next empty pass brings back HaltPoll. Kept a pass below the
+    // frame timeout: a core halted mid-frame beside one that floods on must be seen as halted before its frame is
+    // resynced away (RttChannel::drain resyncs only while no halt was seen).
+    static constexpr auto BusyHaltPoll = std::chrono::milliseconds{50};
+    static_assert(BusyHaltPoll + std::chrono::milliseconds{30}
+                  < uc_log::detail::RttChannel::FrameTimeout);
+    using Health                                   = uc_log::detail::TargetHealth<TransportT>;
+    static constexpr auto          StallCheckAfter = Health::StallCheckAfter;
+    static constexpr auto          HaltGracePeriod = std::chrono::seconds{60};
+    static constexpr std::uint32_t HaltStackWords  = 24;
+    static constexpr unsigned      FlashAttempts   = 3;
     static constexpr auto          RetryBootTime = std::chrono::milliseconds{500};   // prepareRetry
     // DHCSR at 0xE000EDF0, bit 25 S_RESET_ST: at least one reset since the last read of the
     // DHCSR, cleared by that read. Armv6-M ARM DDI 0419E C1.6.3 (Table C1-10 for the address),
@@ -668,7 +677,7 @@ private:
                 };
                 bool const resetLine
                   = std::exchange(resetPinOnce_, false);   // this connection's reset: the line
-                jlink.setResetType(resetLine ? std::uint8_t{2}
+                jlink.setResetType(resetLine ? ResetTypeLine
                                              : pendingResetType.load(std::memory_order_relaxed));
                 applyPreResetCommands(jlink);
                 if(!resetLine) {
@@ -848,10 +857,16 @@ private:
             error = ramImage->error();
             toolErrorMessageCallback(fmt::format("not reset: {}", error));
         } else {
+            // a reset asked for through the reset pin (resetAndWait's `line`): J-Link reset type 2 for this one, then
+            // the configured type again
+            bool const line = resetLineRequested_.exchange(false);
             toolMessageCallback(
-              ramImage ? fmt::format("resetting the RAM image: loading {} again and starting it",
+              ramImage ? fmt::format("resetting the RAM image{}: loading {} again and starting it",
+                                     line ? " through its reset line" : "",
                                      hexFileNameCallback())
-                       : std::string{"resetting target"});
+                       : std::string{line ? "resetting target through its reset line"
+                                          : "resetting target"});
+            if(line) { jlink.setResetType(ResetTypeLine); }
             try {
                 if(ramImage) {
                     jlink.flashRamImage(hexFileNameCallback(), **ramImage);
@@ -859,9 +874,14 @@ private:
                     jlink.resetTarget();
                 }
             } catch(...) {
+                if(line) {
+                    jlink.setResetType(pendingResetType.load(std::memory_order_relaxed));
+                    resetLineRequested_ = true;   // retried as asked
+                }
                 targetResetFlag = true;
                 throw;
             }
+            if(line) { jlink.setResetType(pendingResetType.load(std::memory_order_relaxed)); }
             toolMessageCallback("resetting target succeeded");
             haltRequested_ = false;   // the core runs again
             reset          = true;
@@ -1019,7 +1039,8 @@ private:
         Clock::time_point lastHaltDetected{};
         Clock::time_point nextAnnouncePoll{};
         Clock::time_point nextAnnounceArm{Clock::now() + AnnouncedResetArmRetry};
-        Clock::time_point nextHaltPoll{};
+        Clock::time_point lastHaltPoll{};
+        bool              lastPassRead{};   // the pass before read bytes (BusyHaltPoll)
         Clock::time_point nextStallCheck{Clock::now() + StallCheckAfter};
         bool              wasHalted{};
         bool              quietWarned{};
@@ -1183,8 +1204,9 @@ private:
             return SessionEnd::stopOrReplace;
         }
         bool const haltedRecently = Clock::now() < s.lastHaltDetected + HaltGracePeriod;
-        bool const haltPollDue    = Clock::now() >= s.nextHaltPoll;
-        if(haltPollDue) { s.nextHaltPoll = Clock::now() + HaltPoll; }
+        bool const haltPollDue
+          = Clock::now() >= s.lastHaltPoll + (s.lastPassRead ? BusyHaltPoll : HaltPoll);
+        if(haltPollDue) { s.lastHaltPoll = Clock::now(); }
         if(auto const end = pollAnnouncedReset(s, haltedRecently)) { return end; }
         // DHCSR.S_RESET_ST: every pass - or, where the RTT epoch fences what a pass reads, only in the passes that
         // poll the halt state (a reset then shows in the next pass that reads bytes, DirectRtt::readAll; this poll
@@ -1200,8 +1222,9 @@ private:
                        haltedRecently);
             return SessionEnd::newBoot;
         }
-        auto const passed      = s.rtt->readPass(s.passOuts);
-        bool       morePending = s.decodeRead(passed, haltedRecently) != 0;
+        auto const passed = s.rtt->readPass(s.passOuts);
+        s.lastPassRead    = s.decodeRead(passed, haltedRecently) != 0;
+        bool morePending  = s.lastPassRead;
         for(std::size_t i = 0; i != s.passOuts.size();
             ++i) {   // a ring that filled its chunk has more
             morePending
@@ -1224,7 +1247,7 @@ private:
         }
         serviceDuplex(s, passed);
         s.jlink.checkConnected();
-        // the halt state every HaltPoll, not every pass (an access of ~0.13 ms a pass at full rate)
+        // the halt state every HaltPoll (BusyHaltPoll while passes read bytes), not every pass
         if(haltPollDue) { halted_ = s.jlink.isHalted(); }
         noteHalt(s);
         Status const current = s.rtt->status();
@@ -1680,10 +1703,12 @@ private:
     static constexpr int       SilentResetAfter  = 3;   // silent connections before the reset line
     int                        silentConnections_{};    // reader thread
     bool                       resetPinOnce_{};   // reader thread: the next reset by the reset line
-    bool                       offProbeOnce_{};   // reader thread: pause before the next connect
-    static constexpr auto      RecoveryOffProbe = std::chrono::milliseconds{1500};
-    bool                       resetSeenAside_{};   // reader thread: S_RESET_ST a flash read saw
-    std::optional<std::uint32_t> lostCountSaid_;    // reader thread: the junk count word said
+    std::atomic<bool>
+         resetLineRequested_{};   // resetAndWait(line): the next resetTargetNow by the line
+    bool offProbeOnce_{};         // reader thread: pause before the next connect
+    static constexpr auto        RecoveryOffProbe = std::chrono::milliseconds{1500};
+    bool                         resetSeenAside_{};   // reader thread: S_RESET_ST a flash read saw
+    std::optional<std::uint32_t> lostCountSaid_;      // reader thread: the junk count word said
     // few probe accesses while a boot ROM may run: fast polling of the flash interface can wedge an RP2040's boot ROM
     static constexpr auto                  FlashReadyPoll = std::chrono::milliseconds{50};
     std::vector<StallSignature::Condition> flashReady_;                    // sessionStartMutex
@@ -1785,6 +1810,9 @@ public:
     void setStallSignature(std::optional<StallSignature> signature) {
         health_.setStall(std::move(signature));
     }
+
+    /// see detail/TargetHealth.hpp (a test switch: UC_LOG_STALL_FIRST_STEP). From any thread.
+    void setStallFirstStep(int step) { health_.setStallFirstStep(step); }
 
     /// see detail/TargetHealth.hpp; nullopt: a chip that does not park. From any thread.
     void setParkSignature(std::optional<ParkSignature> signature) {
@@ -1898,11 +1926,15 @@ public:
     std::expected<void,
                   std::string>
     resetAndWait(std::chrono::milliseconds    timeout,
-                 std::function<bool()> const& cancelled = {}) {
+                 std::function<bool()> const& cancelled = {},
+                 bool                         line      = false) {
         // counted before the flag is set, so the reset that takes the flag covers this number
         auto const request = ++resetRequests_;
         auto const end     = Clock::now() + timeout;
-        targetResetFlag    = true;
+        if(line) {
+            resetLineRequested_ = true;
+        }   // before the flag: the reset that takes it sees it
+        targetResetFlag = true;
         std::optional<std::uint64_t> session;
         while(Clock::now() < end && !(cancelled && cancelled())) {
             std::this_thread::sleep_for(std::chrono::milliseconds{20});
@@ -1918,6 +1950,7 @@ public:
         }
         // withdrawn, or it would reset the board whenever it comes back
         if(!session && targetResetFlag.exchange(false)) {
+            resetLineRequested_ = false;
             return std::unexpected{std::string{
               Clock::now() < end ? "not reset: cancelled (the request is withdrawn)"
                                  : "not reset: no target connected (the request is withdrawn)"}};

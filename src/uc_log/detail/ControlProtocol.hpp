@@ -69,8 +69,11 @@ struct Wait {
     std::uint32_t                timeout_ms{};
 };
 
-/// Answered once the log runs again.
-struct Reset {};
+/// Answered once the log runs again. `line`: through the probe's reset pin (nRESET on the chip's reset input, e.g. an
+/// RP2040/RP2350 RUN pin): a chip-level reset, where the ordinary one is the target's own reset strategy.
+struct Reset {
+    std::optional<bool> line;
+};
 
 /// Downloads the printer's hex file; answered once the log runs again.
 struct Flash {};

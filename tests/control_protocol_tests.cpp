@@ -127,6 +127,20 @@ int main() {
             && as<ctl::StatusAnswer>(status)->firmware.state == ctl::FirmwareState::match,
           "status");
     CHECK(as<ctl::ResetAnswer>(ask(R"({"cmd":"reset"})")) != nullptr, "reset");
+    {   // "line": true goes to the reset-pin action; false or no "line" to the ordinary one
+        fx::FakeTarget fake;
+        auto const     reset = [&](std::string_view line) {
+            auto const parsed
+              = ctl::fromLine<ctl::Answer>(uc_log::detail::controlAnswerLine(line, fake.target()));
+            auto const* a = std::get_if<ctl::Answer>(&parsed);
+            return a != nullptr && as<ctl::ResetAnswer>(*a) != nullptr;
+        };
+        CHECK(reset(R"({"cmd":"reset","line":true})") && fake.lineResets == 1,
+              "reset with line: through the reset pin");
+        CHECK(reset(R"({"cmd":"reset","line":false})") && reset(R"({"cmd":"reset"})")
+                && fake.lineResets == 1,
+              "reset without line: the ordinary reset");
+    }
     {
         auto const written = ask(R"({"cmd":"write","words":[{"address":16,"value":258}]})");
         CHECK(as<ctl::WriteAnswer>(written) != nullptr

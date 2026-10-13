@@ -160,8 +160,9 @@ def req_wait(address: int, size: int, condition: str, timeout_ms: int,
     return req | {"timeout_ms": timeout_ms}
 
 
-def req_reset() -> dict:
-    return {"cmd": "reset"}
+def req_reset(line: bool = False) -> dict:
+    """line: through the probe's reset pin (a chip-level reset) instead of the target's own reset strategy"""
+    return {"cmd": "reset", "line": True} if line else {"cmd": "reset"}
 
 
 def req_flash() -> dict:

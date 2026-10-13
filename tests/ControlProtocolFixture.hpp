@@ -37,6 +37,7 @@ struct FakeTarget {
     std::atomic<std::uint32_t> counter{0};
     std::atomic<std::int64_t>  steady{0};
     std::function<void()>      onReset{};
+    int                        lineResets{};   // resets through the reset pin ("line": true)
     bool                       coreHalted{};
 
     detail::MemoryResult read(std::span<ctl::Piece const> pieces) {
@@ -95,6 +96,10 @@ struct FakeTarget {
             },
           .reset = [this](std::function<bool()> const&) -> std::expected<void, std::string> {
               if(onReset) { onReset(); }
+              return {};
+          },
+          .resetLine = [this](std::function<bool()> const&) -> std::expected<void, std::string> {
+              ++lineResets;
               return {};
           },
           .flash = [](std::function<bool()> const&) -> std::expected<void, std::string> {
@@ -166,6 +171,7 @@ inline std::vector<Exchange> exchanges() {
       {"wait_too_long",
        R"({"cmd":"wait","piece":{"address":536870912,"size":4},"condition":"changed","timeout_ms":600001})"},
       {"reset", R"({"cmd":"reset"})"},
+      {"reset_line", R"({"cmd":"reset","line":true})"},
       {"halt", R"({"cmd":"halt"})"},
       {"registers", R"({"cmd":"registers"})"},
       {"write_registers",

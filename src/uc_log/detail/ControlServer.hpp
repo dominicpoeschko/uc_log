@@ -49,7 +49,9 @@ struct ControlTarget {
     MemoryWriter                           write{};
     std::function<control::StatusAnswer()> status{};
     Action                                 reset{};
-    Action                                 flash{};
+    /// a reset through the probe's reset pin (`reset` with "line": true)
+    Action resetLine{};
+    Action flash{};
     /// halt (true) or resume (false) the core; the halted state after
     std::function<std::expected<bool, std::string>(bool)> core{};
     /// the core's registers (control::Registers' order); only while halted
@@ -238,10 +240,13 @@ namespace control_detail {
         return done;
     }
 
-    inline control::Answer answer(control::Reset const&,
+    inline control::Answer answer(control::Reset const&        r,
                                   ControlTarget const&         t,
                                   std::function<bool()> const& cancelled) {
-        return action(t.reset, t, cancelled, control::ResetAnswer{});
+        return action(r.line.value_or(false) ? t.resetLine : t.reset,
+                      t,
+                      cancelled,
+                      control::ResetAnswer{});
     }
 
     inline control::Answer answer(control::Flash const&,

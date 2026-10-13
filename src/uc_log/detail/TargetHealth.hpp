@@ -21,7 +21,9 @@
 #include "uc_log/detail/Le32.hpp"
 #include "uc_log/detail/Lifetimebound.hpp"
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -90,6 +92,10 @@ public:
         std::lock_guard<std::mutex> const lock{mutex_};
         stall_ = std::move(signature);
     }
+
+    /// For tests of the stall ladder on a board: a stall starts at step `step` (1..MaxRecoveries) instead of 1, so the
+    /// later steps run without a stall that outlasts the earlier ones. From any thread.
+    void setStallFirstStep(int step) { stallFirstStep_ = std::clamp(step, 1, MaxRecoveries); }
 
     /// A wait begins (for the control block, or behind the gate): the park check may say once why it does not act.
     void beginWait() { parkWordTold_ = false; }
@@ -319,6 +325,7 @@ private:
         // A ladder, counted across sessions and connections (only logRead() sets it back): the package's recovery, a
         // SYSRESETREQ in this session, the reset line, then a power cycle asked for; after StallLadderPause it starts
         // again.
+        stallRecoveries_    = std::max(stallRecoveries_, stallFirstStep_.load() - 1);
         bool const  recover = !signature->recovery.empty() && stallRecoveries_ < MaxRecoveries;
         std::string words;
         for(auto const& c : signature->conditions) {
@@ -394,6 +401,7 @@ private:
     // the reader thread's
     int               parkRecoveries_{};
     int               stallRecoveries_{};   // lockups and stalls, in a row
+    std::atomic<int>  stallFirstStep_{1};   // setStallFirstStep
     Clock::time_point stallGaveUpAt_{};   // when the ladder ended (or a power cycle was asked for)
     int               flashRecoveries_{};   // for the flash in hand
     bool              parkWordTold_{};

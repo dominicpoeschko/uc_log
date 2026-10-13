@@ -16,6 +16,7 @@
 {"name":"wait_no_value","stable":true,"request":"{\"cmd\":\"wait\",\"piece\":{\"address\":536870912,\"size\":4},\"condition\":\"eq\",\"timeout_ms\":10}","answer":{"cmd":"error","error":"wait: this condition needs a value"}}
 {"name":"wait_too_long","stable":true,"request":"{\"cmd\":\"wait\",\"piece\":{\"address\":536870912,\"size\":4},\"condition\":\"changed\",\"timeout_ms\":600001}","answer":{"cmd":"error","error":"wait: timeout_ms is at most 600000"}}
 {"name":"reset","stable":true,"request":"{\"cmd\":\"reset\"}","answer":{"cmd":"reset"}}
+{"name":"reset_line","stable":true,"request":"{\"cmd\":\"reset\",\"line\":true}","answer":{"cmd":"reset"}}
 {"name":"halt","stable":true,"request":"{\"cmd\":\"halt\"}","answer":{"cmd":"halt","halted":true}}
 {"name":"registers","stable":true,"request":"{\"cmd\":\"registers\"}","answer":{"cmd":"registers","values":[4096,4097,4098,4099,4100,4101,4102,4103,4104,4105,4106,4107,4108,4109,4110,4111,4112,4113,4114]}}
 {"name":"write_registers","stable":true,"request":"{\"cmd\":\"write_registers\",\"writes\":[{\"index\":0,\"value\":7},{\"index\":15,\"value\":268443648}]}","answer":{"cmd":"write_registers"}}

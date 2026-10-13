@@ -22,12 +22,21 @@
 //   lost-line too - can be preempted by any of them, which is why the flag is per context. NMI/HardFault ignore
 //   PRIMASK and get the third slot.
 // - RecordGuard: the sinks' own (they must agree); none if no sink has one.
+// - Levels: a sink that takes the record's level (write<Level>, initTransfer<Level>, finalizeTransfer<Level>,
+//   lossMark<Level> - an RTT backend that routes levels to channels, a sink that only takes warn and up) gets it.
+//   The fan-out is level-aware only when one of its sinks is, so a fan-out of level-blind sinks keeps one record path
+//   for every level (LevelBoundBackend.hpp); a level-blind sink in a level-aware fan-out gets every level.
+// - The Startup ISR contract (isrPriorityLevels / singleIsrPriorityLevel with silentIsrPriorityLevels, IsrPolicy.hpp):
+//   the one sink that declares it hands it on, so Startup still checks the enabled interrupts against it. A sink
+//   without one (a queue whose contexts nest) asks nothing of them; two sinks that declare one are an error.
 // - Nothing here blocks; whatever a sink does when it is full or nobody reads it stays with that sink.
 //
 // Contexts is how the backend learns where it runs: CortexMContexts (IPSR, one core) by default; a multicore build
 // passes one whose core() tells the cores apart (FanOutBackendWith<Contexts, ...>), and the host tests a fake.
 
 #include "ComBackend.hpp"
+#include "LogLevel.hpp"
+#include "detail/LevelBoundBackend.hpp"
 
 #include <array>
 #include <cstddef>
@@ -95,13 +104,66 @@ namespace fanout {
 
     template<>
     struct GuardMember<void> {};
+
+    template<typename S>
+    concept HasIsrContract
+      = requires { S::isrPriorityLevels; } || requires { S::singleIsrPriorityLevel; };
+
+    // A sink's Startup ISR contract, as members of the fan-out
+    template<typename S>
+    struct IsrContractMember {};
+
+    template<typename S>
+        requires requires { S::isrPriorityLevels; }
+    struct IsrContractMember<S> {
+        static constexpr auto isrPriorityLevels       = S::isrPriorityLevels;
+        static constexpr auto silentIsrPriorityLevels = S::silentIsrPriorityLevels;
+    };
+
+    template<typename S>
+        requires requires { S::singleIsrPriorityLevel; }
+    struct IsrContractMember<S> {
+        static constexpr bool singleIsrPriorityLevel  = S::singleIsrPriorityLevel;
+        static constexpr auto silentIsrPriorityLevels = S::silentIsrPriorityLevels;
+    };
+
+    struct NoIsrContract {};
+
+    template<typename... Sinks>
+    struct IsrContractOf {
+        static_assert((static_cast<int>(HasIsrContract<Sinks>) + ... + 0) <= 1,
+                      "FanOutBackend: more than one sink declares a Startup ISR contract "
+                      "(isrPriorityLevels / singleIsrPriorityLevel); at most one may");
+        using type = NoIsrContract;
+    };
+
+    template<typename S, typename... Sinks>
+        requires HasIsrContract<S>
+    struct IsrContractOf<S, Sinks...> : IsrContractOf<> {
+        static_assert(
+          !(
+            requires { S::isrPriorityLevels; } && requires { S::singleIsrPriorityLevel; }),
+          "FanOutBackend: a sink declares both isrPriorityLevels and singleIsrPriorityLevel");
+        static_assert(!(HasIsrContract<Sinks> || ...),
+                      "FanOutBackend: more than one sink declares a Startup ISR contract "
+                      "(isrPriorityLevels / singleIsrPriorityLevel); at most one may");
+        using type = IsrContractMember<S>;
+    };
+
+    template<typename S, typename... Sinks>
+    struct IsrContractOf<S, Sinks...> : IsrContractOf<Sinks...> {};
 }   // namespace fanout
 
 template<typename Contexts, typename Primary, typename... Others>
 struct FanOutBackendWith
-  : fanout::GuardMember<typename fanout::CommonGuard<void, Primary, Others...>::type> {
+  : fanout::GuardMember<typename fanout::CommonGuard<void, Primary, Others...>::type>
+  , fanout::IsrContractOf<Primary, Others...>::type {
     // Listed in the Startup list like the backends it feeds, with nothing for Startup to run.
     static constexpr bool isStartupEntry = true;
+
+    // Takes the record's level (see the top of the file): only when a sink does.
+    static constexpr bool levelAware
+      = (detail::LevelAware<Primary> || ... || detail::LevelAware<Others>);
 
     static constexpr std::size_t Slots = Contexts::Cores * fanout::ContextsPerCore;
 
@@ -113,37 +175,58 @@ struct FanOutBackendWith
              + static_cast<std::size_t>(Contexts::context());
     }
 
-    static void initTransfer() {
-        if(primaryOnly[slot()]) {
-            initOf<Primary>();
-            return;
-        }
-        initOf<Primary>();
-        (initOf<Others>(), ...);
+    static void initTransfer()
+        requires(!levelAware)
+    {
+        initAll<>();
     }
 
-    static void write(std::span<std::byte const> span) {
-        Primary::write(span);
-        if(primaryOnly[slot()]) { return; }
-        (Others::write(span), ...);
+    template<LogLevel Level>
+    static void initTransfer()
+        requires levelAware
+    {
+        initAll<Level>();
     }
 
-    static void finalizeTransfer() {
-        if(primaryOnly[slot()]) {
-            finalizeOf<Primary>();
-            return;
-        }
-        finalizeOf<Primary>();
-        (finalizeOf<Others>(), ...);
+    static void write(std::span<std::byte const> span)
+        requires(!levelAware)
+    {
+        writeAll<>(span);
     }
 
-    // The primary's lost-record line (see the top of the file): only when the primary counts losses.
+    template<LogLevel Level>
+    static void write(std::span<std::byte const> span)
+        requires levelAware
+    {
+        writeAll<Level>(span);
+    }
+
+    static void finalizeTransfer()
+        requires(!levelAware)
+    {
+        finalizeAll<>();
+    }
+
+    template<LogLevel Level>
+    static void finalizeTransfer()
+        requires levelAware
+    {
+        finalizeAll<Level>();
+    }
+
+    // The primary's lost-record line (see the top of the file): only when the primary counts losses - per level when
+    // the primary keeps a ring per level (lossMark<Level>), else one for all.
     static auto lossMark()
         requires requires { Primary::lossMark(); }
     {
-        auto const mark = Primary::lossMark();
-        if(mark.pending != 0) { primaryOnly[slot()] = true; }
-        return mark;
+        return marked(Primary::lossMark());
+    }
+
+    template<LogLevel Level>
+    static auto lossMark()
+        requires requires { Primary::template lossMark<Level>(); }
+    {
+        return marked(Primary::template lossMark<Level>());
     }
 
     template<typename Mark>
@@ -195,14 +278,64 @@ struct FanOutBackendWith
     }
 
 private:
-    template<typename S>
-    static void initOf() {
-        if constexpr(requires { S::initTransfer(); }) { S::initTransfer(); }
+    template<typename Mark>
+    static Mark marked(Mark const mark) {
+        if(mark.pending != 0) { primaryOnly[slot()] = true; }
+        return mark;
     }
 
-    template<typename S>
+    // Level: empty for a level-blind fan-out, else the record's one level. A sink that takes the level gets it.
+    template<LogLevel... Level>
+    static void initAll() {
+        initOf<Primary, Level...>();
+        if(primaryOnly[slot()]) { return; }
+        (initOf<Others, Level...>(), ...);
+    }
+
+    template<LogLevel... Level>
+    static void writeAll(std::span<std::byte const> span) {
+        writeOf<Primary, Level...>(span);
+        if(primaryOnly[slot()]) { return; }
+        (writeOf<Others, Level...>(span), ...);
+    }
+
+    template<LogLevel... Level>
+    static void finalizeAll() {
+        finalizeOf<Primary, Level...>();
+        if(primaryOnly[slot()]) { return; }
+        (finalizeOf<Others, Level...>(), ...);
+    }
+
+    template<typename S,
+             LogLevel... Level>
+    static void initOf() {
+        if constexpr(sizeof...(Level) == 1 && requires { S::template initTransfer<Level...>(); }) {
+            S::template initTransfer<Level...>();
+        } else if constexpr(requires { S::initTransfer(); }) {
+            S::initTransfer();
+        }
+    }
+
+    template<typename S,
+             LogLevel... Level>
+    static void writeOf(std::span<std::byte const> span) {
+        if constexpr(sizeof...(Level) == 1 && requires { S::template write<Level...>(span); }) {
+            S::template write<Level...>(span);
+        } else {
+            S::write(span);
+        }
+    }
+
+    template<typename S,
+             LogLevel... Level>
     static void finalizeOf() {
-        if constexpr(requires { S::finalizeTransfer(); }) { S::finalizeTransfer(); }
+        if constexpr(sizeof...(Level) == 1
+                     && requires { S::template finalizeTransfer<Level...>(); })
+        {
+            S::template finalizeTransfer<Level...>();
+        } else if constexpr(requires { S::finalizeTransfer(); }) {
+            S::finalizeTransfer();
+        }
     }
 
     template<typename S>

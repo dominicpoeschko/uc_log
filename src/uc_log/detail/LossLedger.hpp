@@ -17,7 +17,11 @@
 /// A free-running microsecond counter, if the chip package has one - the one Kvasir::AnnouncedReset times its waits
 /// with (Kvasir_SDK Util/AnnouncedReset.hpp; chip_rp_common: the TIMER's raw low word, TIMERAWL). Not defined: null,
 /// and a panic's wait counts polls.
+// Also declared in Kvasir_SDK Util/AnnouncedReset.hpp; the guard avoids gcc's -Wredundant-decls.
+#ifndef KVASIR_ANNOUNCED_RESET_TIME_US_DECLARED
+    #define KVASIR_ANNOUNCED_RESET_TIME_US_DECLARED
 extern "C" [[gnu::weak]] std::uint32_t kvasir_announced_reset_time_us();
+#endif
 
 namespace uc_log::detail {
 
