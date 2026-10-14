@@ -8,7 +8,6 @@ import importlib.util
 import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -307,9 +306,11 @@ class AgainstTheServer(unittest.TestCase):
                 self.assertEqual(without_seq(got), without_seq(expected))
                 seqs = [e["seq"] for e in got if e["cmd"] == "log"]
                 self.assertEqual(seqs, sorted(seqs))
-                stream.sock.settimeout(0.2)
-                with self.assertRaises((TimeoutError, socket.timeout)):
-                    stream.next()   # and nothing else
+                # and nothing else: the next reset's events come next (the fake publishes the same ones on every
+                # reset) - no quiet time decides it
+                kb.request(self.path, kb.req_reset())
+                self.assertEqual(without_seq(
+                    [stream.next()]), without_seq(expected[:1]))
 
     def test_history(self):
         kb.request(self.path, kb.req_reset())

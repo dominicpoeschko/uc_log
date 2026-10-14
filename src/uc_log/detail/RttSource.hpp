@@ -7,6 +7,7 @@
 //   the probe's full throughput). Its known weaknesses: a stop drops what the DLL had read and not handed over, and
 //   after an unannounced reset it can deliver old lines again; its only loss signals are its own counters.
 
+#include "uc_log/detail/Clock.hpp"
 #include "uc_log/detail/DirectRtt.hpp"
 #include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/detail/RttControlBlock.hpp"
@@ -133,7 +134,7 @@ template<typename Transport>
 class DllRtt final : public RttSource<Transport> {
 public:
     using Base     = RttSource<Transport>;
-    using Clock    = std::chrono::steady_clock;
+    using Clock    = uc_log::detail::Clock;
     using MessageF = std::function<void(std::string_view)>;
 
     /// `blockAddress` 0: the DLL found the block by its RAM search (no repair or dump of it then).

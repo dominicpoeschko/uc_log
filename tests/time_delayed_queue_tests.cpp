@@ -28,7 +28,7 @@ static int failures = 0;
     } while(0)
 
 namespace {
-using Clock = std::chrono::steady_clock;
+using Clock = uc_log::detail::Clock;
 
 struct Line {
     int               channel{};
@@ -133,10 +133,10 @@ void backlogBurst() {
             }
         }
         // part of the queue is due, part not
-        std::this_thread::sleep_for(60ms);
+        Clock::sleep_for(60ms);
     }
     // handed out by the queue's own thread, not the destructor
-    std::this_thread::sleep_for(400ms);
+    Clock::sleep_for(400ms);
     auto const out = h.finish();
     CHECK(perChannelIntact(out, count, "backlog burst"),
           "backlog burst: per channel in order, all");
@@ -163,7 +163,7 @@ void randomReads() {
                 clock[channel] += step(random);
                 h.append({channel, clock[channel], count[channel]++});
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds{pause(random)});
+            Clock::sleep_for(std::chrono::milliseconds{pause(random)});
         }
         auto const out = h.finish();
         CHECK(perChannelIntact(out, count, "random reads"),
@@ -190,9 +190,9 @@ void mergesByTime() {
         for(int const channel : order) {
             for(auto const& l : perChannel[static_cast<std::size_t>(channel)]) { h.append(l); }
         }
-        std::this_thread::sleep_for(20ms);
+        Clock::sleep_for(20ms);
     }
-    std::this_thread::sleep_for(300ms);
+    Clock::sleep_for(300ms);
     auto const out = h.finish();
     CHECK(perChannelIntact(out, count, "merge"), "merge: per channel in order, all");
     CHECK(std::ranges::is_sorted(out, {}, [](Out const& o) { return o.line.time; }),
@@ -208,7 +208,7 @@ void noStarvation() {
     std::int64_t t     = 0;
     while(Clock::now() - start < 600ms) {   // the other channel: always a fresh, earlier line
         h.append({1, t += 1000, count[1]++});
-        std::this_thread::sleep_for(2ms);
+        Clock::sleep_for(2ms);
     }
     auto const out = h.finish();
     CHECK(perChannelIntact(out, count, "starvation"), "starvation: per channel in order, all");
@@ -225,9 +225,9 @@ void boundedLatency() {
     for(int i = 0; i != 2000; ++i) {
         int const channel = static_cast<int>(random() % 3);
         h.append({channel, static_cast<std::int64_t>(random() % 1'000'000), count[channel]++});
-        if(i % 50 == 0) { std::this_thread::sleep_for(5ms); }
+        if(i % 50 == 0) { Clock::sleep_for(5ms); }
     }
-    std::this_thread::sleep_for(400ms);
+    Clock::sleep_for(400ms);
     auto const out = h.finish();
     auto const worst
       = std::ranges::max(out, {}, [](Out const& o) { return o.handedOut - o.line.appended; });
@@ -269,6 +269,8 @@ void flushAtSessionStart() {
 }   // namespace
 
 int main() {
+    // delay and maxHold on the virtual clock: the queue's thread and this one move it, no machine speed does
+    uc_log::detail::VirtualTime const virtualTime;
     flushAtSessionStart();
     backlogBurst();
     randomReads();

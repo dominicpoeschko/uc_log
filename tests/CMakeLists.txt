@@ -23,6 +23,7 @@ uc_log_add_test(uc_log_test_rtt_channel_map rtt_channel_map_tests.cpp)
 uc_log_add_test(uc_log_test_time_delayed_queue time_delayed_queue_tests.cpp)
 uc_log_add_test(uc_log_test_entry_store entry_store_tests.cpp)
 uc_log_add_test(uc_log_test_tcp_server tcp_server_tests.cpp)
+uc_log_add_test(uc_log_test_control_server control_server_tests.cpp)
 uc_log_add_test(uc_log_test_rtt_reader rtt_reader_tests.cpp)
 uc_log_add_test(uc_log_test_direct_rtt direct_rtt_tests.cpp)
 uc_log_add_test(uc_log_test_decode_worker decode_worker_tests.cpp)
@@ -105,23 +106,42 @@ if(UC_LOG_BUILD_FUZZERS)
     set(uc_log_fuzz_seeds "${CMAKE_CURRENT_BINARY_DIR}/fuzz_seeds")
     add_test(NAME uc_log_fuzz_seeds COMMAND uc_log_control_protocol_tool seeds "${uc_log_fuzz_seeds}")
     set_tests_properties(uc_log_fuzz_seeds PROPERTIES FIXTURES_SETUP uc_log_fuzz_seeds)
+    # libFuzzer writes new inputs into the FIRST corpus directory: for ctest that one is emptied before every run, so
+    # each starts from the same seeds instead of the last run's findings (fuzz_corpus/ stays for long local runs)
+    set(uc_log_fuzz_new "${CMAKE_CURRENT_BINARY_DIR}/fuzz_new")
+    add_test(NAME uc_log_fuzz_new_clean COMMAND ${CMAKE_COMMAND} -E rm -rf "${uc_log_fuzz_new}")
+    add_test(NAME uc_log_fuzz_new_mkdir
+             COMMAND ${CMAKE_COMMAND} -E make_directory "${uc_log_fuzz_new}/request" "${uc_log_fuzz_new}/event"
+                     "${uc_log_fuzz_new}/session" "${uc_log_fuzz_new}/rtt_stream")
+    set_tests_properties(uc_log_fuzz_new_clean uc_log_fuzz_new_mkdir PROPERTIES FIXTURES_SETUP uc_log_fuzz_seeds)
+    set_tests_properties(uc_log_fuzz_new_mkdir PROPERTIES DEPENDS uc_log_fuzz_new_clean)
+    # Same inputs on every run, not only the same seed: -fno-sanitize-coverage=stack-depth (that feature is measured
+    # from the stack start, which ASLR moves - the same input gave different features in every process) and, in the
+    # tests, -use_cmp=0 (compare tracing feeds pointer operands into the mutations)
+    set(uc_log_fuzz_flags -fsanitize=fuzzer,address,undefined -fno-sanitize-coverage=stack-depth
+                          -fno-sanitize-recover=undefined)
     foreach(fuzzer request event session)
         set(fuzz_target uc_log_fuzz_control_${fuzzer})
         add_executable(${fuzz_target} fuzz/fuzz_control_${fuzzer}.cpp)
         target_link_libraries(${fuzz_target} PRIVATE remote_fmt::parser fmt::fmt Threads::Threads uc_log::uc_log
                                                      ${Boost_Components} enchantum::enchantum)
         target_add_default_build_options(${fuzz_target} PRIVATE)
-        target_compile_options(${fuzz_target} PRIVATE -fsanitize=fuzzer,address,undefined
-                                                      -fno-sanitize-recover=undefined)
+        target_compile_options(${fuzz_target} PRIVATE ${uc_log_fuzz_flags})
         target_link_options(${fuzz_target} PRIVATE -fsanitize=fuzzer,address,undefined)
-        # libFuzzer writes into the first corpus directory only: keep that one in the build tree
-        set(fuzz_corpus "${CMAKE_CURRENT_BINARY_DIR}/fuzz_corpus/${fuzzer}")
-        file(MAKE_DIRECTORY "${fuzz_corpus}")
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fuzz_corpus/${fuzzer}")
+        # a fixed seed and a fixed number of runs, never a time budget: the same inputs on every machine; `just fuzz`
+        # runs them for a time. The session fuzzer only replays its corpus here (-runs=0: the seeds and regressions,
+        # once each): its coverage comes from a server's threads too, whose interleaving differs from run to run - new
+        # inputs from it would differ as well
+        set(fuzz_runs 20000)
+        if(fuzzer STREQUAL "session")
+            set(fuzz_runs 0)
+        endif()
         add_test(
             NAME ${fuzz_target}
             COMMAND
-                ${fuzz_target} -runs=20000 -max_total_time=30 -timeout=10
-                -dict=${CMAKE_CURRENT_SOURCE_DIR}/fuzz/control_protocol.dict "${fuzz_corpus}"
+                ${fuzz_target} -runs=${fuzz_runs} -seed=1 -use_cmp=0 -timeout=10
+                -dict=${CMAKE_CURRENT_SOURCE_DIR}/fuzz/control_protocol.dict "${uc_log_fuzz_new}/${fuzzer}"
                 "${uc_log_fuzz_seeds}/${fuzzer}" "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/regressions/${fuzzer}")
         set_tests_properties(${fuzz_target} PROPERTIES FIXTURES_REQUIRED uc_log_fuzz_seeds)
     endforeach()
@@ -132,12 +152,12 @@ if(UC_LOG_BUILD_FUZZERS)
                                                          enchantum::enchantum)
     target_add_default_build_options(uc_log_fuzz_rtt_stream PRIVATE)
     target_compile_definitions(uc_log_fuzz_rtt_stream PRIVATE REMOTE_FMT_USE_CATALOG=false)
-    target_compile_options(uc_log_fuzz_rtt_stream PRIVATE -fsanitize=fuzzer,address,undefined
-                                                          -fno-sanitize-recover=undefined)
+    target_compile_options(uc_log_fuzz_rtt_stream PRIVATE ${uc_log_fuzz_flags})
     target_link_options(uc_log_fuzz_rtt_stream PRIVATE -fsanitize=fuzzer,address,undefined)
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fuzz_corpus/rtt_stream")
-    add_test(NAME uc_log_fuzz_rtt_stream COMMAND uc_log_fuzz_rtt_stream -runs=20000 -max_total_time=30 -timeout=10
-                                                 "${CMAKE_CURRENT_BINARY_DIR}/fuzz_corpus/rtt_stream")
+    add_test(NAME uc_log_fuzz_rtt_stream COMMAND uc_log_fuzz_rtt_stream -runs=20000 -seed=1 -use_cmp=0 -timeout=10
+                                                 "${uc_log_fuzz_new}/rtt_stream")
+    set_tests_properties(uc_log_fuzz_rtt_stream PROPERTIES FIXTURES_REQUIRED uc_log_fuzz_seeds)
 endif()
 
 find_package(Python3 COMPONENTS Interpreter)
@@ -321,6 +341,12 @@ target_compile_definitions(uc_log_test_log_stress_check PRIVATE REMOTE_FMT_USE_C
 uc_log_add_test(uc_log_test_log_stress_check_framed stress/log_stress_check_tests.cpp)
 target_compile_definitions(uc_log_test_log_stress_check_framed PRIVATE REMOTE_FMT_USE_CATALOG=false
                                                                        REMOTE_FMT_FRAME_CHECK=1)
+# gcc's LTO loses Printer::lowprint's bound (it copies into the staging array only when the span fits behind `staged`)
+# and reports a write past it; the warning comes at link time, so it is turned off for the link too
+foreach(target uc_log_test_log_stress_check uc_log_test_log_stress_check_framed)
+    target_compile_options(${target} PRIVATE $<$<CXX_COMPILER_ID:GNU>:-Wno-stringop-overflow>)
+    target_link_options(${target} PRIVATE $<$<CXX_COMPILER_ID:GNU>:-Wno-stringop-overflow>)
+endforeach()
 add_executable(uc_log_log_stress_check stress/log_stress_check.cpp)
 target_link_libraries(uc_log_log_stress_check PRIVATE remote_fmt::parser fmt::fmt uc_log::uc_log enchantum::enchantum)
 target_add_default_build_options(uc_log_log_stress_check PRIVATE)

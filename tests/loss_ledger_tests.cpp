@@ -384,26 +384,39 @@ void wrapSweep() {
 }
 
 // writeWaiting with the panic's waiter: waits while the reader moves, gives up `polls` after it
-// stops, then the latch ends the next wait at once until the host reads again.
+// stops, then the latch ends the next wait at once until the host reads again. The host reads at a
+// pace counted in the writer's polls (one read every HostEvery polls), not as a thread that may or
+// may not get the CPU: every outcome below is the same on every run.
 void panicWait() {
     Ring                         ring;
     uc_log::detail::PanicWait<1> wait{};
     constexpr std::uint32_t      polls = 200'000;
-    std::atomic<bool>            reading{true};
-    std::atomic<bool>            stop{false};
-    std::atomic<std::size_t>     readBytes{0};
+    constexpr std::uint32_t      HostEvery
+      = 50;   // well inside `polls`: a reading host never stalls the writer
+    std::size_t readBytes = 0;
+    auto const  hostRead  = [&] {
+        std::array<std::byte, 8> out{};
+        readBytes += Buffer::read(ring.block, out).size();
+    };
+
+    // the waiter as the writer asks it, with the host's reads between its polls
+    struct HostPaced {
+        uc_log::detail::StallWaiter& waiter;
+        decltype(hostRead) const&    read;
+        bool                         reading;
+        std::uint32_t                asked{};
+
+        bool operator()(std::uint32_t host) {
+            ++asked;
+            if(reading && asked % HostEvery == 0) { read(); }
+            return waiter(host);
+        }
+    };
 
     static_cast<void>(Buffer::write(ring.block, frame(DataKind, 1, 58)));   // full
-    std::thread host{[&] {
-        std::array<std::byte, 8> out{};
-        while(!stop) {
-            if(reading) { readBytes += Buffer::read(ring.block, out).size(); }
-            std::this_thread::sleep_for(std::chrono::microseconds{50});
-        }
-    }};
-    auto const  big = frame(DataKind, 2, 40);
+    auto const big = frame(DataKind, 2, 40);
     // one staged record that waits with the panic's waiter: whole or nothing
-    auto const writeWaiting = [&](uc_log::detail::StallWaiter& waiter) {
+    auto const writeWaiting = [&](HostPaced& waiter) {
         std::uint32_t staged = ring.block.writePosition;
         bool const    ok     = Buffer::stage(ring.block, big, staged, waiter);
         if(ok) { Buffer::publish(ring.block, staged); }
@@ -411,37 +424,35 @@ void panicWait() {
     };
     {
         uc_log::detail::StallWaiter waiter{polls, wait.goneAtPlus1[0]};
-        CHECK(writeWaiting(waiter), "waits while the host reads, then lands whole");
+        HostPaced                   paced{waiter, hostRead, true};
+        CHECK(writeWaiting(paced), "waits while the host reads, then lands whole");
         CHECK(wait.goneAtPlus1[0] == 0, "no latch");
     }
-    reading = false;
-    std::this_thread::sleep_for(std::chrono::milliseconds{5});
-    while(Buffer::unread(ring.block) < RingSize - 2) {
+    while(Buffer::unread(ring.block) < RingSize - 2) {   // the host has stopped reading
         static_cast<void>(Buffer::write(ring.block, std::array<std::byte, 1>{std::byte{0}}));
     }
     {
         uc_log::detail::StallWaiter waiter{polls, wait.goneAtPlus1[0]};
-        CHECK(!writeWaiting(waiter), "gives up when the host stops reading");
+        HostPaced                   paced{waiter, hostRead, false};
+        CHECK(!writeWaiting(paced), "gives up when the host stops reading");
+        CHECK(paced.asked > polls, "after the stall's polls");
         CHECK(wait.goneAtPlus1[0] != 0, "and latches");
     }
     {
         uc_log::detail::StallWaiter waiter{polls, wait.goneAtPlus1[0]};
-        auto const                  start = std::chrono::steady_clock::now();
-        bool const                  ok    = writeWaiting(waiter);
-        auto const                  took  = std::chrono::steady_clock::now() - start;
-        CHECK(!ok && took < std::chrono::milliseconds{1}, "the latch ends the next wait at once");
+        HostPaced                   paced{waiter, hostRead, false};
+        CHECK(!writeWaiting(paced) && paced.asked == 1, "the latch ends the next wait at once");
     }
-    reading = true;
-    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    hostRead();   // the host reads again
     {
         uc_log::detail::StallWaiter waiter{polls, wait.goneAtPlus1[0]};
-        CHECK(writeWaiting(waiter),
+        HostPaced                   paced{waiter, hostRead, true};
+        CHECK(writeWaiting(paced),
               "the host read again: the latch is gone, the write waits and lands");
     }
-    while(Buffer::unread(ring.block) != 0) { std::this_thread::yield(); }
+    while(Buffer::unread(ring.block) != 0) { hostRead(); }
     CHECK(Buffer::unread(ring.block) == 0, "unread() reaches 0 once the host drained the ring");
-    stop = true;
-    host.join();
+    CHECK(readBytes != 0, "the host read");
 }
 
 // The panic's wait is timed by the chip's microsecond counter, not by polls: however long a poll takes, a host that does

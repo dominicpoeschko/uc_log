@@ -1,5 +1,6 @@
 #pragma once
 
+#include "uc_log/detail/Clock.hpp"
 #include "uc_log/detail/MapSymbols.hpp"
 #include "uc_log/detail/SymbolMatch.hpp"
 #include "uc_log/detail/TargetOp.hpp"
@@ -9,7 +10,6 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -97,12 +97,12 @@ public:
         std::optional<Halt> halt;
 
         struct Stack {
-            std::string                           name;
-            std::uint32_t                         low{};
-            std::uint32_t                         high{};
-            std::optional<records::StackUse>      use;
-            std::string                           error;
-            std::chrono::steady_clock::time_point measured{};
+            std::string                       name;
+            std::uint32_t                     low{};
+            std::uint32_t                     high{};
+            std::optional<records::StackUse>  use;
+            std::string                       error;
+            uc_log::detail::Clock::time_point measured{};
         };
 
         std::vector<Stack> stacks;
@@ -121,14 +121,14 @@ public:
         std::vector<Ring> rings;
 
         struct Watch {
-            std::string                           name;
-            std::uint32_t                         address{};
-            std::uint32_t                         size{};   // read
-            std::uint32_t                         symbolSize{};
-            std::vector<std::byte>                value;
-            std::chrono::steady_clock::time_point changed{};   // the last change seen
-            std::uint64_t                         changes{};
-            std::string                           error;
+            std::string                       name;
+            std::uint32_t                     address{};
+            std::uint32_t                     size{};   // read
+            std::uint32_t                     symbolSize{};
+            std::vector<std::byte>            value;
+            uc_log::detail::Clock::time_point changed{};   // the last change seen
+            std::uint64_t                     changes{};
+            std::string                       error;
         };
 
         std::vector<Watch> watches;
@@ -456,7 +456,7 @@ private:
     static constexpr std::uint32_t PcsrNone  = 0xFFFF'FFFFU;
     static constexpr std::size_t   PcsrReads = 64;
 
-    using Clock = std::chrono::steady_clock;
+    using Clock = uc_log::detail::Clock;
 
     // remote_fmt's call-site tags (catalog.hpp): one per log line, named after the whole format
     // string, in an INFO section at address 0 - symbols of the map that are not in the target
@@ -1129,11 +1129,11 @@ private:
     std::atomic<bool>          profileChecked_{false};
     std::atomic<std::uint64_t> version_{0};
 
-    std::mutex                  wakeMutex_;
-    std::condition_variable_any wake_;
-    bool                        woken_{};
+    std::mutex               wakeMutex_;
+    Clock::ConditionVariable wake_;
+    bool                     woken_{};
 
-    std::jthread thread_;   // last: started after every member above exists
+    Clock::Thread thread_;   // last: started after every member above exists
 };
 
 }   // namespace uc_log::detail

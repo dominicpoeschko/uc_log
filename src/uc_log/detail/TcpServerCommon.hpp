@@ -42,6 +42,7 @@
 #endif
 
 #include "remote_fmt/fmt_wrapper.hpp"
+#include "uc_log/detail/ClockedIo.hpp"
 #include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/detail/TcpPortStatus.hpp"
 
@@ -146,13 +147,13 @@ namespace uc_log { namespace detail {
 
     struct AsioContextRunner {
         boost::asio::io_context& ioc;
-        std::jthread             thread;
+        Clock::Thread            thread;
 
         explicit AsioContextRunner(AsioContext& context UC_LOG_LIFETIMEBOUND)
           : ioc{context.ioc}
           , thread{[this](std::stop_token const& stoken) {
               std::stop_callback const onStop{stoken, [this]() { ioc.stop(); }};
-              ioc.run();
+              runIo(ioc);
           }} {}
     };
 
@@ -337,7 +338,9 @@ namespace uc_log { namespace detail {
         std::optional<std::uint16_t> pendingRestartPort;   // ioc thread only
         std::atomic<TcpPortStatus>   status{TcpPortStatus::NotStarted};
         std::atomic<std::uint16_t>   currentPort{0};
-        std::atomic<bool>            ownsSocketFile{false};
+        std::atomic<std::uint64_t>   binds{
+          0};   // successful binds so far: a rebind is done once it moves
+        std::atomic<bool> ownsSocketFile{false};
 
         template<typename AcceptF,
                  typename ErrorF,
@@ -476,6 +479,7 @@ namespace uc_log { namespace detail {
                 acceptor->listen();
                 status      = TcpPortStatus::Active;
                 currentPort = port;
+                ++binds;
                 if(statusChangef) { statusChangef(); }
                 asyncAcceptOne();
             } catch(boost::system::system_error const& e) {

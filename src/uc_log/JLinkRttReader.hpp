@@ -4,6 +4,7 @@
 #include "uc_log/RttBlockInfo.hpp"
 #include "uc_log/detail/AnnouncedReset.hpp"
 #include "uc_log/detail/BootLedger.hpp"
+#include "uc_log/detail/Clock.hpp"
 #include "uc_log/detail/DecodeWorker.hpp"
 #include "uc_log/detail/DirectRtt.hpp"
 #include "uc_log/detail/Le32.hpp"
@@ -24,7 +25,6 @@
 #include <deque>
 #include <expected>
 #include <functional>
-#include <future>
 #include <limits>
 #include <map>
 #include <memory>
@@ -49,7 +49,7 @@ struct BasicJLinkRttReader {
     using StallSignature = uc_log::detail::StallSignature;
 
 private:
-    using Clock  = std::chrono::steady_clock;
+    using Clock  = uc_log::detail::Clock;
     using Status = typename TransportT::Status;
 
 public:
@@ -186,7 +186,7 @@ private:
         auto lastAnswer = Clock::now();
         while(!stoken.stop_requested() && !uc_log::detail::tryReadWord(jlink, CpuidAddress)) {
             checkTargetAnswers(jlink, lastAnswer);
-            std::this_thread::sleep_for(std::chrono::milliseconds{50});
+            Clock::sleep_for(std::chrono::milliseconds{50});
         }
     }
 
@@ -251,7 +251,7 @@ private:
                 }
             }
             serviceTargetOps(jlink);
-            std::this_thread::sleep_for(ControlBlockPoll);
+            Clock::sleep_for(ControlBlockPoll);
         }
     }
 
@@ -499,7 +499,7 @@ private:
                 }
             }
             if(Clock::now() >= deadline) { break; }
-            std::this_thread::sleep_for(FlashReadyPoll);
+            Clock::sleep_for(FlashReadyPoll);
         }
         if(wait.count() != 0) {
             toolMessageCallback(
@@ -597,9 +597,9 @@ private:
                 for(; done != pending->ops.size(); ++done) {
                     answers.push_back(runOp(jlink, pending->ops[done]));
                 }
-                pending->result.set_value(std::move(answers));
+                pending->setResult(std::move(answers));
             } catch(std::exception const& e) {
-                pending->result.set_value(std::unexpected{
+                pending->setResult(std::unexpected{
                   fmt::format("{} ({})", e.what(), uc_log::detail::describe(pending->ops[done]))});
             }
         }
@@ -651,9 +651,7 @@ private:
     void failTargetOps(std::string const& why) {
         std::lock_guard<std::mutex> const lock{pendingOpsMutex_};
         for(auto& pending : pendingOps_) {
-            if(pending->claim(PendingOps::taken)) {
-                pending->result.set_value(std::unexpected{why});
-            }
+            if(pending->claim(PendingOps::taken)) { pending->setResult(std::unexpected{why}); }
         }
         pendingOps_.clear();
     }
@@ -690,14 +688,14 @@ private:
                 announcedPause = runSession(jlink, stoken);
             } catch(TargetSilent const& e) {
                 escalateSilentTarget(e.what());
-                std::this_thread::sleep_for(std::chrono::milliseconds{1000});
+                Clock::sleep_for(std::chrono::milliseconds{1000});
             } catch(std::exception const& e) {
                 toolErrorMessageCallback(fmt::format("caught {}", e.what()));
-                std::this_thread::sleep_for(std::chrono::milliseconds{1000});
+                Clock::sleep_for(std::chrono::milliseconds{1000});
             } catch(...) {
                 // a non-std exception (e.g. from a callback) must reconnect, not terminate
                 toolErrorMessageCallback("caught unknown exception");
-                std::this_thread::sleep_for(std::chrono::milliseconds{1000});
+                Clock::sleep_for(std::chrono::milliseconds{1000});
             }
             Status notRunning{};
             notRunning.isRunning = 0;
@@ -711,7 +709,7 @@ private:
                   fmt::format("off the probe {} ms after the recovery: the new boot runs its boot "
                               "ROM untouched",
                               RecoveryOffProbe.count()));
-                std::this_thread::sleep_for(RecoveryOffProbe);
+                Clock::sleep_for(RecoveryOffProbe);
             }
         }
     }
@@ -838,7 +836,7 @@ private:
         try {
             jlink.resetTarget();
             jlink.go();
-            std::this_thread::sleep_for(RetryBootTime);
+            Clock::sleep_for(RetryBootTime);
         } catch(std::exception const& e) {
             toolErrorMessageCallback(
               fmt::format("the reset before the next download attempt failed: {}", e.what()));
@@ -1187,7 +1185,7 @@ private:
                     break;
                 }
             }
-            std::this_thread::sleep_for(DecodeGatePoll);
+            Clock::sleep_for(DecodeGatePoll);
             if(decodeAllowed(jlink)) {
                 opened = true;
                 break;
@@ -1252,6 +1250,23 @@ private:
         noteHalt(s);
         Status const current = s.rtt->status();
         status               = current;
+        // The block's id gone: a reboot (a boot ROM or the new image's init cleared it) whose S_RESET_ST this session
+        // has not looked at yet - with the epoch fence only every BusyHaltPoll. As a "lost connection" the next connect
+        // threw the reset bit away and started without waiting for the block: the health checks of that wait (a chip
+        // the DLL parked in its boot ROM) never ran. The next session waits for the block, as after a reset.
+        if(current.isRunning == 0 && s.blockInfo.address != 0) {
+            bool const reset = resetSinceLastLook(s.jlink);
+            if(reset || !controlBlockPresent(s.jlink, s.blockInfo.address)) {
+                messageCallback(
+                  fmt::format("the RTT control block at {:#010x} is gone{}: a new RTT "
+                              "session once it is back",
+                              s.blockInfo.address,
+                              reset ? " after a reset from outside" : ""));
+                handover_.awaitBlock = true;
+                if(reset) { handover_.endedEpoch = s.rtt->sessionEpoch(); }
+                return SessionEnd::newBoot;
+            }
+        }
         if(current.isRunning == 0 || current.numUpBuffers != s.started.numUpBuffers
            || current.numDownBuffers != s.started.numDownBuffers)
         {
@@ -1260,7 +1275,7 @@ private:
         warnIfQuiet(s);
         if(auto const end = checkQuietTarget(s)) { return end; }
         // no pause after a pass that found bytes: the target is writing, the next pass reads at once
-        if(!morePending) { std::this_thread::sleep_for(std::chrono::milliseconds{1}); }
+        if(!morePending) { Clock::sleep_for(std::chrono::milliseconds{1}); }
         serviceGuiRequests(s.jlink);
         serviceProbeListRequest();
         serviceTargetOps(s.jlink);
@@ -1301,7 +1316,7 @@ private:
         s.nextAnnouncePoll = Clock::now() + AnnouncedResetPoll;
         auto const block   = readAnnouncedResetBlock(s.jlink, *s.announceAt);
         if(!block || !block->pending()) { return std::nullopt; }
-        std::this_thread::sleep_for(AnnouncedResetDrain);
+        Clock::sleep_for(AnnouncedResetDrain);
         auto const unfinished = s.drainAll(haltedRecently).second;
         // The firmware waits a bounded time (~0.5 s). A printer slow to see the request - busy with a halt it caught,
         // a slow probe - finds it reset already: writing then would clear the id of the new boot's control block and
@@ -1477,7 +1492,7 @@ private:
         auto const end  = Clock::now() + pause;
         while(!stoken.stop_requested() && Clock::now() < end) {
             failTargetOps(std::string{PausedMessage});
-            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+            Clock::sleep_for(std::chrono::milliseconds{10});
         }
         pausedForReset_ = false;
         failTargetOps(std::string{PausedMessage});
@@ -1504,7 +1519,7 @@ private:
         while(true) {
             if(auto const armed = armAnnouncedReset(jlink, address, true); armed) { return armed; }
             if(stoken.stop_requested() || Clock::now() >= end) { break; }
-            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            Clock::sleep_for(std::chrono::milliseconds{1});
         }
         return armAnnouncedReset(jlink, address, false);   // says why
     }
@@ -1626,9 +1641,19 @@ private:
     struct PendingOps {
         enum State : int { queued, taken, abandoned };
 
-        std::vector<TargetOp>      ops;
-        std::promise<TargetResult> result;
-        std::atomic<int>           state{queued};
+        std::vector<TargetOp>       ops;
+        std::atomic<int>            state{queued};
+        std::mutex                  mutex;
+        Clock::ConditionVariable    done;
+        std::optional<TargetResult> result;   // mutex
+
+        void setResult(TargetResult r) {
+            {
+                std::lock_guard<std::mutex> const lock{mutex};
+                result = std::move(r);
+            }
+            done.notify_all();
+        }
 
         bool claim(State to) {
             int expected = queued;
@@ -1719,7 +1744,7 @@ private:
     std::mutex                                             probesMutex;
     std::vector<Probe>                                     probes_;
     std::atomic<std::uint64_t>                             probesVersion_{0};
-    std::jthread                                           thread;
+    Clock::Thread                                          thread;
 
 public:
     template<typename BlockInfoF,
@@ -1770,18 +1795,20 @@ public:
         if(pausedForReset_) { return std::unexpected{std::string{PausedMessage}}; }
         auto pending = std::make_shared<PendingOps>();
         pending->ops.assign(ops.begin(), ops.end());
-        auto future = pending->result.get_future();
         {
             std::lock_guard<std::mutex> const lock{pendingOpsMutex_};
             pendingOps_.push_back(pending);
         }
-        if(future.wait_for(timeout) != std::future_status::ready
+        std::unique_lock<std::mutex> lock{pending->mutex};
+        auto const answered = [&pending]() { return pending->result.has_value(); };
+        if(!pending->done.wait_for(lock, timeout, answered)
            && pending->claim(PendingOps::abandoned))
         {
             return std::unexpected{std::string{"timed out: is the target connected?"}};
         }
         // done, or the reader has started it: its result is the truth, a late one included
-        return future.get();
+        pending->done.wait(lock, answered);
+        return std::move(*pending->result);
     }
 
     /// Called on the reader thread before every connect (jlinkPrinter: SEGGER's daily EDU terms accepted for today -
@@ -1900,7 +1927,7 @@ public:
         flashFlag         = true;
         bool flashed      = false;
         while(Clock::now() < end && !(cancelled && cancelled())) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{20});
+            Clock::sleep_for(std::chrono::milliseconds{20});
             if(!flashed) {
                 std::lock_guard<std::mutex> const lock{flashOutcome_.mutex};
                 if(flashOutcome_.serial == serial) { continue; }
@@ -1937,7 +1964,7 @@ public:
         targetResetFlag = true;
         std::optional<std::uint64_t> session;
         while(Clock::now() < end && !(cancelled && cancelled())) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{20});
+            Clock::sleep_for(std::chrono::milliseconds{20});
             if(!session) {
                 std::lock_guard<std::mutex> const lock{resetOutcome_.mutex};
                 if(resetOutcome_.serial < request) { continue; }

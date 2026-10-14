@@ -1,5 +1,6 @@
 // The TUI's target inspectors: map symbols (lld and GNU ld), the record decoders, and the worker
 // against a fake target - what kvasir_bench.py crash/ub/stack/trace/peek/profile/panic read.
+#include "uc_log/detail/Clock.hpp"
 #include "uc_log/detail/MapSymbols.hpp"
 #include "uc_log/detail/TargetInspector.hpp"
 #include "uc_log/detail/TargetOp.hpp"
@@ -234,7 +235,7 @@ template<typename F>
 static bool eventually(F&& f) {
     for(int i = 0; i != 300; ++i) {
         if(f()) { return true; }
-        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        uc_log::detail::Clock::sleep_for(std::chrono::milliseconds{10});
     }
     return false;
 }
@@ -314,9 +315,13 @@ static void inspectorTests() {
     std::mutex               notesMutex;
     std::vector<std::string> notes;
     TargetInspector          inspector{
-      TargetInspector::Hooks{.memory = [&](std::span<InspectorAccess const> a,
-                             std::chrono::milliseconds) { return target.access(a); },
-                             .connected = [] { return true; },
+      TargetInspector::Hooks{.memory =
+                               [&](std::span<InspectorAccess const> a, std::chrono::milliseconds) {
+                                   // a probe round trip: the profile samples back to back, and the virtual
+                                   // time moves only while the threads wait
+                                   uc_log::detail::Clock::sleep_for(std::chrono::milliseconds{1});
+                                   return target.access(a);
+                               }, .connected = [] { return true; },
                              .sessions  = [] { return std::uint64_t{1}; },
                              .mapFile   = [&] { return mapPath; },
                              .changed   = [&] { ++changes; },
@@ -444,7 +449,7 @@ static void inspectorTests() {
     };
     inspector.clearRecords(true);
     CHECK(cleared("not cleared: halted"), "a halted core's records are not cleared");
-    std::this_thread::sleep_for(std::chrono::milliseconds{250});
+    uc_log::detail::Clock::sleep_for(std::chrono::milliseconds{250});
     CHECK(target.read(0x200012d4U) == FaultMagic && target.read(0x200012bcU) == PanicMagic
             && target.ramWrites == 0 && inspector.snapshot().halt.has_value(),
           "refused: nothing written, the halt's capture kept");
@@ -487,7 +492,7 @@ static void inspectorTests() {
     {
         std::string text{LldMap};
         text.replace(text.find("20000108 20000108"), 17, "20000104 20000104");
-        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+        uc_log::detail::Clock::sleep_for(std::chrono::milliseconds{20});
         std::ofstream{mapPath} << text;
         std::filesystem::last_write_time(mapPath,
                                          std::filesystem::file_time_type::clock::now()
@@ -499,6 +504,8 @@ static void inspectorTests() {
 }
 
 int main() {
+    // the inspector's polling on the virtual clock: no check depends on how fast the machine runs
+    uc_log::detail::VirtualTime const virtualTime;
     mapTests();
     recordTests();
     symbolMatchTests();

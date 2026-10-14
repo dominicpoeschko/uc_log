@@ -2,6 +2,7 @@
 // ring as rtt.hpp does (bytes first, then the write offset), the printer's reads in pieces, and sessions that end and
 // start again in the middle of the stream. Every byte arrives once, in order: a session that ends leaves what it did
 // not read in the ring (the DLL's RTT took it and dropped it).
+#include "uc_log/detail/Clock.hpp"
 #include "uc_log/detail/DirectRtt.hpp"
 
 #include <algorithm>
@@ -543,8 +544,8 @@ void oddEpoch() {
         target.put(Target::Epoch, 7);
         std::vector<std::uint8_t> old(20, 0x11);
         target.produce(old);   // the ended boot's tail, still in the old block
-        std::thread boot{[&] {
-            std::this_thread::sleep_for(std::chrono::milliseconds{30});
+        uc_log::detail::Clock::Thread boot{[&] {
+            uc_log::detail::Clock::sleep_for(std::chrono::milliseconds{30});
             std::lock_guard<std::mutex> const lock{target.m};
             target.put(Target::UpDesc + 12, 0);
             target.put(Target::UpDesc + 16, 0);
@@ -569,9 +570,9 @@ void oddEpoch() {
         target.put(Target::Epoch, 9);
         std::vector<std::uint8_t> old(20, 0x11);
         target.produce(old);
-        auto const start = std::chrono::steady_clock::now();
+        auto const start = uc_log::detail::Clock::now();
         auto rtt = Rtt::open(bus, Target::Base, 2, std::optional<std::uint32_t>{Target::Epoch});
-        auto const took = std::chrono::steady_clock::now() - start;
+        auto const took = uc_log::detail::Clock::now() - start;
         CHECK(rtt && took < std::chrono::seconds{1}, "odd for good: open does not hang");
         CHECK(rtt && rtt->staleSkipped() == 20U,
               "odd for good: the rings' 20 bytes skipped and counted");
@@ -747,6 +748,8 @@ void wrapSweep() {
 }   // namespace
 
 int main() {
+    // EpochSettle and the boot below on the virtual clock (the stream's writer is a target: it never waits on it)
+    uc_log::detail::VirtualTime const virtualTime;
     wrapSweep();
     controlBlockLayout();
     reinitInsideAnAccess();

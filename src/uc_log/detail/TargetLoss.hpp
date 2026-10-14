@@ -6,6 +6,7 @@
 // a ring that went quiet after its loss. Pure: fed with log entries, raw bytes and times.
 
 #include "LogEntry.hpp"
+#include "uc_log/detail/Clock.hpp"
 #include "uc_log/detail/Le32.hpp"
 
 #include <charconv>
@@ -133,7 +134,7 @@ inline std::optional<LedgerPlace> findLossLedger(std::istream& map,
 // Counts the lost-records per channel, and watches the ledger for a loss nobody announced.
 class TargetLoss {
 public:
-    using Clock = std::chrono::steady_clock;
+    using Clock = uc_log::detail::Clock;
 
     // A ring may hold a pending count for a while: the next line on it reports it.
     static constexpr auto QuietReportAfter = std::chrono::seconds{2};

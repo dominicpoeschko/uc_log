@@ -1,15 +1,15 @@
 #pragma once
 
+#include "uc_log/detail/Clock.hpp"
+
 #include <algorithm>
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <deque>
 #include <functional>
 #include <map>
 #include <mutex>
 #include <stop_token>
-#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -22,7 +22,7 @@
 template<typename Entry, typename TimeProjection, typename ChannelProjection, typename Function>
 struct TimeDelayedQueue {
 private:
-    using Clock = std::chrono::steady_clock;
+    using Clock = uc_log::detail::Clock;
 
     struct QEntry {
         Clock::time_point                     arrival;
@@ -38,12 +38,12 @@ private:
     [[no_unique_address]] Function           f;
     std::chrono::milliseconds                delay;
     std::chrono::milliseconds                maxHold;
-    std::condition_variable_any              cv;
+    Clock::ConditionVariable                 cv;
     std::mutex                               m;
     // one hand-out at a time, from collecting to the last f(): a flush() from another thread must not interleave
     // its batch with the queue thread's
-    std::mutex   handOutMutex;
-    std::jthread thread;
+    std::mutex    handOutMutex;
+    Clock::Thread thread;
 
     // `all` ignores the waiting times
     std::deque<QEntry>* next(Clock::time_point now,

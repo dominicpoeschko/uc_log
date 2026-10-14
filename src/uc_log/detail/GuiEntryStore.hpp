@@ -2,6 +2,7 @@
 
 #include "uc_log/FTXUI_Utils.hpp"
 #include "uc_log/LogLevel.hpp"
+#include "uc_log/detail/Clock.hpp"
 #include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 #include "uc_log/metric_utils.hpp"
@@ -404,8 +405,8 @@ namespace uc_log { namespace FTXUIGui {
         std::atomic<bool>          refilterInProgress{false};
         std::atomic<std::size_t>   refilterScanned{0};
         std::atomic<std::size_t>   refilterTotal{0};
-        std::optional<std::chrono::steady_clock::time_point> refilterDeadline;
-        std::condition_variable_any                          refilterCv;
+        std::optional<uc_log::detail::Clock::time_point> refilterDeadline;
+        std::condition_variable_any                      refilterCv;
 
         // set once by the owner before data flows; must be cheap and lock-free towards UI
         std::function<void()> requestRedraw;
@@ -516,7 +517,7 @@ namespace uc_log { namespace FTXUIGui {
             std::lock_guard<std::mutex> const lock{mutex};
             if(searchText == text) { return; }
             searchText       = text;
-            refilterDeadline = std::chrono::steady_clock::now() + GUI_Constants::FilterDebounce;
+            refilterDeadline = uc_log::detail::Clock::now() + GUI_Constants::FilterDebounce;
         }
 
         void requestRefilterLocked() {
@@ -543,7 +544,7 @@ namespace uc_log { namespace FTXUIGui {
         // Trailing-edge debounce for text inputs: each keystroke pushes the deadline.
         void scheduleRefilterDebounced() {
             std::lock_guard<std::mutex> const lock{mutex};
-            refilterDeadline = std::chrono::steady_clock::now() + GUI_Constants::FilterDebounce;
+            refilterDeadline = uc_log::detail::Clock::now() + GUI_Constants::FilterDebounce;
         }
 
         // Leading-edge throttle for continuous triggers (uc-time live mode): a pending
@@ -551,14 +552,14 @@ namespace uc_log { namespace FTXUIGui {
         void scheduleRefilterThrottledLocked() {
             if(!refilterDeadline) {
                 refilterDeadline
-                  = std::chrono::steady_clock::now() + GUI_Constants::LiveRefilterThrottle;
+                  = uc_log::detail::Clock::now() + GUI_Constants::LiveRefilterThrottle;
             }
         }
 
         // called periodically from the UI loop; fires the deferred refilter when due
         void pollRefilterDeadline() {
             std::lock_guard<std::mutex> const lock{mutex};
-            if(refilterDeadline && std::chrono::steady_clock::now() >= *refilterDeadline) {
+            if(refilterDeadline && uc_log::detail::Clock::now() >= *refilterDeadline) {
                 requestRefilterLocked();
             }
         }
@@ -757,7 +758,7 @@ namespace uc_log { namespace FTXUIGui {
 
             std::uint64_t seenDisplayVersion{std::numeric_limits<std::uint64_t>::max()};
             std::uint64_t seenLocationsVersion{std::numeric_limits<std::uint64_t>::max()};
-            std::chrono::steady_clock::time_point lastLocationRebuild{};
+            uc_log::detail::Clock::time_point lastLocationRebuild{};
 
             std::string fileNameOf(std::uint64_t locationKey) const {
                 auto const id = static_cast<std::size_t>(locationKey >> 32U);
@@ -825,7 +826,7 @@ namespace uc_log { namespace FTXUIGui {
                 // labels contain live counts, so rebuilding on every entry would be O(N)
                 // per frame again; new locations rebuild immediately, count updates are
                 // throttled
-                auto const now         = std::chrono::steady_clock::now();
+                auto const now         = uc_log::detail::Clock::now();
                 bool const newLocation = m.locationList.size() != allSourceLocations.size();
                 if(newLocation || now - m.lastLocationRebuild > GUI_Constants::LocationLabelRefresh)
                 {

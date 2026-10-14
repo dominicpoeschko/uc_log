@@ -1,28 +1,36 @@
 // Any bytes over a real socket, in chunks the input chooses: what comes back is valid JSON lines,
 // and afterwards a fresh connection's ping is still answered.
+//
+// On the server's virtual clock (uc_log/detail/Clock.hpp): its threads and this one move the time, so "nothing more
+// came for 20 ms" means the server had nothing left to do, and an unanswered ping a server that is stuck - not a
+// machine that was slow. The same input does the same on every run.
 
 #include "../ControlProtocolFixture.hpp"
 #include "FuzzChecks.hpp"
+#include "uc_log/detail/Clock.hpp"
 
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <fcntl.h>
 #include <filesystem>
 #include <memory>
-#include <poll.h>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <thread>
 #include <unistd.h>
 
 namespace {
 namespace ctl = uc_log::control;
 namespace fx  = uc_log::control_fixture;
 
+using uc_log::detail::Clock;
+
 struct Fixture {
+    uc_log::detail::VirtualTime   time;   // first: the server's threads take part in it
     std::filesystem::path         path;
     fx::FakeTarget                fake;
     uc_log::detail::ControlServer server;
@@ -35,7 +43,7 @@ struct Fixture {
                path} {
         server.setTarget(fake.target());
         for(int i = 0; i != 500 && server.getStatus() != TcpPortStatus::Active; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            Clock::sleep_for(std::chrono::milliseconds{1});
         }
     }
 };
@@ -57,18 +65,25 @@ int connectTo(std::filesystem::path const& path) {
     return fd;
 }
 
+// what arrives until `ms` of the clock pass without data (or the first line, or the end); never blocks in recv: the
+// server moves the time only while this thread waits on the clock too
 std::string drain(int  fd,
                   int  ms,
                   bool untilLine = false) {
     std::string got;
     char        buffer[65536];
-    while(true) {
-        pollfd p{.fd = fd, .events = POLLIN, .revents = 0};
-        if(::poll(&p, 1, ms) <= 0) { break; }
+    ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL) | O_NONBLOCK);
+    auto quietSince = Clock::now();
+    while(Clock::now() - quietSince < std::chrono::milliseconds{ms}) {
         auto const n = ::recv(fd, buffer, sizeof(buffer), 0);
-        if(n <= 0) { break; }
+        if(n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) { break; }
+        if(n < 0) {
+            Clock::sleep_for(std::chrono::milliseconds{1});
+            continue;
+        }
         got.append(buffer, static_cast<std::size_t>(n));
         if(untilLine && got.find('\n') != std::string::npos) { break; }
+        quietSince = Clock::now();
     }
     return got;
 }
@@ -110,7 +125,7 @@ extern "C" int LLVMFuzzerTestOneInput(std::uint8_t const* data,
     }
     ::close(fd);
 
-    // 5 x 2 s: a loaded machine can pause a thread for seconds; only a stuck server should fail
+    // 5 x 2 s of the server's clock: only a stuck server fails
     std::string const ping = "{\"cmd\":\"ping\"}\n";
     std::string       answer;
     for(int attempt = 0; attempt != 5 && answer.empty(); ++attempt) {

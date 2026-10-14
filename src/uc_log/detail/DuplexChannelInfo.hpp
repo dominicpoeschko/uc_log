@@ -20,7 +20,8 @@ namespace uc_log { namespace detail {
         std::uint64_t bytesToTarget{};
         std::uint64_t bytesFromTarget{};
         std::uint64_t
-          bytesDropped{};   // host -> client data dropped because the client was too slow
+          bytesDropped{};        // host -> client data dropped because the client was too slow
+        std::uint64_t binds{};   // successful binds of its listener: a rebind is done once it moves
     };
 
 }}   // namespace uc_log::detail

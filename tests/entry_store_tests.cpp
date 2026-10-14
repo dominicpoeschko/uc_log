@@ -3,9 +3,11 @@
 // and a store-mutex latency probe.
 //
 // Build (from scratchpad):
+#include "uc_log/detail/Clock.hpp"
 #include "uc_log/detail/GuiEntryStore.hpp"
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
@@ -104,7 +106,7 @@ static void quiesce(GuiEntryStore& store) {
                 return;
             }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        uc_log::detail::Clock::sleep_for(std::chrono::milliseconds{1});
     }
 }
 
@@ -152,7 +154,10 @@ static void validateFiltered(GuiEntryStore&               store,
 
 int main(int    argc,
          char** argv) {
-    std::size_t total = 100'000;
+    // the refilter debounce on the virtual clock: it passes while this thread sleeps (the store's worker and the
+    // producer below never wait on the clock: they only work)
+    uc_log::detail::VirtualTime const virtualTime;
+    std::size_t                       total = 100'000;
     if(argc > 1) { total = std::strtoull(*std::next(argv, 1), nullptr, 10); }
 
     static constexpr std::array files{"main.cpp", "foo.hpp", "bar.c", "baz.hpp", "qux.cpp"};
@@ -177,7 +182,6 @@ int main(int    argc,
     };
 
     // ---- ingest ------------------------------------------------------------------------
-    auto const t0 = std::chrono::steady_clock::now();
     for(std::size_t i = 0; i < total; ++i) {
         auto const g = randomGroup(i);
         groups.push_back(g);
@@ -186,13 +190,7 @@ int main(int    argc,
         store.addEntry(std::chrono::system_clock::now(),
                        makeEntry(g.channel, g.level, g.file, g.line, g.ucSec, msg));
     }
-    auto const ingestMs
-      = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-          .count();
-    std::printf("-- ingested %zu groups in %lld ms (%zu redraw requests)\n",
-                total,
-                static_cast<long long>(ingestMs),
-                redraws.load());
+    std::printf("-- ingested %zu groups (%zu redraw requests)\n", total, redraws.load());
 
     // ---- A/B filter scenarios ------------------------------------------------------------
     auto applyAndCheck = [&](RefFilter const& f, char const* what) {
@@ -310,7 +308,7 @@ int main(int    argc,
             if(round % 2 == 0) { f.state.enabledLogLevels = {LogLevel::error, LogLevel::crit}; }
             if(round % 3 == 0) { f.state.enabledChannels = {0, 1, 2}; }
             store.setFilterState(f.state);
-            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+            uc_log::detail::Clock::sleep_for(std::chrono::milliseconds{5});
         }
         produce = false;
         producer.join();
@@ -328,35 +326,52 @@ int main(int    argc,
         validateFiltered(store, groups, final, "post-concurrency recount");
     }
 
-    // ---- mutex latency probe while big refilters run -------------------------------------
-    {
+    // ---- the store mutex is free while a big refilter scans -------------------------------
+    // The scan is stopped in its middle (the redraw it asks for every few chunks, outside the lock) and the mutex is
+    // taken right then: a scan under the lock would hold it for the whole store. No clock decides it.
+    if(total >= 5 * GUI_Constants::RefilterChunk) {
         store.setFilterState(FilterState{});
         quiesce(store);
-        std::atomic<bool> running{true};
-        std::atomic<long> maxAcquireUs{0};
-        std::thread       probe{[&]() {
-            while(running.load()) {
-                auto const start = std::chrono::steady_clock::now();
-                { std::lock_guard<std::mutex> const lock{store.mutex}; }
-                auto const us       = std::chrono::duration_cast<std::chrono::microseconds>(
-                                        std::chrono::steady_clock::now() - start)
-                                        .count();
-                long       expected = maxAcquireUs.load();
-                while(us > expected && !maxAcquireUs.compare_exchange_weak(expected, us)) {}
-                std::this_thread::sleep_for(std::chrono::microseconds{100});
+        std::mutex              m;
+        std::condition_variable cv;
+        bool                    paused = false;
+        bool                    resume = false;
+        bool                    armed  = true;   // the first redraw from inside the scan pauses it
+        store.requestRedraw            = [&]() {
+            ++redraws;
+            if(!store.refilterInProgress.load()
+               || store.refilterScanned.load() >= store.refilterTotal.load())
+            {
+                return;
             }
-        }};
-        for(int i = 0; i < 10; ++i) {
-            RefFilter f;
-            f.state.enabledChannels = {static_cast<std::size_t>(i % 6)};
-            store.setFilterState(f.state);
-            quiesce(store);
+            std::unique_lock<std::mutex> lock{m};
+            if(!std::exchange(armed, false)) { return; }
+            paused = true;
+            cv.notify_all();
+            cv.wait(lock, [&] { return resume; });
+        };
+        RefFilter f;
+        f.state.enabledChannels = {1};
+        store.setFilterState(f.state);
+        store.pollRefilterDeadline();
+        {
+            std::unique_lock<std::mutex> lock{m};
+            while(!paused) {
+                lock.unlock();
+                store.pollRefilterDeadline();   // the debounce, then the scan starts
+                uc_log::detail::Clock::sleep_for(std::chrono::milliseconds{1});
+                lock.lock();
+            }
         }
-        running = false;
-        probe.join();
-        std::printf("-- max store-mutex acquire latency during refilters: %ld us\n",
-                    maxAcquireUs.load());
-        CHECK(maxAcquireUs.load() < 20'000, "store mutex never held long");
+        bool const free = std::unique_lock<std::mutex>{store.mutex, std::try_to_lock}.owns_lock();
+        CHECK(free, "store mutex free in the middle of a refilter's scan");
+        {
+            std::lock_guard<std::mutex> const lock{m};
+            resume = true;
+        }
+        cv.notify_all();
+        quiesce(store);
+        store.requestRedraw = [&redraws]() { ++redraws; };
     }
 
     // ---- clearAll mid-scan ----------------------------------------------------------------

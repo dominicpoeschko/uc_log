@@ -1,6 +1,7 @@
 #pragma once
 
 #include "remote_fmt/parser.hpp"
+#include "uc_log/detail/Clock.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -19,7 +20,7 @@ namespace uc_log { namespace detail {
     // transport: the caller appends raw bytes, so the framing/resync logic is testable
     // without hardware.
     struct RttChannel {
-        using Clock = std::chrono::steady_clock;
+        using Clock = uc_log::detail::Clock;
 
         // a corrupted stream must resync in bulk (not one byte per timeout) and the buffer
         // must never grow without bound when the end marker never arrives

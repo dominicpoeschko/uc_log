@@ -170,7 +170,8 @@ namespace uc_log { namespace detail {
                                      hostToTargetOnly.load(),
                                      bytesToTarget.load(),
                                      bytesFromTarget.load(),
-                                     bytesDropped.load()};
+                                     bytesDropped.load(),
+                                     listener.binds.load()};
         }
 
     private:

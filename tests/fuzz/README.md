@@ -21,14 +21,19 @@ $b/uc_log_fuzz_control_request -max_total_time=300 -timeout=30 -dict=tests/fuzz/
     $b/fuzz_corpus/request $b/fuzz_seeds/request tests/fuzz/regressions/request
 ```
 
-ctest runs each for 20 000 inputs or 30 s, whichever ends first, with `control_protocol.dict` over two read-only corpora:
+ctest runs each for a fixed number of inputs (20 000) with `-seed=1 -use_cmp=0`, never for a time - the session
+fuzzer only replays its corpus there (`-runs=0`: its coverage includes the server's threads, whose interleaving
+differs between runs, so its new inputs would too; it runs on the server's virtual clock, uc_log/detail/Clock.hpp) - and its writable corpus `fuzz_new/<name>` is emptied first: every run on every machine tries the same inputs
+(the fuzzers are built with `-fno-sanitize-coverage=stack-depth` - that feature depends on where ASLR put the stack,
+and `-use_cmp` feeds pointer values into the mutations; either made a seeded run take another path each time). With
+`control_protocol.dict`, over two read-only corpora:
 
 - the seeds, generated, not committed: `uc_log_control_protocol_tool seeds <dir>` writes the golden
   transcript's requests (and a few log messages) to `build/<config>/tests/fuzz_seeds/<name>/`; the
   ctest fixture `uc_log_fuzz_seeds` runs it, so the seeds follow the protocol;
 - `regressions/<name>/`, committed: one input per bug found, named for what broke.
 
-New corpus entries go to `build/<config>/tests/fuzz_corpus/<name>/`. A finding lands in
+New corpus entries of a long run go to `build/<config>/tests/fuzz_corpus/<name>/`. A finding lands in
 `./crash-<hash>` (git-ignored): replay it with `build/clang/tests/uc_log_fuzz_control_<name>
 crash-<hash>`, fix, add a unit test (control_protocol_tests.cpp / tcp_server_tests.cpp), and move
 the input to `regressions/<name>/<what-broke>`.

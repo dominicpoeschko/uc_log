@@ -1,5 +1,7 @@
 #pragma once
 
+#include "uc_log/detail/Clock.hpp"
+#include "uc_log/detail/ClockedIo.hpp"
 #include "uc_log/detail/ControlHistory.hpp"
 #include "uc_log/detail/ControlProtocol.hpp"
 #include "uc_log/detail/Lifetimebound.hpp"
@@ -10,7 +12,6 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -75,7 +76,7 @@ namespace control_detail {
 
     inline std::int64_t realSteadyMicros() {
         return std::chrono::duration_cast<std::chrono::microseconds>(
-                 std::chrono::steady_clock::now().time_since_epoch())
+                 Clock::now().time_since_epoch())
           .count();
     }
 
@@ -180,12 +181,12 @@ namespace control_detail {
         std::uint64_t const mask  = w.mask.value_or(~std::uint64_t{});
         std::uint64_t const value = w.value.value_or(0) & mask;
 
-        // paced on the real clock only: a fake clock (the tests) has its own time
-        auto       nextSample = std::chrono::steady_clock::now();
+        // paced on the printer's clock only: a target with a clock of its own (steadyMicros) has its own time
+        auto       nextSample = Clock::now();
         auto const sample     = [&]() -> std::expected<std::uint64_t, std::string> {
             if(!t.steadyMicros) {
-                std::this_thread::sleep_until(nextSample);
-                nextSample = std::chrono::steady_clock::now() + std::chrono::milliseconds{1};
+                Clock::sleep_until(nextSample);
+                nextSample = Clock::now() + std::chrono::milliseconds{1};
             }
             auto const result = t.read(std::span{&w.piece, 1});
             if(!result) { return std::unexpected{result.error()}; }
@@ -367,8 +368,11 @@ public:
                   std::move(socketPath)} {
         listener_.start(port);
         sweep();
-        ioThread_    = std::jthread{[this] { ioc_.run(); }};
-        watchThread_ = std::jthread{[this](std::stop_token const& stop) { watch(stop); }};
+        for(auto& worker : pool_) {
+            worker = Clock::Thread{[this] { runIo(poolIoc_); }};
+        }
+        ioThread_    = Clock::Thread{[this] { runIo(ioc_); }};
+        watchThread_ = Clock::Thread{[this](std::stop_token const& stop) { watch(stop); }};
     }
 
     ~ControlServer() {
@@ -377,7 +381,8 @@ public:
         ioc_.stop();
         if(ioThread_.joinable()) { ioThread_.join(); }
         targetStop_ = true;
-        pool_.join();
+        poolWork_.reset();   // the workers end once the queued requests are answered
+        for(auto& worker : pool_) { worker.join(); }
     }
 
     ControlServer(ControlServer const&)            = delete;
@@ -506,7 +511,7 @@ private:
         std::uint64_t       cursor{};
         std::uint64_t       lost{};
         // socket thread
-        std::chrono::steady_clock::time_point backlogProgress{};
+        Clock::time_point backlogProgress{};
     };
 
     boost::asio::io_context                                                  ioc_;
@@ -528,12 +533,15 @@ private:
     bool              hasTarget_{false};   // guarded by targetMutex_
     std::atomic<bool> targetStop_{false};
 
-    boost::asio::steady_timer sweepTimer_{ioc_};
-    boost::asio::thread_pool  pool_{Workers};
-    std::atomic<std::size_t>  longRequests_{0};
+    ClockTimer sweepTimer_{ioc_};
+    // the workers: an io_context of their own run by Workers threads (on the Clock: a test's virtual time waits for
+    // them), started after everything else exists
+    boost::asio::io_context                                                  poolIoc_;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> poolWork_{
+      poolIoc_.get_executor()};
+    std::atomic<std::size_t> longRequests_{0};
 
     // the self-check (watch())
-    using Clock = std::chrono::steady_clock;
 
     struct Running {
         std::string_view  cmd;
@@ -546,17 +554,18 @@ private:
     std::mutex                             runningMutex_;
     std::list<Running>                     running_;   // guarded by runningMutex_
 
-    std::jthread ioThread_;
-    std::jthread watchThread_;
+    std::array<Clock::Thread, Workers> pool_;
+    Clock::Thread                      ioThread_;
+    Clock::Thread                      watchThread_;
 
     // own thread, 1 Hz: both the socket thread and the pool take a turn, or a status line says
     // which of them is stuck and what the workers are doing - so a control path that goes quiet
     // shows its cause in the log instead of only in its clients' timeouts
     void watch(std::stop_token const& stop) {
-        std::mutex                  mutex;
-        std::condition_variable_any wake;
-        bool                        ioStuck   = false;
-        bool                        poolStuck = false;
+        std::mutex               mutex;
+        Clock::ConditionVariable wake;
+        bool                     ioStuck   = false;
+        bool                     poolStuck = false;
         // a turn asked for at `asked` is taken once the stamp reaches it; one asked at a time
         auto       ioAsked   = Clock::time_point::min();
         auto       poolAsked = Clock::time_point::min();
@@ -577,7 +586,7 @@ private:
             }
             if(stop.stop_requested()) { return; }
             ask(ioc_, ioTurn_, ioAsked);
-            ask(pool_, poolTurn_, poolAsked);
+            ask(poolIoc_, poolTurn_, poolAsked);
             auto const now   = Clock::now();
             auto const limit = stuckLimit_.load();
             auto const ms    = [](Clock::duration d) {
@@ -760,7 +769,7 @@ private:
                 client->pending.erase(0, end + 1);
             }
             client->busy = true;
-            boost::asio::post(pool_, [this, client] { serve(client); });
+            boost::asio::post(poolIoc_, [this, client] { serve(client); });
         }
     }
 
@@ -913,7 +922,7 @@ private:
             client->catchingUp = true;
             client->cursor     = history_.start(request);
             boost::asio::post(ioc_, [this, client] {
-                client->backlogProgress = std::chrono::steady_clock::now();
+                client->backlogProgress = Clock::now();
                 backlogStep(client);
             });
         }
@@ -938,7 +947,7 @@ private:
                 {
                     client->cursor = chunk.next;
                     client->lost += chunk.lost;
-                    client->backlogProgress = std::chrono::steady_clock::now();
+                    client->backlogProgress = Clock::now();
                     if(chunk.atEnd) {
                         if(client->filter.follow) {
                             client->catchingUp = false;
@@ -952,13 +961,13 @@ private:
                 }
             }
         }
-        if(std::chrono::steady_clock::now() - client->backlogProgress > BacklogStall) {
+        if(Clock::now() - client->backlogProgress > BacklogStall) {
             if(errorf_) { errorf_("control client does not read its history: closed"); }
             remove(client);
             client->session->close();
             return;
         }
-        auto timer = std::make_shared<boost::asio::steady_timer>(ioc_, BacklogRetry);
+        auto timer = std::make_shared<ClockTimer>(ioc_, BacklogRetry);
         timer->async_wait([this, client, timer](boost::system::error_code ec) {
             if(!ec) { backlogStep(client); }
         });

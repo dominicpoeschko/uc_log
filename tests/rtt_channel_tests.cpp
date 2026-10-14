@@ -1,6 +1,7 @@
 // Unit test for uc_log::detail::RttChannel: frame decode, partial frames, garbage
 // resync (timeout + size cap), halt gating, single-compaction drain.
 #include "remote_fmt/type_identifier.hpp"
+#include "uc_log/detail/Clock.hpp"
 #include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/detail/RttChannel.hpp"
 
@@ -8,7 +9,6 @@
 #include <cstdio>
 #include <optional>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -67,6 +67,8 @@ static bool drain(RttChannel& ch,
 }
 
 int main() {
+    // the frame timeout on the virtual clock: it passes only where a test sleeps
+    uc_log::detail::VirtualTime const virtualTime;
     // 0: a locale-specific spec formats (the decode path of a replacement field such as {:LF})
     CHECK(fmt::format(fmt::runtime("{:LF}"), 1.5) == "1.500000", "a {:L} spec formats");
 
@@ -137,7 +139,7 @@ int main() {
         drain(ch, sink);
         CHECK(!ch.buffer.empty(), "incomplete frame retained before timeout");
 
-        std::this_thread::sleep_for(RttChannel::FrameTimeout + 20ms);
+        uc_log::detail::Clock::sleep_for(RttChannel::FrameTimeout + 20ms);
         drain(ch, sink, true);   // halted: no resync
         CHECK(!ch.buffer.empty(), "halt gate blocks timeout resync");
 
@@ -192,7 +194,7 @@ int main() {
         ch.append(stale);
         drain(ch, sink);
         CHECK(sink.messages.empty(), "stale frames block before the timeout");
-        std::this_thread::sleep_for(RttChannel::FrameTimeout + 20ms);
+        uc_log::detail::Clock::sleep_for(RttChannel::FrameTimeout + 20ms);
         drain(ch, sink);
         CHECK(sink.messages.size() == 1 && sink.messages[0] == "world",
               "one timeout resyncs through all stale frames to the valid one");
@@ -209,7 +211,7 @@ int main() {
         std::vector<std::byte> two{stale.begin(), std::next(stale.begin(), 24)};
         tail.append(two);
         drain(tail, tailSink);
-        std::this_thread::sleep_for(RttChannel::FrameTimeout + 20ms);
+        uc_log::detail::Clock::sleep_for(RttChannel::FrameTimeout + 20ms);
         drain(tail, tailSink);
         CHECK(tail.buffer.size() == 12, "the last frame start is kept after a bulk resync");
     }

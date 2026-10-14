@@ -18,6 +18,7 @@
 // said as an error, so the next boot's report of the printer's reset is not taken for the target's own.
 
 #include "jlink/JLink.hpp"
+#include "uc_log/detail/Clock.hpp"
 #include "uc_log/detail/Le32.hpp"
 #include "uc_log/detail/Lifetimebound.hpp"
 
@@ -66,7 +67,7 @@ struct StallSignature {
 template<typename Transport>
 class TargetHealth {
 public:
-    using Clock    = std::chrono::steady_clock;
+    using Clock    = uc_log::detail::Clock;
     using MessageF = std::function<void(std::string_view)>;
 
     static constexpr auto StallCheckAfter = std::chrono::seconds{2};
@@ -251,7 +252,7 @@ private:
         for(int i = 0; i != SeriesReads; ++i) {
             auto const dhcsr = tryReadWord(jlink, DhcsrAddress);
             if(!dhcsr || (*dhcsr & DhcsrLockup) == 0) { return false; }
-            if(i + 1 != SeriesReads) { std::this_thread::sleep_for(SeriesGap); }
+            if(i + 1 != SeriesReads) { Clock::sleep_for(SeriesGap); }
         }
         return true;
     }
@@ -313,7 +314,7 @@ private:
                 auto const word = tryReadWord(jlink, c.address);
                 if(!word || (*word & c.mask) != c.value) { return false; }
             }
-            if(i + 1 != SeriesReads) { std::this_thread::sleep_for(SeriesGap); }
+            if(i + 1 != SeriesReads) { Clock::sleep_for(SeriesGap); }
         }
         return true;
     }

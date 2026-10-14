@@ -1,5 +1,6 @@
 // detail/DecodeWorker.hpp: items decoded in push order, barrier() waits for all of them, the destructor decodes
 // what is still queued, push() blocks at the byte bound, an exception reaches the pushing thread.
+#include "uc_log/detail/Clock.hpp"
 #include "uc_log/detail/DecodeWorker.hpp"
 
 #include <atomic>
@@ -33,7 +34,7 @@ void inOrder() {
     {
         Worker w{[&](Worker::Item& i) {
             seen.push_back(i.slot);
-            std::this_thread::sleep_for(std::chrono::microseconds{i.slot % 3 == 0 ? 200 : 0});
+            uc_log::detail::Clock::sleep_for(std::chrono::microseconds{i.slot % 3 == 0 ? 200 : 0});
             return !i.bytes.empty();
         }};
         for(std::size_t k = 0; k != 500; ++k) { w.push(item(k, k % 2, 0)); }
@@ -54,7 +55,7 @@ void destructorDecodesTheRest() {
     std::atomic<int> n{0};
     {
         Worker w{[&](Worker::Item&) {
-            std::this_thread::sleep_for(std::chrono::microseconds{100});
+            uc_log::detail::Clock::sleep_for(std::chrono::microseconds{100});
             ++n;
             return true;
         }};
@@ -64,22 +65,22 @@ void destructorDecodesTheRest() {
 }
 
 void boundedQueue() {
-    std::atomic<bool> release{false};
-    std::atomic<int>  decoded{0};
-    Worker            w{[&](Worker::Item&) {
-                 while(!release) { std::this_thread::sleep_for(std::chrono::milliseconds{1}); }
+    std::atomic<bool>             release{false};
+    std::atomic<int>              decoded{0};
+    Worker                        w{[&](Worker::Item&) {
+                 while(!release) { uc_log::detail::Clock::sleep_for(std::chrono::milliseconds{1}); }
                  ++decoded;
                  return false;
-                        },
-                        1000};
-    std::atomic<int>  pushed{0};
-    std::thread       producer{[&]() {
+                                    },
+                                    1000};
+    std::atomic<int>              pushed{0};
+    uc_log::detail::Clock::Thread producer{[&]() {
         for(int k = 0; k != 10; ++k) {
             w.push(item(0, 400, 2));
             ++pushed;
         }
     }};
-    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    uc_log::detail::Clock::sleep_for(std::chrono::milliseconds{50});
     // one item in the decode, at most 1000 bytes (+ the one that crossed the bound) queued: the producer waits
     CHECK(pushed < 10, "push waits at the byte bound");
     release = true;
@@ -108,6 +109,8 @@ void errorReachesThePusher() {
 }   // namespace
 
 int main() {
+    // the decoder and the producers on the virtual clock: no check depends on how fast the machine runs
+    uc_log::detail::VirtualTime const virtualTime;
     inOrder();
     destructorDecodesTheRest();
     boundedQueue();

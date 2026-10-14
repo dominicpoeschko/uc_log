@@ -3,6 +3,7 @@
 // connection must reconnect.
 #include "remote_fmt/type_identifier.hpp"
 #include "uc_log/JLinkRttReader.hpp"
+#include "uc_log/detail/Clock.hpp"
 #include "uc_log/detail/LogEntry.hpp"
 
 #include <algorithm>
@@ -21,6 +22,7 @@
 #include <vector>
 
 using namespace std::chrono_literals;
+using uc_log::detail::Clock;
 
 static int failures = 0;
 
@@ -152,11 +154,11 @@ struct FakeTransport {
         static constexpr std::uint32_t AnnounceAddress = 0x2000'0300;
         std::array<std::uint32_t, 4>   announce{};         // guarded by mutex
         std::atomic<bool>              resetting{false};   // set by the ack: the chip resets
-        std::atomic<std::chrono::steady_clock::time_point> ackedAt{};   // when the ack was written
-        std::atomic<int>                                   touchedWhileResetting{0};
-        std::atomic<int>                                   open{0};   // transports alive
-        std::atomic<int>                                   closedWhileResetting{0};
-        std::atomic<int>                                   rttStops{0};
+        std::atomic<Clock::time_point> ackedAt{};          // when the ack was written
+        std::atomic<int>               touchedWhileResetting{0};
+        std::atomic<int>               open{0};   // transports alive
+        std::atomic<int>               closedWhileResetting{0};
+        std::atomic<int>               rttStops{0};
         // the firmware's wait for the ack runs out right after the printer's first read of a
         // request: the chip resets, and the new boot's .data holds a fresh block
         std::atomic<bool> gaveUpBeforeAck{false};
@@ -204,7 +206,7 @@ struct FakeTransport {
         if(!shared->deadAcrossConnects) { shared->apDead = false; }
         if(shared->recoveryAtUs != 0 && shared->connectAfterRecoveryUs == 0) {
             shared->connectAfterRecoveryUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                                               std::chrono::steady_clock::now().time_since_epoch())
+                                               Clock::now().time_since_epoch())
                                                .count();
         }
         shared->touch();   // the connect
@@ -337,7 +339,7 @@ struct FakeTransport {
         }
         if(address == 0x400d'8000 && value == 0x8000'0000) {
             shared->recoveryAtUs           = std::chrono::duration_cast<std::chrono::microseconds>(
-                                               std::chrono::steady_clock::now().time_since_epoch())
+                                               Clock::now().time_since_epoch())
                                                .count();
             shared->connectAfterRecoveryUs = 0;
         }
@@ -348,7 +350,7 @@ struct FakeTransport {
         }
         shared->touch();
         if(auto const ms = shared->slowWriteMs.load(); ms != 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{ms});
+            Clock::sleep_for(std::chrono::milliseconds{ms});
         }
         std::lock_guard<std::mutex> const lock{shared->mutex};
         if(shared->inRam(address, 4)) {
@@ -367,7 +369,7 @@ struct FakeTransport {
             }
             shared->announce[(address - Shared::AnnounceAddress) / 4] = value;
             if(address == Shared::AnnounceAddress + 12) {   // the ack
-                shared->ackedAt   = std::chrono::steady_clock::now();
+                shared->ackedAt   = Clock::now();
                 shared->resetting = true;
             }
         }
@@ -394,7 +396,7 @@ struct FakeTransport {
                 auto const delay = shared->ramReadDelay;
                 std::memcpy(out.data(), &shared->ram[address - Shared::RamBase], out.size());
                 lock.unlock();
-                std::this_thread::sleep_for(delay);
+                Clock::sleep_for(delay);
                 return;
             }
         }
@@ -470,7 +472,7 @@ struct FakeTransport {
 
     FakeStatus startRtt(std::uint32_t,
                         std::uint32_t) {
-        while(shared->holdSessionStart) { std::this_thread::sleep_for(1ms); }
+        while(shared->holdSessionStart) { Clock::sleep_for(1ms); }
         return readStatus();
     }
 
@@ -555,15 +557,18 @@ struct Collected {
 template<typename Predicate>
 static bool waitFor(Predicate&&               predicate,
                     std::chrono::milliseconds timeout) {
-    auto const deadline = std::chrono::steady_clock::now() + timeout;
-    while(std::chrono::steady_clock::now() < deadline) {
+    auto const deadline = Clock::now() + timeout;
+    while(Clock::now() < deadline) {
         if(predicate()) { return true; }
-        std::this_thread::sleep_for(5ms);
+        Clock::sleep_for(5ms);
     }
     return predicate();
 }
 
 int main() {
+    // every wait below is on the printer's virtual clock: it moves only while the reader, its decoder and this thread all
+    // wait, so no check depends on how fast the machine runs (first, so it outlives every thread)
+    uc_log::detail::VirtualTime const virtualTime;
     // never freed: FakeTransport::shared points at it until the program ends (still reachable, not a leak)
     FakeTransport::shared = new FakeTransport::Shared;
     auto& shared          = *FakeTransport::shared;
@@ -845,8 +850,8 @@ int main() {
               "a session is starting");
         auto const                       resetsBefore = shared.resets.load();
         std::expected<void, std::string> during{std::unexpected{std::string{"not run"}}};
-        std::jthread                     requester{[&]() { during = reader.resetAndWait(5000ms); }};
-        std::this_thread::sleep_for(50ms);
+        Clock::Thread                    requester{[&]() { during = reader.resetAndWait(5000ms); }};
+        Clock::sleep_for(50ms);
         shared.holdSessionStart = false;
         requester.join();
         CHECK(during.has_value() && shared.resets.load() > resetsBefore,
@@ -911,9 +916,9 @@ int main() {
         // where it starts is unknown (no map symbol, no table in the hex): told, not tried
         reader.setRamImage(
           []() { return Reader::RamImageStartResult{std::unexpected{std::string{"no map"}}}; });
-        auto const t0       = std::chrono::steady_clock::now();
+        auto const t0       = Clock::now();
         auto const noReset  = reader.resetAndWait(5000ms);
-        auto const tookLong = std::chrono::steady_clock::now() - t0 > 3000ms;
+        auto const tookLong = Clock::now() - t0 > 3000ms;
         CHECK(!noReset && noReset.error() == "not reset: no map" && !tookLong,
               "a reset says why at once");
         auto const noFlash = reader.flashAndWait(12000ms);
@@ -939,7 +944,8 @@ int main() {
           waitFor([&]() { return collected.anyErrorContains("RTT control block at 0x20000100"); },
                   3000ms),
           "control block dump follows the data loss");
-        CHECK(collected.anyErrorContains("CORRUPT"), "a block without the RTT id is corrupt");
+        CHECK(waitFor([&]() { return collected.anyErrorContains("CORRUPT"); }, 3000ms),
+              "a block without the RTT id is corrupt");
         CHECK(!collected.anyEntryContains("RTT host overflow")
                 && !collected.anyEntryContains("RTT control block"),
               "neither of them is an entry of the log");
@@ -956,7 +962,7 @@ int main() {
                 std::lock_guard<std::mutex> const lock{shared.mutex};
                 shared.status.hostOverflowCount += 1;
             }
-            std::this_thread::sleep_for(10ms);
+            Clock::sleep_for(10ms);
         }
         {
             std::lock_guard<std::mutex> const lock{collected.mutex};
@@ -1000,15 +1006,20 @@ int main() {
         loss();
         CHECK(waitFor([&]() { return word(10) == 334; }, 3000ms),
               "an up buffer's read offset out of range is set to the write offset");
-        CHECK(
-          collected.anyErrorContains("the host's read offset was 3222675632 in a 1024-byte ring"),
-          "and said so");
+        // said after the write: waited for, not looked at once
+        CHECK(waitFor(
+                [&]() {
+                    return collected.anyErrorContains(
+                      "the host's read offset was 3222675632 in a 1024-byte ring");
+                },
+                3000ms),
+              "and said so");
         {
             std::lock_guard<std::mutex> const lock{shared.mutex};
             shared.controlBlock = block(5000, 7);   // the target's own offset: its RAM, not ours
         }
         loss();
-        std::this_thread::sleep_for(300ms);
+        Clock::sleep_for(300ms);
         CHECK(word(9) == 5000 && word(10) == 7, "a target-owned offset out of range is left alone");
         {
             std::lock_guard<std::mutex> const lock{shared.mutex};
@@ -1044,11 +1055,16 @@ int main() {
                 && shared.constructions.load() > built,
               "and a new session starts");
         CHECK(hellos() == before + 1, "the line read before the reset is kept, once");
-        CHECK(collected.anyMessageContains("2 bytes of a line cut off by the reset dropped"),
+        CHECK(waitFor(
+                [&]() {
+                    return collected.anyMessageContains(
+                      "2 bytes of a line cut off by the reset dropped");
+                },
+                3000ms),
               "the cut-off line is dropped and counted");
         CHECK(!collected.anyErrorContains("resync"), "and does not show up as a stuck frame");
         auto const after = reader.sessionCount();
-        std::this_thread::sleep_for(200ms);
+        Clock::sleep_for(200ms);
         CHECK(reader.sessionCount() == after, "one new session, not one per pass");
 
         // into a boot ROM that clears the block: the next session waits for it, quietly
@@ -1059,7 +1075,7 @@ int main() {
                 3000ms),
               "a session after a reset from outside waits for the control block");
         auto const waiting = reader.sessionCount();
-        std::this_thread::sleep_for(300ms);
+        Clock::sleep_for(300ms);
         CHECK(reader.sessionCount() == waiting, "and starts no session while it is gone");
         {
             std::array<uc_log::detail::TargetOp, 1> const piece{
@@ -1080,7 +1096,7 @@ int main() {
                       3000ms),
               "the wait is where the map says");
         auto const atOther = reader.sessionCount();
-        std::this_thread::sleep_for(300ms);
+        Clock::sleep_for(300ms);
         CHECK(reader.sessionCount() == atOther,
               "no session while the map points where no block is");
         blockAddress = 0x20000100;
@@ -1114,7 +1130,7 @@ int main() {
                 return e.find("hello from target") != std::string::npos;
             });
         };
-        std::this_thread::sleep_for(100ms);
+        Clock::sleep_for(100ms);
         CHECK(!reader.isPausedForReset(), "no pause without a request");
         auto const before = hellos();
         auto const built  = shared.constructions.load();
@@ -1139,22 +1155,24 @@ int main() {
         }
         CHECK(shared.rttStops.load() >= 1, "RTT is stopped before it");
         CHECK(hellos() == before + 1, "the last line before the reset is in the log");
-        CHECK(collected.anyMessageContains("the target announced a reset"),
-              "told as a status message");
+        CHECK(
+          waitFor([&]() { return collected.anyMessageContains("the target announced a reset"); },
+                  3000ms),
+          "told as a status message");
         CHECK(waitFor([&]() { return shared.open.load() == 0; }, 1000ms), "the session is closed");
         CHECK(reader.isPausedForReset(), "the reader is paused");
         {
             std::array<uc_log::detail::TargetOp, 1> const piece{
               uc_log::detail::target_op::Read{0x20000010, 4}
             };
-            auto const t0     = std::chrono::steady_clock::now();
+            auto const t0     = Clock::now();
             auto const result = reader.accessTarget(piece, 2000ms);
             CHECK(!result && result.error().find("announced reset") != std::string::npos
-                    && std::chrono::steady_clock::now() - t0 < 100ms,
+                    && Clock::now() - t0 < 100ms,
                   "a memory access during the pause fails at once");
         }
         // the chip reboots for ~1 s; then the new boot's .data: a fresh block and the RTT id
-        std::this_thread::sleep_until(ackedAt + 1000ms);
+        Clock::sleep_until(ackedAt + 1000ms);
         {
             std::lock_guard<std::mutex> const lock{shared.mutex};
             shared.announce = {Magic, 0, 0, 0};
@@ -1165,7 +1183,7 @@ int main() {
         CHECK(shared.constructions.load() == built, "no reconnect during the pause");
         CHECK(waitFor([&]() { return shared.constructions.load() > built && armed(); }, 3000ms),
               "connected again after the pause, and armed again");
-        CHECK(std::chrono::steady_clock::now() - ackedAt >= Reader::AnnouncedResetPause,
+        CHECK(Clock::now() - ackedAt >= Reader::AnnouncedResetPause,
               "not before the pause is over");
         CHECK(!reader.isPausedForReset(), "the pause is over");
         shared.feed(makeFrame(0));
@@ -1239,7 +1257,7 @@ int main() {
             std::lock_guard<std::mutex> const lock{shared.mutex};
             return shared.announce[1] == HostArmed;
         };
-        std::this_thread::sleep_for(150ms);
+        Clock::sleep_for(150ms);
         CHECK(!armed(), "nothing armed while the block is not there");
         CHECK(notYet() == notYetBefore + 1, "said once, not once per look");
         auto const session = reader.sessionCount();
@@ -1260,9 +1278,12 @@ int main() {
               "a request after the late arming is acked");
         auto const ackedAt = shared.ackedAt.load();
         CHECK(shared.announce[3] == ((30U << 16) | 1U), "the whole request word is the ack");
-        CHECK(collected.anyMessageContains("the probe stays off it for 3000 ms"),
-              "the time the firmware asked for is told");
-        std::this_thread::sleep_for(1000ms);
+        CHECK(
+          waitFor(
+            [&]() { return collected.anyMessageContains("the probe stays off it for 3000 ms"); },
+            3000ms),
+          "the time the firmware asked for is told");
+        Clock::sleep_for(1000ms);
         {
             std::lock_guard<std::mutex> const lock{shared.mutex};
             shared.announce = {Magic, 0, 0, 0};
@@ -1271,8 +1292,7 @@ int main() {
         shared.blockGone = false;
         CHECK(waitFor([&]() { return shared.constructions.load() > built && armed(); }, 5000ms),
               "and the session after the pause is armed again");
-        CHECK(std::chrono::steady_clock::now() - ackedAt >= 3000ms,
-              "not before the 3 s the firmware asked for");
+        CHECK(Clock::now() - ackedAt >= 3000ms, "not before the 3 s the firmware asked for");
     }
 
     // a lost connection must reconnect
@@ -1281,7 +1301,7 @@ int main() {
             std::lock_guard<std::mutex> const lock{shared.mutex};
             shared.connected = false;
         }
-        std::this_thread::sleep_for(100ms);
+        Clock::sleep_for(100ms);
         {
             std::lock_guard<std::mutex> const lock{shared.mutex};
             shared.connected = true;
@@ -1330,8 +1350,8 @@ int main() {
         }();
         shared.holdUntilRttStop = true;
         shared.feed(makeFrame(0));
-        std::this_thread::sleep_for(50ms);   // passes of the loop that see nothing
-        readerStorage.reset();               // the printer stops
+        Clock::sleep_for(50ms);   // passes of the loop that see nothing
+        readerStorage.reset();    // the printer stops
         std::lock_guard<std::mutex> const lock{collected.mutex};
         CHECK(collected.entries.size() == before + 1,
               "the line the DLL held at the stop is decoded");
@@ -1356,16 +1376,16 @@ int main() {
             shared.putRam(Desc + 8, RingSize);
             shared.ramReadDelay = 1ms;
         }
-        std::atomic<bool>          flooding{true};
-        std::atomic<std::uint64_t> produced{0};
-        std::thread                producer{[&]() {
+        // the target fills the ring with every record that fits as soon as the printer frees room (its read offset
+        // write) - a flood that does not depend on a thread getting the CPU
+        std::uint64_t produced{0};     // shared.mutex
+        auto const    fill = [&]() {   // shared.mutex held
             auto const frame = makeFrame(0);
-            while(flooding) {
-                std::lock_guard<std::mutex> const lock{shared.mutex};
-                auto const                        wr = shared.getRam(Desc + 12);
-                auto const                        rd = shared.getRam(Desc + 16);
+            while(true) {
+                auto const wr   = shared.getRam(Desc + 12);
+                auto const rd   = shared.getRam(Desc + 16);
                 auto const free = rd > wr ? rd - wr - 1 : RingSize - 1 - (wr - rd);
-                if(free < frame.size()) { continue; }   // skip mode: whole or nothing
+                if(free < frame.size()) { return; }   // skip mode: whole or nothing
                 auto pos = wr;
                 for(auto const b : frame) {
                     shared.ram[Ring - FakeTransport::Shared::RamBase + pos] = b;
@@ -1374,9 +1394,14 @@ int main() {
                 shared.putRam(Desc + 12, pos);   // the write offset after the bytes
                 ++produced;
             }
-        }};
-        Collected                  direct;
-        auto const                 startReader = [&]() {
+        };
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            fill();
+            shared.afterRamWrite = fill;
+        }
+        Collected  direct;
+        auto const startReader = [&]() {
             return std::make_unique<BasicJLinkRttReader<FakeTransport>>(
               "",
               "fake",
@@ -1416,9 +1441,9 @@ int main() {
             auto const start = entries();
             CHECK(waitFor([&]() { return entries() > start + 500; }, 5000ms),
                   "the printer's own reader decodes");
-            auto const t0 = std::chrono::steady_clock::now();
+            auto const t0 = Clock::now();
             r.reset();   // the printer stops while the target floods on
-            auto const took = std::chrono::steady_clock::now() - t0;
+            auto const took = Clock::now() - t0;
             CHECK(took < 100ms, "a stop under a flood ends after one read per ring");
             if(took >= 100ms) {
                 std::printf("  stop took %lld ms\n",
@@ -1426,24 +1451,26 @@ int main() {
                               std::chrono::duration_cast<std::chrono::milliseconds>(took).count()));
             }
         }
-        flooding = false;
-        producer.join();
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.afterRamWrite = nullptr;   // the flood ends
+        }
         {
             auto r = startReader();   // the rest of the ring, then quiet
-            std::this_thread::sleep_for(300ms);
+            Clock::sleep_for(300ms);
             r.reset();
         }
         CHECK(!direct.anyErrorContains("corrupted") && !direct.anyErrorContains("resync"),
               "no session started inside a record");
         CHECK(!direct.anyMessageContains("unfinished"), "no session ended inside a record");
-        CHECK(direct.anyToolContains("RTT read by the printer"),
+        CHECK(waitFor([&]() { return direct.anyToolContains("RTT read by the printer"); }, 3000ms),
               "the printer's own reader was used");
         std::lock_guard<std::mutex> const lock{direct.mutex};
         CHECK(direct.entries.size() == produced, "every record exactly once across the sessions");
         if(direct.entries.size() != produced) {
             std::printf("  decoded %zu, produced %llu\n",
                         direct.entries.size(),
-                        static_cast<unsigned long long>(produced.load()));
+                        static_cast<unsigned long long>(produced));
         }
     }
 
@@ -1525,7 +1552,7 @@ int main() {
         // the halt polls within `span`
         auto const pollsIn = [&](std::chrono::milliseconds span) {
             auto const from = shared.haltPolls.load();
-            std::this_thread::sleep_for(span);
+            Clock::sleep_for(span);
             return shared.haltPolls.load() - from;
         };
         CHECK(waitFor([&]() { return entries() > 200; }, 5000ms),
@@ -1543,16 +1570,16 @@ int main() {
                 return e.find("core halted") != std::string::npos;
             });
         };
-        std::chrono::steady_clock::duration worst{};
+        Clock::duration worst{};
         for(int i = 0; i != 5; ++i) {
             auto const before = halts();
-            auto const t0     = std::chrono::steady_clock::now();
+            auto const t0     = Clock::now();
             shared.halted     = true;
             CHECK(waitFor([&]() { return halts() > before; }, 3000ms),
                   "busy: a halt under a flood is captured");
-            worst         = std::max(worst, std::chrono::steady_clock::now() - t0);
+            worst         = std::max(worst, Clock::now() - t0);
             shared.halted = false;
-            std::this_thread::sleep_for(120ms);   // seen running again, busy polling again
+            Clock::sleep_for(120ms);   // seen running again, busy polling again
         }
         CHECK(worst < uc_log::detail::RttChannel::FrameTimeout,
               "busy: every halt is seen before a stuck frame times out");
@@ -1565,7 +1592,7 @@ int main() {
             std::lock_guard<std::mutex> const lock{shared.mutex};
             shared.afterRamWrite = nullptr;
         }
-        std::this_thread::sleep_for(200ms);   // the ring read empty
+        Clock::sleep_for(200ms);   // the ring read empty
         // ~90 a second at HaltPoll on an idle machine; at BusyHaltPoll it could not pass 21
         auto const quietPolls = pollsIn(1000ms);
         CHECK(quietPolls >= 30, "quiet: the halt state every ~10 ms again");
@@ -1641,8 +1668,12 @@ int main() {
             shared.flashFailures
               = 3;   // as many as FlashAttempts: without the recovery path the flash fails
             auto const flashed = r->flashAndWait(20000ms);
-            CHECK(flashed.has_value() && shared.flashes.load() == flashesBefore + 1
-                    && quiet.anyErrorContains("the flash failed on a stalled target"),
+            CHECK(waitFor(
+                    [&]() {
+                        return flashed.has_value() && shared.flashes.load() == flashesBefore + 1
+                            && quiet.anyErrorContains("the flash failed on a stalled target");
+                    },
+                    3000ms),
                   "a flash on a stalled target: the recovery, then the download again");
             shared.flashFailures = 0;
         }
@@ -1657,9 +1688,13 @@ int main() {
             auto const flashesBefore = shared.flashes.load();
             shared.wedged            = true;
             auto const flashed       = r->flashAndWait(20000ms);
-            CHECK(flashed.has_value() && shared.flashes.load() == flashesBefore + 1
-                    && quiet.anyErrorContains(
-                      "running the chip package's stall recovery before the next attempt"),
+            CHECK(waitFor(
+                    [&]() {
+                        return flashed.has_value() && shared.flashes.load() == flashesBefore + 1
+                            && quiet.anyErrorContains(
+                              "running the chip package's stall recovery before the next attempt");
+                    },
+                    3000ms),
                   "a flash wedged until the chip boots: the recovery, a reset that runs, then the "
                   "download again");
             shared.wedgeOutlivesBoot = true;
@@ -1677,16 +1712,16 @@ int main() {
         {
             auto              r = start(0x0000'0000);
             std::atomic<bool> toggling{true};
-            std::thread       toggler{[&]() {   // set now and then: a running image's busy flag
+            Clock::Thread     toggler{[&]() {   // set now and then: a running image's busy flag
                 for(std::uint32_t i = 0; toggling; ++i) {
                     {
                         std::lock_guard<std::mutex> const lock{shared.mutex};
                         shared.putRam(Word, (i % 4) == 0 ? 0x3U : 0x0U);
                     }
-                    std::this_thread::sleep_for(3ms);
+                    Clock::sleep_for(3ms);
                 }
             }};
-            std::this_thread::sleep_for(5000ms);
+            Clock::sleep_for(5000ms);
             toggling = false;
             toggler.join();
             CHECK(!quiet.anyErrorContains("the target is stalled"),
@@ -1696,7 +1731,7 @@ int main() {
             auto r
               = start(0x0301'0803,
                       0x005f'0300);   // the first word stuck, the second not as the signature says
-            std::this_thread::sleep_for(4000ms);
+            Clock::sleep_for(4000ms);
             CHECK(!quiet.anyErrorContains("the target is stalled"),
                   "every condition must hold, not one of them");
         }
@@ -1884,7 +1919,7 @@ int main() {
             shared.lockup = false;
             shared.halted = true;
             auto r        = start(0);
-            std::this_thread::sleep_for(4000ms);
+            Clock::sleep_for(4000ms);
             CHECK(!lockupSaid(), "halted at an ordinary PC: no lockup");
         }
         shared.halted = false;
@@ -1915,9 +1950,7 @@ int main() {
                           : "lockup in a quiet session: reset");
             int answered = 0;
             int failed   = 0;
-            for(auto const until = std::chrono::steady_clock::now() + 4000ms;
-                std::chrono::steady_clock::now() < until;)
-            {
+            for(auto const until = Clock::now() + 4000ms; Clock::now() < until;) {
                 std::array<uc_log::detail::TargetOp, 1> const piece{
                   uc_log::detail::target_op::Read{FakeTransport::Shared::RamBase, 4}
                 };
@@ -1926,7 +1959,7 @@ int main() {
                 } else {
                     ++failed;
                 }
-                std::this_thread::sleep_for(100ms);
+                Clock::sleep_for(100ms);
             }
             CHECK(failed == 0 && answered > 10,
                   viaGate
@@ -2009,13 +2042,18 @@ int main() {
                   "park: said as an error");
             CHECK(waitFor([&]() { return shared.resets.load() > resetsBefore; }, 3000ms),
                   "park: the printer resets it");
-            CHECK(parked.anyErrorContains("the core asleep as in the park loop at 0x30"),
+            CHECK(waitFor(
+                    [&]() {
+                        return parked.anyErrorContains(
+                          "the core asleep as in the park loop at 0x30");
+                    },
+                    3000ms),
                   "park: the sign named");
         } else {
             CHECK(waitFor([&]() { return parked.anyToolContains("but the core is not asleep"); },
                           4000ms),
                   "park: the word alone is said, not acted on");
-            std::this_thread::sleep_for(1500ms);
+            Clock::sleep_for(1500ms);
             CHECK(shared.resets.load() == resetsBefore && !parked.anyErrorContains("J-Link parked"),
                   "park: no reset while the core is awake");
         }
@@ -2108,7 +2146,7 @@ int main() {
             std::atomic<int>       results{0};
             std::atomic<bool>      readOk{false};
             auto                   r = start(got, results, readOk);
-            std::this_thread::sleep_for(600ms);
+            Clock::sleep_for(600ms);
             CHECK(shared.flashReads.load() == 0 && results.load() == 0,
                   "flash ready: no read while the boot ROM drives the flash, the check waits");
             ssi(0x005f'0300);   // boot2's XIP: SPI_FRF QUAD, DFS_32 31, TMOD EEPROM_READ
@@ -2131,10 +2169,14 @@ int main() {
             auto                   r = start(got, results, readOk);
             CHECK(waitFor([&]() { return results.load() >= 1; }, 6000ms),
                   "flash ready: a check that waited ends");
-            CHECK(!readOk.load() && flashCheck.anyToolContains("the flash is not mapped"),
+            CHECK(waitFor(
+                    [&]() {
+                        return !readOk.load()
+                            && flashCheck.anyToolContains("the flash is not mapped");
+                    },
+                    3000ms),
                   "flash ready: never mapped - said");
-            std::this_thread::sleep_for(
-              4000ms);   // the session reads its rings' names now (in flash)
+            Clock::sleep_for(4000ms);   // the session reads its rings' names now (in flash)
             CHECK(shared.flashReads.load() == 0 && !shared.romHung.load(),
                   "flash ready: never mapped - no flash read, the ring names' neither");
         }
@@ -2302,12 +2344,11 @@ int main() {
             shared.romHung                      = false;
             auto const             resetsBefore = shared.resets.load();
             std::atomic<long long> resetAfterMs{-1};
-            auto const             connectedAt
-              = std::make_shared<std::atomic<std::chrono::steady_clock::time_point>>();
+            auto const             connectedAt = std::make_shared<std::atomic<Clock::time_point>>();
             shared.onReset = [&]() {   // the reset: the image boots and maps its flash
                 if(resetAfterMs.load() < 0) {
                     resetAfterMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                     std::chrono::steady_clock::now() - connectedAt->load())
+                                     Clock::now() - connectedAt->load())
                                      .count();
                 }
                 shared.asleep = false;
@@ -2341,7 +2382,7 @@ int main() {
             });
             r->setParkSignature(
               BasicJLinkRttReader<FakeTransport>::ParkSignature{Word, Rescued, Rescued, 0x30});
-            connectedAt->store(std::chrono::steady_clock::now());
+            connectedAt->store(Clock::now());
             {
                 std::lock_guard<std::mutex> const lock{shared.mutex};
                 shared.connected = true;
@@ -2487,7 +2528,7 @@ int main() {
             CHECK(waitFor([&]() { return r->sessionCount() >= 2; }, 5000ms),
                   "fault halt: the log comes back");
         } else {
-            std::this_thread::sleep_for(3000ms);
+            Clock::sleep_for(3000ms);
             CHECK(shared.resets.load() == resetsBefore
                     && !faulted.anyErrorContains("halted in a fault handler"),
                   "fault halt: a halt a client asked for is left alone");
@@ -2512,16 +2553,15 @@ int main() {
             shared.putRam(Desc + 12, 0);
             shared.putRam(Desc + 16, 0);
         }
-        std::atomic<bool>          flooding{true};
-        std::atomic<std::uint64_t> produced{0};
-        std::thread                producer{[&]() {
+        // the target refills the ring whenever the printer frees room (as in the flood above)
+        std::uint64_t produced{0};     // shared.mutex
+        auto const    fill = [&]() {   // shared.mutex held
             auto const frame = makeFrame(0);
-            while(flooding) {
-                std::lock_guard<std::mutex> const lock{shared.mutex};
-                auto const                        wr = shared.getRam(Desc + 12);
-                auto const                        rd = shared.getRam(Desc + 16);
+            while(true) {
+                auto const wr   = shared.getRam(Desc + 12);
+                auto const rd   = shared.getRam(Desc + 16);
                 auto const free = rd > wr ? rd - wr - 1 : RingSize - 1 - (wr - rd);
-                if(free < frame.size()) { continue; }
+                if(free < frame.size()) { return; }
                 auto pos = wr;
                 for(auto const b : frame) {
                     shared.ram[Ring - FakeTransport::Shared::RamBase + pos] = b;
@@ -2530,7 +2570,12 @@ int main() {
                 shared.putRam(Desc + 12, pos);
                 ++produced;
             }
-        }};
+        };
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            fill();
+            shared.afterRamWrite = fill;
+        }
         std::atomic<std::uint64_t> decoded{0};
         auto                       r = std::make_unique<BasicJLinkRttReader<FakeTransport>>(
           "",
@@ -2545,19 +2590,21 @@ int main() {
               };
           },
           [&decoded](std::size_t, std::string_view, std::optional<remote_fmt::catalog_id>) {
-              std::this_thread::sleep_for(20us);   // a slow consumer: the decoder lags behind
+              Clock::sleep_for(20us);   // a slow consumer: the decoder lags behind
               ++decoded;
           },
           [](std::string_view) {},
           [](std::string_view) {},
           [](std::string_view) {},
           [](std::string_view) {});
-        std::this_thread::sleep_for(500ms);
-        flooding = false;
-        producer.join();
-        auto const t0 = std::chrono::steady_clock::now();
+        Clock::sleep_for(500ms);
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.afterRamWrite = nullptr;   // the flood ends
+        }
+        auto const t0 = Clock::now();
         r.reset();   // the stop
-        auto const took = std::chrono::steady_clock::now() - t0;
+        auto const took = Clock::now() - t0;
         CHECK(took < 3000ms, "the reader ends promptly with a backlog");
         if(took >= 3000ms) {
             std::printf("  the stop took %lld ms\n",
@@ -2578,7 +2625,7 @@ int main() {
             std::printf("  decoded %llu + left %llu != produced %llu\n",
                         static_cast<unsigned long long>(decoded.load()),
                         static_cast<unsigned long long>(left),
-                        static_cast<unsigned long long>(produced.load()));
+                        static_cast<unsigned long long>(produced));
         }
     }
 
@@ -2611,29 +2658,35 @@ int main() {
               8);   // the image's RTT epoch: constant (even: the block is ready), no boot here
             shared.connected = false;   // no session before the epoch source is set (below)
         }
-        std::atomic<bool>          flooding{true};
-        std::atomic<std::uint64_t> produced{0};
-        std::thread                producer{[&]() {
+        // the target refills both rings whenever the printer frees room (as in the flood above); a read is a probe
+        // round trip, so the reader's passes take time while the rings never empty
+        std::uint64_t produced{0};     // shared.mutex
+        auto const    fill = [&]() {   // shared.mutex held
             auto const frame = makeFrame(0);
             auto const put   = [&](std::uint32_t desc, std::uint32_t ring) {
-                auto const wr   = shared.getRam(desc + 12);
-                auto const rd   = shared.getRam(desc + 16);
-                auto const free = rd > wr ? rd - wr - 1 : RingSize - 1 - (wr - rd);
-                if(free < frame.size()) { return; }
-                auto pos = wr;
-                for(auto const b : frame) {
-                    shared.ram[ring - FakeTransport::Shared::RamBase + pos] = b;
-                    pos                                                     = (pos + 1) % RingSize;
+                while(true) {
+                    auto const wr   = shared.getRam(desc + 12);
+                    auto const rd   = shared.getRam(desc + 16);
+                    auto const free = rd > wr ? rd - wr - 1 : RingSize - 1 - (wr - rd);
+                    if(free < frame.size()) { return; }
+                    auto pos = wr;
+                    for(auto const b : frame) {
+                        shared.ram[ring - FakeTransport::Shared::RamBase + pos] = b;
+                        pos = (pos + 1) % RingSize;
+                    }
+                    shared.putRam(desc + 12, pos);
+                    ++produced;
                 }
-                shared.putRam(desc + 12, pos);
-                ++produced;
             };
-            while(flooding) {
-                std::lock_guard<std::mutex> const lock{shared.mutex};
-                put(Desc0, Ring0);
-                put(Desc1, Ring1);
-            }
-        }};
+            put(Desc0, Ring0);
+            put(Desc1, Ring1);
+        };
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.ramReadDelay = 100us;
+            fill();
+            shared.afterRamWrite = fill;
+        }
         std::atomic<std::uint64_t> decoded{0};
         Collected                  lost;
         auto                       r = std::make_unique<BasicJLinkRttReader<FakeTransport>>(
@@ -2666,16 +2719,17 @@ int main() {
             std::lock_guard<std::mutex> const lock{shared.mutex};
             shared.connected = true;
         }
-        std::this_thread::sleep_for(
-          1500ms);   // the first session up (a connect is retried every second)
+        Clock::sleep_for(1500ms);   // the first session up (a connect is retried every second)
         {
             std::lock_guard<std::mutex> const lock{shared.mutex};
             shared.failReadFrom = Ring1;   // the probe goes while ring 1 is read, after ring 0 was
             shared.failReadTo   = Ring1 + RingSize;
         }
-        std::this_thread::sleep_for(800ms);   // a new session
-        flooding = false;
-        producer.join();
+        Clock::sleep_for(800ms);   // a new session
+        {
+            std::lock_guard<std::mutex> const lock{shared.mutex};
+            shared.afterRamWrite = nullptr;   // the flood ends
+        }
         waitFor(
           [&]() {
               std::lock_guard<std::mutex> const lock{shared.mutex};
@@ -2683,7 +2737,7 @@ int main() {
                   && shared.getRam(Desc1 + 12) == shared.getRam(Desc1 + 16);
           },
           3000ms);
-        std::this_thread::sleep_for(200ms);
+        Clock::sleep_for(200ms);
         r.reset();
         bool failed{};
         {
@@ -2697,7 +2751,7 @@ int main() {
         if(decoded != produced) {
             std::printf("  decoded %llu != produced %llu\n",
                         static_cast<unsigned long long>(decoded.load()),
-                        static_cast<unsigned long long>(produced.load()));
+                        static_cast<unsigned long long>(produced));
         }
     }
 
@@ -2802,14 +2856,18 @@ int main() {
             std::array<std::uint32_t, 3> const want{1, 7, 8};
             CHECK(unread.size() == 1 && unread.back() == want, "boots: exactly 1 (counts 7 -> 8)");
         }
-        CHECK(said.anyErrorContains("1 boot passed unread (boots that logged 7 -> 8)"),
+        CHECK(waitFor(
+                [&]() {
+                    return said.anyErrorContains("1 boot passed unread (boots that logged 7 -> 8)");
+                },
+                3000ms),
               "boots: and said");
 
         // (a) a start parked before main (the epoch moves, nothing logged), then the printer's reset: nothing unread
         start(12, 9, false);
-        std::this_thread::sleep_for(1500ms);
+        Clock::sleep_for(1500ms);
         CHECK(r->resetAndWait(5000ms).has_value(), "boots: the printer's reset");
-        std::this_thread::sleep_for(500ms);
+        Clock::sleep_for(500ms);
         CHECK(unreadCount() == 1, "boots: a start that never logged is no unread boot");
 
         // (c) two starts, one parked before main and one that logged, then the printer's flash: exactly 1
@@ -2817,7 +2875,7 @@ int main() {
           14,
           10,
           false);   // boot 12 logged (its count moved) - its line was not kept (a full ring), nothing read
-        std::this_thread::sleep_for(1500ms);
+        Clock::sleep_for(1500ms);
         CHECK(r->resetAndWait(5000ms).has_value(), "boots: the printer's reset again");
         CHECK(waitFor([&]() { return unreadCount() == 2; }, 4000ms),
               "boots: the one that logged is counted");
@@ -2838,7 +2896,7 @@ int main() {
               = Desc0;   // the next read of the ring's offsets: the J-Link drops off USB
             shared.failReadTo = Desc0 + 24;
         }
-        std::this_thread::sleep_for(1500ms);
+        Clock::sleep_for(1500ms);
         CHECK(r->resetAndWait(5000ms).has_value(),
               "boots: the printer's reset after the probe failure");
         CHECK(waitFor([&]() { return unreadCount() == 3; }, 4000ms),
@@ -2858,7 +2916,7 @@ int main() {
                 std::lock_guard<std::mutex> const lock{shared.mutex};
                 shared.coreWasReset = true;
             }
-            std::this_thread::sleep_for(1500ms);
+            Clock::sleep_for(1500ms);
             CHECK(r->sessionCount() == before,
                   "boots: the old boot's block in RAM starts no session");
             start(18, 12, true);
@@ -2930,7 +2988,7 @@ int main() {
                   },
                   4000ms),
               "boots: the restart is said");
-        std::this_thread::sleep_for(500ms);
+        Clock::sleep_for(500ms);
         CHECK(unknownBefore() == before && unreadCount() == 3,
               "boots: no unknown, no number across the download");
         shared.onReset = {};
@@ -3013,7 +3071,7 @@ int main() {
               = Desc0;   // and the probe drops a read: the session ends holding half a record
             shared.failReadTo = Desc0 + 24;
         }
-        std::this_thread::sleep_for(1500ms);
+        Clock::sleep_for(1500ms);
         {
             std::lock_guard<std::mutex> const lock{shared.mutex};
             shared.putRam(Desc0 + 12,
@@ -3033,7 +3091,7 @@ int main() {
                 },
                 4000ms),
               "torn tail: the new boot's record");
-        CHECK(torn.anyMessageContains("the RTT epoch stays odd"),
+        CHECK(waitFor([&]() { return torn.anyMessageContains("the RTT epoch stays odd"); }, 3000ms),
               "torn tail: an epoch odd for long is said");
         bool const clean
           = !torn.anyErrorContains("corrupted data") && !torn.anyErrorContains("damaged frame");

@@ -14,6 +14,7 @@
 // Down buffers (the duplex channels): bytes written into the ring, then the write offset. The block's layout:
 // detail/RttControlBlock.hpp.
 
+#include "uc_log/detail/Clock.hpp"
 #include "uc_log/detail/Le32.hpp"
 #include "uc_log/detail/RttControlBlock.hpp"
 #include "uc_log/detail/RttEpoch.hpp"
@@ -223,10 +224,10 @@ private:
     // to milliseconds. Odd after EpochSettle: an image without the init fence (one bump a boot, odd after about half of
     // them) or a boot that died in its init - what the block holds is not known to be this boot's (skipUnread).
     std::uint32_t settledEpoch(Transport& jlink) {
-        auto const deadline = std::chrono::steady_clock::now() + EpochSettle;
+        auto const deadline = Clock::now() + EpochSettle;
         auto       e        = epoch(jlink);
-        while(!epochBlockIsReady(e) && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        while(!epochBlockIsReady(e) && Clock::now() < deadline) {
+            Clock::sleep_for(std::chrono::milliseconds{1});
             e = epoch(jlink);
         }
         return e;

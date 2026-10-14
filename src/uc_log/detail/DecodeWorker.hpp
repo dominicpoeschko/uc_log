@@ -9,13 +9,13 @@
 // The destructor decodes what is still queued (those bytes are gone from the target) before it joins. An exception
 // from the decode is rethrown on the caller's thread by the next push() or barrier().
 
-#include <condition_variable>
+#include "uc_log/detail/Clock.hpp"
+
 #include <cstddef>
 #include <deque>
 #include <exception>
 #include <functional>
 #include <mutex>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -107,15 +107,15 @@ private:
     std::function<bool(Item&)> decode_;
     std::size_t                maxQueuedBytes_;
     std::mutex                 m_;
-    std::condition_variable    work_;
-    std::condition_variable    idle_;
+    Clock::ConditionVariable   work_;
+    Clock::ConditionVariable   idle_;
     std::deque<Item>           items_;
     std::size_t                queuedBytes_{};
     bool                       busy_{};
     bool                       stop_{};
     bool                       printed_{};
     std::exception_ptr         error_;
-    std::thread                thread_;   // last: started once everything above exists
+    Clock::Thread              thread_;   // last: started once everything above exists
 };
 
 }   // namespace uc_log::detail
