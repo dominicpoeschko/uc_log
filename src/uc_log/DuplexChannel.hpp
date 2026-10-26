@@ -22,17 +22,17 @@ struct ChannelName {
 template<std::size_t N>
 ChannelName(char const (&)[N]) -> ChannelName<N>;
 
-template<ChannelName     Name_,
-         std::size_t     UpSize_,
-         std::size_t     DownSize_ = UpSize_,
-         rtt::BufferMode UpMode_   = rtt::BufferMode::trim,
-         rtt::BufferMode DownMode_ = rtt::BufferMode::trim>
+template<ChannelName     Name,
+         std::size_t     UpSize,
+         std::size_t     DownSize = UpSize,
+         rtt::BufferMode UpMode   = rtt::BufferMode::trim,
+         rtt::BufferMode DownMode = rtt::BufferMode::trim>
 struct DuplexChannelConfig {
-    static constexpr auto            Name     = Name_;
-    static constexpr std::size_t     UpSize   = UpSize_;
-    static constexpr std::size_t     DownSize = DownSize_;
-    static constexpr rtt::BufferMode UpMode   = UpMode_;
-    static constexpr rtt::BufferMode DownMode = DownMode_;
+    static constexpr auto            name     = Name;
+    static constexpr std::size_t     upSize   = UpSize;
+    static constexpr std::size_t     downSize = DownSize;
+    static constexpr rtt::BufferMode upMode   = UpMode;
+    static constexpr rtt::BufferMode downMode = DownMode;
 };
 
 template<typename... Configs>

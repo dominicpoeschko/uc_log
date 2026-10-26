@@ -8,9 +8,11 @@ import importlib.util
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -33,6 +35,8 @@ def jsonl(name: str) -> list[dict]:
 TRANSCRIPT = {x["name"]: x for x in jsonl("transcript.jsonl")}
 STREAMS = {x["name"]: x for x in jsonl("stream.jsonl")}
 SCHEMA = json.loads((FIXTURES / "schema.json").read_text(encoding="utf-8"))
+# the fixture target of tests/data/records through `records` and `raise_panic` (the SDK's kvasir_bench texts read it)
+RECORDS = {x["name"]: x for x in jsonl("records_fixture.jsonl")}
 
 # The transcript's malformed requests are missing: no builder makes them.
 BUILT = {
@@ -64,6 +68,39 @@ BUILT = {
     "write_nothing": kb.req_write([]),
     "write_unaligned": kb.req_write([(0x5000000E, 0)]),
     "write_disconnected": kb.req_write([(0xE0000000, 1)]),
+    "records_no_map": kb.req_records(["crash", "trace"]),
+    "raise_panic_no_map": kb.req_raise_panic("user"),
+}
+
+RECORDS_BUILT = {
+    "records_lld": kb.req_records(kb.RECORD_KINDS),
+    "records_gnu": kb.req_records(kb.RECORD_KINDS),
+    "records_crash": kb.req_records(["crash"]),
+    "records_crash_health_empty": kb.req_records(["crash", "health"]),
+    "records_crash_health_no_symbols": kb.req_records(["crash", "health"]),
+    "records_stacks_not_painted": kb.req_records(["stacks"]),
+    "records_stacks_no_symbols": kb.req_records(["stacks"]),
+    "records_ubsan_none": kb.req_records(["ubsan"]),
+    "records_ubsan_not_sanitize": kb.req_records(["ubsan"]),
+    "records_trace_written_while_reading": kb.req_records(["trace"]),
+    "records_trace_written_while_reading_drops": kb.req_records(["trace"]),
+    "records_trace_no_rings": kb.req_records(["trace"]),
+    "records_trace_a_storage_without_its_descriptor": kb.req_records(["trace"]),
+    "records_no_kinds": kb.req_records([]),
+    "crash_golden_1": kb.req_records(["crash"]),
+    "crash_golden_2": kb.req_records(["crash"]),
+    "crash_golden_3": kb.req_records(["crash"]),
+    "crash_golden_4": kb.req_records(["crash"]),
+    "health_a_starvation": kb.req_records(["health"]),
+    "health_a_reset_inside_on_starved": kb.req_records(["health"]),
+    "health_an_index_without_a_hash": kb.req_records(["health"]),
+    "health_an_external_reset": kb.req_records(["health"]),
+    "health_a_panic_in_the_guard": kb.req_records(["health"]),
+    "raise_panic_check_failed": kb.req_raise_panic("check-failed"),
+    "raise_panic_user": kb.req_raise_panic("user"),
+    "raise_panic_record_name": kb.req_raise_panic("stack overflow"),
+    "raise_panic_unknown_cause": kb.req_raise_panic("nope"),
+    "raise_panic_no_raise": kb.req_raise_panic("user"),
 }
 
 SUBSCRIBED = {
@@ -133,10 +170,6 @@ def schema_errors(value, schema: dict, root: dict, path: str = "$") -> list[str]
 
 
 class Fixtures(unittest.TestCase):
-    def test_protocol_version(self):
-        self.assertEqual(SCHEMA["protocol"], kb.PROTOCOL)
-        self.assertEqual(TRANSCRIPT["ping"]["answer"]["protocol"], kb.PROTOCOL)
-
     def test_requests_are_the_transcripts(self):
         for name, built in BUILT.items():
             with self.subTest(name):
@@ -145,6 +178,36 @@ class Fixtures(unittest.TestCase):
                 line = kb.encode(built)
                 self.assertTrue(line.endswith("\n") and "\n" not in line[:-1])
                 self.assertEqual(json.loads(line), built)
+
+    def test_records_requests_are_the_fixture_s(self):
+        self.assertEqual(set(RECORDS_BUILT), set(RECORDS),
+                         "every records_fixture.jsonl case has its builder")
+        for name, built in RECORDS_BUILT.items():
+            with self.subTest(name):
+                self.assertEqual(json.loads(RECORDS[name]["request"]), built)
+                self.assertEqual(schema_errors(
+                    built, SCHEMA["request"], SCHEMA["request"]), [])
+                self.assertEqual(schema_errors(
+                    RECORDS[name]["answer"], SCHEMA["answer"], SCHEMA["answer"]), [])
+
+    def test_records_answers_need_no_layout(self):
+        # what kvasir_bench reads: decoded keys, no offsets or shifts
+        answer = kb.check_answer(RECORDS["records_lld"]["answer"])
+        fault = answer["fault"]
+        self.assertEqual((fault["core"], fault["arch"], fault["cfsr_names"]), (0, 8, [
+                         "PRECISERR", "BFARVALID"]))
+        self.assertEqual({w["name"]: w["value"]
+                         for w in fault["words"]}["pc"], fault["record"]["pc"])
+        self.assertEqual(answer["panic"]["cause_name"], "fault")
+        self.assertEqual(answer["panic"]["site"],
+                         (answer["panic"]["record"]["pc"] & ~1) - 2)
+        self.assertEqual(answer["exception_names"][3], "HardFault")
+        self.assertNotIn(
+            "fault", RECORDS["records_crash_health_no_symbols"]["answer"])
+        self.assertFalse(
+            RECORDS["records_crash_health_empty"]["answer"]["fault"]["valid"])
+        with self.assertRaises(kb.ControlError):
+            kb.check_answer(RECORDS["raise_panic_unknown_cause"]["answer"])
 
     def test_subscriptions_are_the_streams(self):
         for name, built in SUBSCRIBED.items():
@@ -216,6 +279,10 @@ class Fixtures(unittest.TestCase):
                                    ("main.cpp:20::rate", "Hz", 1.5)])
         warn_i2c = [e["module"] for e in STREAMS["log_warn_i2c"]["events"]]
         self.assertEqual(warn_i2c, ["i2c.bus", "i2c"])
+        kinds = [kb.message_kind(
+            e) for e in STREAMS["messages_metrics"]["events"] if e["cmd"] == "message"]
+        self.assertEqual(kinds, ["plain", "halt"],
+                         "the key only on the halt, absent = plain")
 
     def test_history_goldens(self):
         log = STREAMS["log"]["events"]
@@ -246,6 +313,62 @@ class Fixtures(unittest.TestCase):
                 formatted = subprocess.run(["jq", "."], stdin=path.open("rb"), capture_output=True,
                                            check=True).stdout
                 self.assertEqual(formatted, path.read_bytes())
+
+
+class Conveniences(unittest.TestCase):
+    """The helpers beside the protocol: words of a read answer, the liveness check, the .rttlog reader."""
+
+    def test_words_are_little_endian(self):
+        answer = {"cmd": "read", "unix_us": 7,
+                  "data": ["78563412", "ffffffff", "01"]}
+        self.assertEqual(kb.words(answer), (7, [0x12345678, 0xFFFFFFFF, 1]))
+        self.assertEqual(kb.req_read_words([0x20000000, 0x20000004]),
+                         kb.req_read([(0x20000000, 4), (0x20000004, 4)]))
+
+    def test_alive_without_a_printer(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "control.sock"
+            self.assertFalse(kb.alive(path))   # no file
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(path))
+            # a socket file nobody accepts on: a killed printer's
+            listener.close()
+            self.assertFalse(kb.alive(path))
+
+    def test_alive_answering_wrongly_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "control.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(path))
+            listener.listen(1)
+
+            def serve():
+                conn, _ = listener.accept()
+                with conn:
+                    conn.recv(100)
+                    conn.sendall(b'{"cmd":"error","error":"bad line"}\n')
+
+            t = threading.Thread(target=serve)
+            t.start()
+            with self.assertRaises(kb.ControlError):
+                kb.alive(path)
+            t.join()
+            listener.close()
+
+    def test_rttlog_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "x.rttlog"
+            path.write_text(",".join(kb.RTTLOG_COLUMNS) + "\n"
+                            + '1970-01-01T00:00:00Z,1,"a, b.cpp",3,"f",info,0.5,"say ""hi""\\n",mod\n',
+                            encoding="utf-8")
+            rows = list(kb.rttlog_rows(path))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][2], "a, b.cpp")
+            # the {:?} escape stays as the printer wrote it
+            self.assertEqual(rows[0][7], 'say "hi"\\n')
+            path.write_text("1,2,3\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                list(kb.rttlog_rows(path))
 
 
 @unittest.skipUnless(os.environ.get("UC_LOG_CONTROL_PROTOCOL_TOOL"),
@@ -287,8 +410,7 @@ class AgainstTheServer(unittest.TestCase):
                         self.assertEqual(got["cmd"], golden["cmd"])
 
     def test_request_helper(self):
-        self.assertEqual(kb.request(self.path, kb.req_ping()), {
-                         "cmd": "ping", "protocol": kb.PROTOCOL})
+        self.assertEqual(kb.request(self.path, kb.req_ping()), {"cmd": "ping"})
         with self.assertRaises(kb.ControlError):
             kb.request(self.path, kb.req_flash())
 

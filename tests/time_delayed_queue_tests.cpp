@@ -1,7 +1,8 @@
-// TimeDelayedQueue, the merge between the RTT reader and the .rttlog / control socket / gui: a
+// uc_log::printer::TimeDelayedQueue, the merge between the RTT reader and the .rttlog / control socket / gui: a
 // channel's lines never change order, nothing is lost or doubled, channels merge by target time
 // within the delay, nothing waits past delay + maxHold, and the destructor hands out the rest.
-#include "uc_log/TimeDelayedQueue.hpp"
+#include "support/Check.hpp"
+#include "uc_log/printer/TimeDelayedQueue.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -17,18 +18,8 @@
 
 using namespace std::chrono_literals;
 
-static int failures = 0;
-
-#define CHECK(cond, msg)                                        \
-    do {                                                        \
-        if(!(cond)) {                                           \
-            std::printf("FAIL: %s (line %d)\n", msg, __LINE__); \
-            ++failures;                                         \
-        }                                                       \
-    } while(0)
-
 namespace {
-using Clock = uc_log::detail::Clock;
+using Clock = uc_log::printer::Clock;
 
 struct Line {
     int               channel{};
@@ -50,11 +41,11 @@ struct Collector {
 // a queue that records what it hands out, with test-sized windows
 struct Harness {
     Collector collector;
-    std::optional<
-      TimeDelayedQueue<Line,
-                       std::int64_t (*)(Line const&),
-                       int (*)(Line const&),
-                       std::function<void(std::chrono::system_clock::time_point, Line const&)>>>
+    std::optional<uc_log::printer::TimeDelayedQueue<
+      Line,
+      std::int64_t (*)(Line const&),
+      int (*)(Line const&),
+      std::function<void(std::chrono::system_clock::time_point, Line const&)>>>
       queue;
 
     Harness(std::chrono::milliseconds delay,
@@ -64,7 +55,7 @@ struct Harness {
           +[](Line const& l) { return l.channel; },
           std::function<void(std::chrono::system_clock::time_point, Line const&)>{
             [this](std::chrono::system_clock::time_point, Line const& l) {
-                std::lock_guard<std::mutex> const lock{collector.mutex};
+                std::scoped_lock<std::mutex> const lock{collector.mutex};
                 collector.out.push_back({l, Clock::now()});
             }},
           delay,
@@ -73,7 +64,7 @@ struct Harness {
 
     void append(Line l) {
         l.appended = Clock::now();
-        queue->append(l);
+        uc_log::test::need(queue, "the queue").append(l);
     }
 
     std::vector<Out> finish() {
@@ -128,7 +119,7 @@ void backlogBurst() {
             for(int i = 0; i != 150; ++i) {
                 // channel clocks seconds apart: target time and arrival disagree
                 h.append({channel,
-                          t + (3 - channel) * 10'000'000'000LL + i * 1000 + chunk * 1'000'000,
+                          t + (3 - channel) * 10'000'000'000LL + i * 1000LL + chunk * 1'000'000LL,
                           count[channel]++});
             }
         }
@@ -252,7 +243,7 @@ void flushAtSessionStart() {
     for(bool const flushed : {false, true}) {
         Harness h{200ms, 1000ms};
         for(int i = 0; i != 5; ++i) { h.append({0, 600'000 + i, i}); }   // the old boot, 600 s in
-        if(flushed) { h.queue->flush(); }
+        if(flushed) { uc_log::test::need(h.queue, "the queue").flush(); }
         for(int i = 0; i != 5; ++i) { h.append({1, 1 + i, i}); }   // the new boot
         auto const out      = h.finish();
         bool       oldFirst = out.size() == 10;
@@ -268,16 +259,19 @@ void flushAtSessionStart() {
 }
 }   // namespace
 
-int main() {
+int main(int    argc,
+         char** argv) {
     // delay and maxHold on the virtual clock: the queue's thread and this one move it, no machine speed does
-    uc_log::detail::VirtualTime const virtualTime;
-    flushAtSessionStart();
-    backlogBurst();
-    randomReads();
-    mergesByTime();
-    noStarvation();
-    boundedLatency();
-    destructorHandsOutTheRest();
-    if(failures == 0) { std::puts("all checks passed"); }
-    return failures == 0 ? 0 : 1;
+    uc_log::printer::VirtualTime const virtualTime;
+    return uc_log::test::run(argc,
+                             argv,
+                             {
+                               {      "flushAtSessionStart",       flushAtSessionStart},
+                               {             "backlogBurst",              backlogBurst},
+                               {              "randomReads",               randomReads},
+                               {             "mergesByTime",              mergesByTime},
+                               {             "noStarvation",              noStarvation},
+                               {           "boundedLatency",            boundedLatency},
+                               {"destructorHandsOutTheRest", destructorHandsOutTheRest},
+    });
 }

@@ -1,5 +1,6 @@
 // Reads tests/log_filter/uc_log_filter.txt via --embed-dir. The backend records "<level>" per
 // entry, so a line the filter compiled out records nothing.
+#include "support/Check.hpp"
 #include "uc_log/uc_log.hpp"
 
 #include <cstddef>
@@ -14,16 +15,6 @@
 #endif
 
 namespace {
-
-int failures = 0;
-
-#define CHECK(cond, msg)                                        \
-    do {                                                        \
-        if(!(cond)) {                                           \
-            std::printf("FAIL: %s (line %d)\n", msg, __LINE__); \
-            ++failures;                                         \
-        }                                                       \
-    } while(0)
 
 // Leaked on purpose: avoids global-constructor / exit-time-destructor warnings.
 std::vector<int>& events() {
@@ -69,7 +60,7 @@ struct LogClock<Tag::User> {
     } while(false)
 
 namespace parser {
-using uc_log::detail::LevelOff;
+using uc_log::detail::levelOff;
 using uc_log::detail::parseFilter;
 
 constexpr auto table = parseFilter(R"(
@@ -85,8 +76,8 @@ static_assert(table.table.global == 3);
 static_assert(table.table.count == 3);
 static_assert(table.table.levelFor("i2c") == 2);
 static_assert(table.table.levelFor("i2c.device") == 2);
-static_assert(table.table.levelFor("i2c.bus") == LevelOff);
-static_assert(table.table.levelFor("i2c.bus.queue") == LevelOff);
+static_assert(table.table.levelFor("i2c.bus") == levelOff);
+static_assert(table.table.levelFor("i2c.bus.queue") == levelOff);
 static_assert(table.table.levelFor("i2cx") == -1);
 static_assert(table.table.levelFor("i2") == -1);
 static_assert(table.table.levelFor("usb") == 5);
@@ -101,35 +92,37 @@ static_assert(!parseFilter("a = info\na = warn").error.empty());
 static_assert(!parseFilter("I2C = warn").error.empty());   // modules are lower case
 }   // namespace parser
 
-static void global() { LOG_ALL(); }
+namespace {
+void global() { LOG_ALL(); }
 
 namespace quiet {
-static void f() { LOG_ALL(); }
+    void f() { LOG_ALL(); }
 
-struct Inner {
-    static void f() { LOG_ALL(); }
-};
+    struct Inner {
+        static void f() { LOG_ALL(); }
+    };
 
-namespace loud {
-    static void f() { LOG_ALL(); }
-}   // namespace loud
+    namespace loud {
+        void f() { LOG_ALL(); }
+    }   // namespace loud
 }   // namespace quiet
 
 namespace chatty {
-static void f() { LOG_ALL(); }
+    void f() { LOG_ALL(); }
 }   // namespace chatty
 
 namespace driver {
-UC_LOG_SCOPE_MODULE("usb");
+    UC_LOG_SCOPE_MODULE("usb");
 
-static void f() { LOG_ALL(); }
+    void f() { LOG_ALL(); }
 }   // namespace driver
 
 namespace floor_scope {
-UC_LOG_SCOPE_MIN_LEVEL(error);
+    UC_LOG_SCOPE_MIN_LEVEL(error);
 
-static void f() { LOG_ALL(); }
+    void f() { LOG_ALL(); }
 }   // namespace floor_scope
+}   // namespace
 
 int main() {
     global();
@@ -153,9 +146,8 @@ int main() {
 
     // what the printer does with the same file
     auto const runtime = uc_log::detail::parseFilter("* = info\nquiet = off\n");
-    CHECK(runtime.error.empty() && runtime.table.levelFor("quiet.x") == uc_log::detail::LevelOff,
+    CHECK(runtime.error.empty() && runtime.table.levelFor("quiet.x") == uc_log::detail::levelOff,
           "the parser at run time");
 
-    if(failures == 0) { std::printf("all checks passed\n"); }
-    return failures == 0 ? 0 : 1;
+    return uc_log::test::report();
 }

@@ -1,6 +1,7 @@
-// Unit test for uc_log::detail::buildRttChannelMap: which RTT up buffer each log channel is read
-// from and which channel it is logged as, and the pairing of duplex channels by name.
-#include "uc_log/detail/RttChannelMap.hpp"
+// Unit test for uc_log::printer::buildRttChannelMap: which RTT up buffers are log channels (each logged as its up
+// index), and the pairing of duplex channels by name.
+#include "support/Check.hpp"
+#include "uc_log/printer/RttChannelMap.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -8,16 +9,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-static int failures = 0;
-
-#define CHECK(cond, msg)                                        \
-    do {                                                        \
-        if(!(cond)) {                                           \
-            std::printf("FAIL: %s (line %d)\n", msg, __LINE__); \
-            ++failures;                                         \
-        }                                                       \
-    } while(0)
 
 // the J-Link as far as the map asks it: buffer counts and names (nullopt: a DLL without them)
 struct FakeJLink {
@@ -33,23 +24,27 @@ struct FakeJLink {
     std::vector<std::optional<std::string>> up;
     std::vector<std::optional<std::string>> down;
 
-    Status status() const { return {static_cast<int>(up.size()), static_cast<int>(down.size())}; }
+    [[nodiscard]] Status status() const {
+        return {static_cast<int>(up.size()), static_cast<int>(down.size())};
+    }
 
-    std::optional<BufferDesc> rttBufferDesc(bool          isDown,
-                                            std::uint32_t index) const {
+    [[nodiscard]] std::optional<BufferDesc> rttBufferDesc(bool          isDown,
+                                                          std::uint32_t index) const {
         auto const& name = isDown ? down.at(index) : up.at(index);
         return name ? std::optional{BufferDesc{*name}} : std::nullopt;
     }
 };
 
 struct Result {
-    uc_log::detail::RttChannelMap map;
-    std::vector<std::string>      errors;
+    uc_log::printer::RttChannelMap map;
+    std::vector<std::string>       errors;
 };
 
-static Result build(FakeJLink const& jlink) {
+namespace {
+
+Result build(FakeJLink const& jlink) {
     Result r;
-    r.map = uc_log::detail::buildRttChannelMap(
+    r.map = uc_log::printer::buildRttChannelMap(
       jlink,
       jlink.status(),
       [](std::string_view) {},
@@ -57,121 +52,65 @@ static Result build(FakeJLink const& jlink) {
     return r;
 }
 
-// (upIndex, channel) of every log channel, in channel order
-static bool logChannelsAre(Result const&                         r,
-                           std::vector<std::pair<std::uint32_t,
-                                                 std::uint32_t>> want) {
+// the up buffer of every log channel, in channel order; the channel is its up index
+bool logChannelsAre(Result const&              r,
+                    std::vector<std::uint32_t> want) {
     if(r.map.logChannels.size() != want.size()) { return false; }
     for(std::size_t i = 0; i != want.size(); ++i) {
-        if(r.map.logChannels[i].upIndex != want[i].first
-           || r.map.logChannels[i].channel != want[i].second)
-        {
-            return false;
-        }
+        if(r.map.logChannels[i].upIndex != want[i]) { return false; }
     }
     return true;
 }
 
-static void inOrder() {
+void inOrder() {
     auto const r = build({
       {"uc_log0", "uc_log1", "uc_log2", "uc_log3"},
       {}
     });
-    CHECK(logChannelsAre(r,
-                         {
-                           {0, 0},
-                           {1, 1},
-                           {2, 2},
-                           {3, 3}
-    }),
-          "names in order: channel = buffer");
-    CHECK(r.errors.empty(), "names in order: nothing to say");
+    CHECK(logChannelsAre(r, {0, 1, 2, 3}), "channel = buffer");
+    CHECK(r.errors.empty(), "nothing to say");
 }
 
-static void reversedByOldLibstdcxxLayout() {
-    // buffers in reverse, as a libstdc++ build of the old rtt.hpp had them
+void namesDoNotNumber() {
     auto const r = build({
-      {"uc_log3", "uc_log2", "uc_log1", "uc_log0"},
+      {"uc_log1", "Terminal", "uc_log1"},
       {}
     });
-    CHECK(logChannelsAre(r,
-                         {
-                           {3, 0},
-                           {2, 1},
-                           {1, 2},
-                           {0, 3}
-    }),
-          "reversed buffers: each channel read from the buffer that carries its name");
-    CHECK(r.errors.size() == 1 && r.errors[0].find("uc_log0 in buffer 3") != std::string::npos,
-          "reversed buffers: told once, with the order found");
+    CHECK(logChannelsAre(r, {0, 1, 2}), "the buffer names do not number the channels");
+    CHECK(r.errors.empty(), "names: nothing to say");
 }
 
-static void namesUnavailable() {
+void namesUnavailable() {
     auto const r = build({
       {std::nullopt, std::nullopt},
       {}
     });
-    CHECK(logChannelsAre(r,
-                         {
-                           {0, 0},
-                           {1, 1}
-    }),
-          "no names: positional");
+    CHECK(logChannelsAre(r, {0, 1}), "no names: positional");
     CHECK(r.errors.empty(), "no names: nothing to say");
 }
 
-static void namesNotUsable() {
-    auto const duplicate = build({
-      {"uc_log0", "uc_log0"},
-      {}
-    });
-    CHECK(logChannelsAre(duplicate,
-                         {
-                           {0, 0},
-                           {1, 1}
-    }),
-          "a name twice: positional");
-    auto const foreign = build({
-      {"uc_log1", "Terminal"},
-      {}
-    });
-    CHECK(logChannelsAre(foreign,
-                         {
-                           {0, 0},
-                           {1, 1}
-    }),
-          "a name that is no uc_logN: positional");
-    auto const bare = build({{"uc_log"}, {}});
-    CHECK(logChannelsAre(bare,
-                         {
-                           {0, 0}
-    }),
-          "uc_log without a number: positional");
-}
-
-static void withDuplex() {
+void withDuplex() {
     auto const r = build({
       {"uc_log0", "uc_log1", "tui"},
       {"tui"}
     });
-    CHECK(logChannelsAre(r,
-                         {
-                           {0, 0},
-                           {1, 1}
-    }),
-          "duplex: the log channels by name");
-    CHECK(r.map.duplexChannels.size() == 1 && r.map.duplexChannels[0].upIndex == 2u
-            && r.map.duplexChannels[0].downIndex == 0u,
+    CHECK(logChannelsAre(r, {0, 1}), "duplex: the log channels are the unpaired buffers");
+    CHECK(r.map.duplexChannels.size() == 1 && r.map.duplexChannels[0].upIndex == 2U
+            && r.map.duplexChannels[0].downIndex == 0U,
           "duplex: paired by name");
     CHECK(r.errors.empty(), "duplex in order: nothing to say");
 }
 
-int main() {
-    inOrder();
-    reversedByOldLibstdcxxLayout();
-    namesUnavailable();
-    namesNotUsable();
-    withDuplex();
-    if(failures == 0) { std::puts("all checks passed"); }
-    return failures == 0 ? 0 : 1;
+}   // namespace
+
+int main(int    argc,
+         char** argv) {
+    return uc_log::test::run(argc,
+                             argv,
+                             {
+                               {         "inOrder",          inOrder},
+                               {"namesDoNotNumber", namesDoNotNumber},
+                               {"namesUnavailable", namesUnavailable},
+                               {      "withDuplex",       withDuplex},
+    });
 }

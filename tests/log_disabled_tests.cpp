@@ -12,6 +12,12 @@
 #ifdef USE_UC_LOG
     #error "this target must build without USE_UC_LOG"
 #endif
+// Without USE_UC_LOG uc_log.hpp is the macro front end only: remote_fmt (and with it fmt, glaze, enchantum, mp-units)
+// must not reach this TU. REMOTE_FMT_LIFETIMEBOUND comes with remote_fmt.hpp (or parser.hpp); the ctest
+// uc_log_no_log_includes checks the whole include list.
+#ifdef REMOTE_FMT_LIFETIMEBOUND
+    #error "remote_fmt reached a TU without USE_UC_LOG"
+#endif
 
 namespace {
 
@@ -53,7 +59,8 @@ int main() {
     int volatile vol = 9;
     int const only   = 5;   // only ever logged: -Wunused-variable
     int       set    = 0;   // set, only logged: -Wunused-but-set-variable
-    set              = 3;
+    // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) // the case: a store only a disabled log line reads
+    set = 3;
 
     UC_LOG_T("plain");
     UC_LOG_D("{}", only);

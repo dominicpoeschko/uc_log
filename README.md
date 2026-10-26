@@ -67,6 +67,14 @@ The current floor is available as `uc_log::minLevel`. An unknown name is a compi
 With the Kvasir SDK, pass `MIN_LOG_LEVEL <trace|debug|info|warn|error|crit>` to
 `target_configure_kvasir` or `kvasir_executable_variants` instead of setting the define by hand.
 
+## A line at another source position
+
+`UC_LOG_AT(level, line, file, fmt, args...)` is `UC_LOG` with the position given: a wrapper macro passes its caller's
+`__LINE__` and `__FILE_NAME__` (the Kvasir SDK's `KVASIR_DETAIL_CHECK_LOG` does), so the line names the caller, not the
+wrapper. `UC_LOG(level, fmt, ...)` is `UC_LOG_AT(level, __LINE__, __FILE_NAME__, fmt, ...)`. Without the catalog
+(`REMOTE_FMT_USE_CATALOG=false`, host builds) a line takes the same record frame as on the target: the backend's
+hooks (`noteRecord`, `lossMark` / `lossSettle`, `Sink.hpp`) run, only the string goes inline.
+
 ## Scoped configuration
 
 The floor and the backend can be set per namespace, class, function or block without touching the call sites
@@ -99,9 +107,11 @@ void f() {
 Every log line knows the function it was written in, at no cost on the wire: its catalog id is the id of its **call
 site** (remote_fmt `REMOTE_FMT_SITE`, `catalog.hpp`) - 0x8000 plus the address of a one-byte tag, one per call site and
 per instantiation of the function it is in, in a section `remote_fmt_sites.<n>`. The tag's symbol is mangled with both
-the line's format string and the function, so after the link remote_fmt's `tools/extract_sites.py` adds each site's
-string and the demangled signature of its function to `<target>_string_constants.json` (`"Sites": {"<id>":
-"<signature>"}`), and the printer looks a line's function up by the id it came with. The header is
+the line's format string and the function, so after the link remote_fmt's `tools/extract_sites.py` writes each site's
+string and the demangled signature of its function into `<target>_string_constants.json` (`"Sites": {"<id>":
+"<signature>"}`; the catalog is written once, whole, after the link: a printer that starts while the tree links reads
+the previous one, which belongs to the image still on the board), and the printer looks a line's function up by the id
+it came with. The header is
 `("file", line, level, {}, """""")` (`"module", ` before the `"""` for an explicit module). The compiler never reads
 `__PRETTY_FUNCTION__` for this: in the constant evaluator that read is what makes compiles slow.
 
@@ -111,7 +121,7 @@ Kvasir_SDK's `linker/common.ld`, never in the image; a host executable gets remo
 `cmake/remote_fmt_sites_host.ld`. Without a catalog (`REMOTE_FMT_USE_CATALOG=false`) there are no tags and no
 function names.
 
-The printer derives the rest once per site (`detail/SignatureTable.hpp`, `detail/Signature.hpp`):
+The printer derives the rest once per site (`printer/SignatureTable.hpp`, `detail/Signature.hpp`):
 
 - the **module**: the scope's components lowercased and joined with `.`, without a leading `Kvasir`, `detail` /
   `Detail`, anonymous namespaces, template arguments and the function itself. `UC_LOG_SCOPE_MODULE("name");` overrides
@@ -120,10 +130,10 @@ The printer derives the rest once per site (`detail/SignatureTable.hpp`, `detail
 
   | function | module |
   |---|---|
-  | `Kvasir::I2C::detail::logUp(...)` | `i2c` |
+  | `Kvasir::Engine::detail::logUp(...)` | `engine` |
   | `Kvasir::I2C::Bus<...>::run()` | `i2c.bus` |
   | `Kvasir::USB::CDC::Mixin<...>::handleSetup(...)` | `usb.cdc.mixin` |
-  | `WaterMix::Regulator::step(...)` | `watermix.regulator` |
+  | `MyApp::Regulator::step(...)` | `myapp.regulator` |
   | `main()`, an `extern "C"` handler | none |
 
 - the **function name**: the enclosing class with abbreviated template arguments, `::`, the function -
@@ -157,21 +167,40 @@ filter is its explicit module or the one the same scan derives from `__PRETTY_FU
 has module rules. The printer gets the file too (`--log_filter`) and marks the rules in the Filter tab's module tree
 (`compiled ≥ warn`, `⛔ compiled out`), so a module that sends nothing says why.
 
-## Backend transfer hooks
+## What a backend provides (the sink protocol)
 
-A `ComBackend` may optionally provide `initTransfer()` and `finalizeTransfer()`; the printer calls them
-before the first and after the last `write` of one log entry, so a backend that assembles whole entries (for
-example a queue that drops entries as a unit) can tell where an entry starts and ends. Like `write`, each may
-be templated on the `LogLevel` (`template<LogLevel> static void initTransfer()`), in which case that form is
-preferred over the plain one. A backend without them works unchanged.
+A `ComBackend<Tag>` is a type with static members; only `write(std::span<std::byte const>)` is required. Every hook
+uc_log asks for - which part asks, whether it may take the record's `LogLevel` - is in the table at the top of
+`uc_log/Sink.hpp` (`initTransfer` / `finalizeTransfer` around one record, `RecordGuard`, `noteRecord`, `lossMark` /
+`lossSettle`, `enterPanicMode` / `drain`, `kLevelFloor`, the duplex channels, the Startup and ISR members);
+`FanOutBackend.hpp` forwards each of them to its sinks. What the table does not say:
 
-An entry reaches `write` in one piece as long as it fits remote_fmt's staging bytes (`REMOTE_FMT_STAGING_BYTES`,
-32 by default: an entry is gathered on the stack first), so an RTT ring in skip mode drops such an entry whole
-rather than its middle. A longer one is written in pieces.
+- A record reaches `write` in one piece as long as it fits remote_fmt's staging bytes (`REMOTE_FMT_STAGING_BYTES`,
+  32 by default: a record is gathered on the stack first), so an RTT ring in skip mode drops such a record whole
+  rather than its middle. A longer one is written in pieces; `LossPolicy::Counted` stages every piece and publishes
+  the record at its end.
+- A line carries its time as the clock's tick count; the clock's period is text in the cataloged header
+  (`123456[1/48000000]s` once the printer has put the count in). `LogClock<Tag>::now()` returns a `time_point` or a
+  `duration` with an integral `rep`.
+- `kLevelFloor` (a `static constexpr LogLevel`): every level from the floor up takes the floor's instantiation of
+  a level-templated hook - fewer copies of the record code, for a backend that treats those levels alike. Never on
+  one that routes by level (`LevelSplitRouter`).
+- `uc_log::AlwaysAttached` (`AlwaysAttached.hpp`) is the debugger-present functor of a board that always assumes a
+  host: with `rtt::BufferMode::skip` an unattached board drops lines instead of stalling.
 
-A log line carries its time as the clock's tick count; the clock's period is text in the cataloged header
-(`123456[1/48000000]s` once the printer has put the count in). `LogClock<Tag>::now()` returns a `time_point` or a
-`duration` with an integral `rep`.
+## Runtime calls
+
+What an application or the Kvasir SDK calls while the image runs, all but `metric` from `uc_log/Runtime.hpp`. Each goes
+to the tag's backend (the hooks in `Sink.hpp`); `panicMode` and `drain` are nothing without a backend that has the
+hook, so they compile in every image, and `bootsThatLogged` does not compile without a backend that counts boots (the
+RTT backend, or a fan-out whose primary is one):
+
+| call | header | what it does |
+|---|---|---|
+| `uc_log::panicMode<Tag>()` | `Runtime.hpp` | from here to the reset a record that does not fit waits while the host keeps reading (`LossPolicy::Counted`); `Kvasir::Panic::beginFatal()` calls it |
+| `uc_log::drain<Tag>()` | `Runtime.hpp` | waits until the host has read every ring, or has stopped reading for the stall time - before a reset no printer was told about |
+| `uc_log::bootsThatLogged<Tag>()` | `Runtime.hpp` | this board's count of boots that logged (16 bits, wraps; kept across resets, undefined after a power-on), as the printer reads it |
+| `uc_log::metric<"name", "unit", "scope">(x)`, `uc_log::metric<"name", "scope">(q)` | `metric.hpp` | an argument of a log line that the host also records as a time series; an mp-units quantity brings its own unit |
 
 ## Building without `USE_UC_LOG`
 
@@ -182,10 +211,38 @@ unused warning. Two things follow for code that has only ever been built without
 - every argument must compile in that build too: a variable declared under `#ifdef USE_UC_LOG` is an error;
 - a `UC_LOG_*` call is a statement, not an expression, as it always was with `USE_UC_LOG`.
 
+## The RTT backend
+
+An application declares its RTT log backend with `uc_log::RttLog` (`src/uc_log/RttLog.hpp`): the debugger-present
+functor, then options in any order, each kind at most once, the missing ones defaulted:
+
+```cpp
+template<> struct uc_log::ComBackend<uc_log::Tag::User>
+  : uc_log::RttLog<Kvasir::Chip::DebuggerPresent, uc_log::Rings<1024, 256>,
+                   uc_log::LossPolicy::Counted<Kvasir::Register::CpuHzCeiling<Kvasir::Tag::User>::value>> {};
+```
+
+- sizes (required): `Rings<Main, Isr = Main>` (per group a thread ring and one ring per ISR ring) or
+  `ChannelSizes<...>` (every ring);
+- `RingLayout<TwoCores<CoreId>, Router>`: a group of rings per core and per logical channel of a level router
+  (`ChannelRouter.hpp`); default one core (`SingleCore`), one channel. `SingleCore` / `TwoCores<CoreId>`
+  (`CortexM.hpp`) are the one answer to "which context, which core" - the ring choice and `FanOutBackendWith`
+  (`FanOutBackendMulticore<CoreId, ...>` = `TwoCores<CoreId>`) both ask them;
+- `Mode<rtt::BufferMode::...>`: default `skip`, a full ring drops the record (and `LossPolicy::Counted` announces it);
+- `DuplexChannels<...>`, an ISR policy (below), a loss policy (`LossPolicy.hpp`, default `Silent`).
+  `LossPolicy::Counted<CpuHzCeiling, PanicStallUs = 250'000>` takes the fastest CPU clock of the image in Hz, with no
+  default (uc_log knows no chip; a panic's wait is counted in polls at it where the chip has no microsecond
+  counter): a Kvasir image passes its chip's `Kvasir::Register::CpuHzCeiling<Kvasir::Tag::User>::value` (the chip's
+  `WaitBounds.hpp`, included before the backend), another firmware the clock of its part.
+
+It names one `RttComBackend<...>` (`src/uc_log/RttComBackend.hpp`); every layout's ring choice is host-tested
+(`tests/rtt_ring_choice_tests.cpp`). A sink of your own (a USB queue, a black box) follows the protocol in
+`src/uc_log/Sink.hpp`; `FanOutBackend.hpp` feeds several sinks at once, and `CortexM.hpp` has the IPSR context and the
+PRIMASK record guard a sink can reuse.
+
 ## ISR log rings
 
-The RTT backends (`DefaultRttComBackend`, `MultiChannelRttComBackend`, `MulticoreRttComBackend`) take an ISR policy as
-their last template argument. It decides how the records of interrupts at different priority levels are kept apart
+The RTT backend takes an ISR policy as an option. It decides how the records of interrupts at different priority levels are kept apart
 (`src/uc_log/IsrPolicy.hpp`):
 
 - `IsrPolicy::SingleLevel<SilentLevels<...>>`, the default: one ISR ring, and every interrupt that may log runs at one
@@ -203,11 +260,11 @@ it bridges.** At 100 KB/s a KiB is ~10 ms; at 600 KB/s (about what one SWD probe
 printer reads a whole ring in one pass when only one ring has bytes, and at most half of each when several have, so a
 ring should bridge a few of its own passes: as a rule, at least 50 ms of the image's peak log rate (16 KiB for a
 thread that logs 300 KB/s in bursts, 4 KiB for an interrupt that logs 80 KB/s). What does not fit is dropped whole and
-announced ("⚠ N log records lost on this channel"), never torn.
+announced ("⚠ N log records lost on this channel"; "!" instead of "⚠" in an image without the catalog, whose inline
+strings are ASCII - `uc_log/detail/LostRecord.hpp` holds the text the printer and the stress checker read), never torn.
 
-The sizes are template arguments of the backend: `DefaultRttComBackend<..., MainBufferSize, IsrBufferSize, ...>`
-(the thread ring, then each ISR ring), `MultiChannelRttComBackend` / `MulticoreRttComBackend` take
-`ChannelSizes<thread, isr..., thread, isr...>` (per logical channel or core, the thread ring then its ISR rings). They
+The sizes are options of the backend: `Rings<Main, Isr>` (per group the thread ring, then each ISR ring) or
+`ChannelSizes<thread, isr..., thread, isr...>` (per core and logical channel, the thread ring then its ISR rings). They
 cost RAM one to one.
 
 Measured with a J-Link at 15 MHz SWD on an RP2350, one producer logging as fast as asked (records of ~42 bytes),
@@ -247,7 +304,11 @@ over the count ("the boot count starts again").
 ## Chip settings the printer takes
 
 `target_add_uc_log_rtt_jlink` writes the printer's arguments for the chip to `<build>/<target>.printer_args` (tools such as
-`kvasir_bench.py` start the printer from it). Besides probe, device and speed the chip package can set:
+`kvasir_bench.py` start the printer from it). The keywords and the options they become are one table,
+`printer_option_table` in `cmake/RttJlink.cmake`; ctest `uc_log_test_printer_args` compares the file a fixture project
+writes with `tests/printer_args/golden/`. Its `JLINK_IP` option takes an address as it is; a caller that keeps the
+address in an environment variable expands it itself (`JLINK_IP $ENV{X}`). Besides probe, device and speed the chip
+package can set:
 
 | option | what |
 |---|---|
@@ -264,9 +325,9 @@ tagged by `"cmd"`:
 
 | kind | request (`cmd`) | answer |
 |---|---|---|
-| request/answer | `ping` | the protocol version |
+| request/answer | `ping` | `{"cmd":"ping"}`: the printer is there |
 | | `status` | running, halted, flashing, sessions, firmware check (match / different / unchecked, build CRC), status errors, `log_seq` (the next log line's number), `started_us` |
-| | `messages` | the newest n lines of the Status tab |
+| | `messages` | the newest n lines of the Status tab (`time`, `level`, `text`; `kind` only where a message is not plain: `"halt"` for the core's halt, `"format_error"` for a log line the printer could not render - match the kind, the text is for people) |
 | | `read` | target memory while the core runs, hex per piece, with the host time it came back |
 | | `wait` | read a value until a condition holds or a timeout runs out |
 | | `reset`, `flash` | done through the printer's own probe connection; the log session survives |
@@ -288,12 +349,13 @@ has not turned for 10 s, or when no worker has been free for that long. It write
 each target request in flight and how long it has run, and writes another when it is over.
 
 Failures answer `{"cmd":"error","error":"..."}`. The protocol is the glaze structs in
-`src/uc_log/detail/ControlProtocol.hpp`. `doc/control_protocol/` holds what is generated from them - `schema.json`,
+`host/uc_log/printer/ControlProtocol.hpp`. `doc/control_protocol/` holds what is generated from them - `schema.json`,
 golden transcripts against a fake target, the stream of a fixed log, the socket path rule - and both ends are tested
 against it: `uc_log_test_control_protocol` compares byte for byte, `tools/test_uc_log_client.py` checks the client
 (`tools/uc_log_client.py`, used by Kvasir_SDK's `kvasir_bench.py`) and runs it against a real server. After a
-deliberate change: `cmake --build <build> --target update_control_protocol`, raise `ProtocolVersion`, update the
-client. The duplex channels keep their own sockets (`duplex.<n>.sock`).
+deliberate change: `cmake --build <build> --target update_control_protocol`, update the client. The protocol has no
+version: printer and client come from the same tree, and a line the other side does not know fails as malformed
+input. The duplex channels keep their own sockets (`duplex.<n>.sock`).
 
 ## Contributing
 

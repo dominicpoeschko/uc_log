@@ -1,32 +1,39 @@
 #!/usr/bin/env python3
-"""Reads the .rttlog rows uc_log_test_log_format wrote with Python's csv module, the way the bench
-scripts (smoke.py, hwtest.py, combo_check.py) do: every row has the 9 columns, and each text column
-is exactly what the C++ side expects a CSV reader to see.
+"""Reads the .rttlog rows uc_log_test_log_format wrote with uc_log_client.rttlog_rows (Python's csv module),
+the way a script that reads a .rttlog does: valid UTF-8, the header, every row has the 9 columns, and each
+text column is exactly what the C++ side expects a CSV reader to see.
 
     test_rttlog_format.py <dir with format_sample.rttlog and format_sample.expected>
 """
 
-import csv
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+import uc_log_client  # noqa: E402
 
 
 def main():
     d = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
-    with open(d / "format_sample.rttlog", newline="", encoding="utf-8", errors="strict") as f:
-        rows = list(csv.reader(f))
+    path = d / "format_sample.rttlog"
+    # the printer writes UTF-8 only
+    text = path.read_text(encoding="utf-8", errors="strict")
+    failures = 0
+    header = text.split("\n", 1)[0]
+    if header != ",".join(uc_log_client.RTTLOG_COLUMNS):
+        print(f"FAIL: header {header!r}")
+        failures += 1
+    try:
+        rows = list(uc_log_client.rttlog_rows(path))
+    except ValueError as e:
+        print(f"FAIL: {e}")
+        return 1
     expected = (
         d / "format_sample.expected").read_text(encoding="utf-8").split("\n")[:-1]
-    failures = 0
-    header = ["recv_time_utc", "channel", "file", "line", "function", "log_level", "uc_time",
-              "message", "module"]
-    if rows[0] != header:
-        print(f"FAIL: header {rows[0]}")
+    if len(expected) != 4 * len(rows):
+        print(f"FAIL: {len(rows)} rows, {len(expected) // 4} expected")
         failures += 1
-    if len(expected) != 4 * (len(rows) - 1):
-        print(f"FAIL: {len(rows) - 1} rows, {len(expected) // 4} expected")
-        failures += 1
-    for i, row in enumerate(rows[1:]):
+    for i, row in enumerate(rows):
         if len(row) != 9:
             print(f"FAIL: row {i}: {len(row)} columns: {row}")
             failures += 1

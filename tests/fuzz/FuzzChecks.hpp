@@ -1,8 +1,10 @@
 #pragma once
 
-// Every line the control server writes: one line, strict JSON, round-trips as `T`. Aborts otherwise.
+// What the fuzzers share: the libFuzzer entry point's declaration, `fail` (a broken property: its name and the input
+// line, then abort) and `checkLine` - every line the control server writes is one line of strict JSON that round-trips
+// as `T`.
 
-#include "uc_log/detail/ControlProtocol.hpp"
+#include "uc_log/printer/ControlProtocol.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -35,12 +37,12 @@ void checkLine(std::string const& line) {
         if(static_cast<unsigned char>(line[i]) < 0x20U) { fail("a raw control character", line); }
     }
     auto utf8 = line;
-    control::makeUtf8(utf8);
+    printer::control::makeUtf8(utf8);
     if(utf8 != line) { fail("not UTF-8", line); }
-    auto const  parsed = control::fromLine<T>(line);
+    auto const  parsed = printer::control::fromLine<T>(line);
     auto const* value  = std::get_if<T>(&parsed);
     if(value == nullptr) { fail("does not read back", line); }
-    if(control::toLine(*value) != line) { fail("does not write out as itself", line); }
+    if(printer::control::toLine(*value) != line) { fail("does not write out as itself", line); }
 }
 
 }   // namespace uc_log::fuzz

@@ -1,8 +1,10 @@
 // The .rttlog row format (LogFormat.hpp): RFC 4180 CSV, one physical line per record, and the
 // escapes decode back to the exact message. Writes the rows it checks to <dir>/format_sample.rttlog
 // and the fields a CSV reader must see to <dir>/format_sample.expected, for
-// test_rttlog_format.py, which reads them with Python's csv module like the bench scripts do.
-#include "uc_log/detail/LogFormat.hpp"
+// test_rttlog_format.py, which reads them with Python's csv module as a .rttlog script does.
+#include "support/Check.hpp"
+#include "uc_log/printer/LogFormat.hpp"
+#include "uc_log/printer/RttlogRows.hpp"
 
 #include <cstdio>
 #include <fstream>
@@ -13,108 +15,8 @@
 #include <string_view>
 #include <vector>
 
-static int failures = 0;
-
-#define CHECK(cond, msg)                                        \
-    do {                                                        \
-        if(!(cond)) {                                           \
-            std::printf("FAIL: %s (line %d)\n", msg, __LINE__); \
-            ++failures;                                         \
-        }                                                       \
-    } while(0)
-
 namespace {
-// RFC 4180: fields split at commas, a quoted field may hold commas and "" for a quote
-std::optional<std::vector<std::string>> splitCsv(std::string_view line) {
-    std::vector<std::string> fields;
-    std::string              field;
-    bool                     quoted = false;
-    for(std::size_t i = 0; i < line.size(); ++i) {
-        char const c = line[i];
-        if(quoted) {
-            if(c == '"') {
-                if(i + 1 < line.size() && line[i + 1] == '"') {
-                    field.push_back('"');
-                    ++i;
-                } else {
-                    quoted = false;
-                }
-            } else {
-                field.push_back(c);
-            }
-        } else if(c == '"') {
-            if(!field.empty()) { return std::nullopt; }   // a quote inside an unquoted field
-            quoted = true;
-        } else if(c == ',') {
-            fields.push_back(std::move(field));
-            field.clear();
-        } else {
-            field.push_back(c);
-        }
-    }
-    if(quoted) { return std::nullopt; }
-    fields.push_back(std::move(field));
-    return fields;
-}
-
-void appendUtf8(std::string&  out,
-                std::uint32_t cp) {
-    if(cp < 0x80) {
-        out.push_back(static_cast<char>(cp));
-    } else if(cp < 0x800) {
-        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if(cp < 0x10000) {
-        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else {
-        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    }
-}
-
-// the escapes fmt's {:?} writes: \t \n \r \\ \" \' \xHH \u{H...}
-std::optional<std::string> unescape(std::string_view s) {
-    std::string out;
-    for(std::size_t i = 0; i < s.size(); ++i) {
-        if(s[i] != '\\') {
-            out.push_back(s[i]);
-            continue;
-        }
-        if(++i == s.size()) { return std::nullopt; }
-        switch(s[i]) {
-        case 't':  out.push_back('\t'); break;
-        case 'n':  out.push_back('\n'); break;
-        case 'r':  out.push_back('\r'); break;
-        case '\\': out.push_back('\\'); break;
-        case '"':  out.push_back('"'); break;
-        case '\'': out.push_back('\''); break;
-        case 'x':
-            if(i + 2 >= s.size()) { return std::nullopt; }
-            out.push_back(
-              static_cast<char>(std::stoi(std::string{s.substr(i + 1, 2)}, nullptr, 16)));
-            i += 2;
-            break;
-        case 'u':
-            {
-                auto const close = s.find('}', i);
-                if(i + 1 >= s.size() || s[i + 1] != '{' || close == std::string_view::npos) {
-                    return std::nullopt;
-                }
-                appendUtf8(out,
-                           static_cast<std::uint32_t>(
-                             std::stoul(std::string{s.substr(i + 2, close - i - 2)}, nullptr, 16)));
-                i = close;
-                break;
-            }
-        default: return std::nullopt;
-        }
-    }
-    return out;
-}
+using uc_log::printer::rttlog::unescape;
 
 struct Case {
     std::string message;
@@ -126,9 +28,9 @@ std::vector<Case> cases() {
       {                              "plain",                                                          "f"},
       {                                   "",                                                          "f"},
       {                        "0.96\" oled",                                                          "f"},
-      {          "\"quoted\" at both ends\"",                                                          "f"},
+      {          R"("quoted" at both ends")",                                                          "f"},
       {                            "a, b, c",                                                          "f"},
-      {              "backslash \\ and \\\\",                                                          "f"},
+      {              R"(backslash \ and \\)",                                                          "f"},
       {                 "a \\\" in the text",                                                          "f"}, // a backslash followed by a quote
       {                 "line one\nline two",                                                          "f"},
       {                     "cr\r and tab\t",                                                          "f"},
@@ -147,17 +49,17 @@ int main(int    argc,
     std::string const dir = argc > 1 ? *std::next(argv, 1) : ".";
 
     std::ostringstream text;
-    uc_log::detail::logformat::writeHeader(text);
+    uc_log::printer::logformat::writeHeader(text);
     auto const all = cases();
     for(std::size_t i = 0; i != all.size(); ++i) {
-        uc_log::detail::LogEntry entry{i % 4, {}};
+        uc_log::printer::LogEntry entry{i % 4, {}};
         entry.fileName     = "dir, with comma/main.cpp";
         entry.line         = 100 + i;
         entry.functionName = all[i].function;
         entry.logLevel     = uc_log::LogLevel::info;
         entry.logMsg       = all[i].message;
         entry.module       = "bench.\"module\"";
-        uc_log::detail::logformat::writeEntry(text, {}, entry);
+        uc_log::printer::logformat::writeEntry(text, {}, entry);
     }
     std::string const file = text.str();
 
@@ -172,7 +74,7 @@ int main(int    argc,
 
     std::ofstream expected{dir + "/format_sample.expected"};
     for(std::size_t i = 0; i + 1 < lines.size() && i < all.size(); ++i) {
-        auto const fields = splitCsv(lines[i + 1]);
+        auto const fields = uc_log::printer::rttlog::fields(lines[i + 1]);
         CHECK(fields && fields->size() == 9, "9 CSV fields");
         if(!fields || fields->size() != 9) {
             std::printf("  row %zu: %.*s\n",
@@ -197,6 +99,5 @@ int main(int    argc,
     }
     std::ofstream{dir + "/format_sample.rttlog", std::ios::binary} << file;
 
-    if(failures == 0) { std::puts("all checks passed"); }
-    return failures == 0 ? 0 : 1;
+    return uc_log::test::report();
 }

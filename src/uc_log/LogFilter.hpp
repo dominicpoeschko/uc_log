@@ -26,27 +26,27 @@
 
 namespace uc_log { namespace detail {
     // One above crit: no line passes.
-    inline constexpr std::uint8_t LevelOff = 6;
+    inline constexpr std::uint8_t levelOff = 6;
 
     struct FilterRule {
-        std::array<char, MaxModuleName> module{};
+        std::array<char, maxModuleName> module{};
         std::size_t                     size{};
         std::uint8_t                    level{};
 
-        constexpr std::string_view name() const { return {module.data(), size}; }
+        [[nodiscard]] constexpr std::string_view name() const { return {module.data(), size}; }
     };
 
     struct FilterTable {
-        static constexpr std::size_t MaxRules = 64;
+        static constexpr std::size_t maxRules = 64;
 
-        std::array<FilterRule, MaxRules> rules{};
+        std::array<FilterRule, maxRules> rules{};
         std::size_t                      count{};
         std::uint8_t                     global{};   // `*`, trace without one
 
-        constexpr bool hasModuleRules() const { return count != 0; }
+        [[nodiscard]] constexpr bool hasModuleRules() const { return count != 0; }
 
         // -1 if none.
-        constexpr int levelFor(std::string_view module) const {
+        [[nodiscard]] constexpr int levelFor(std::string_view module) const {
             int         level = -1;
             std::size_t best  = 0;
             for(std::size_t i = 0; i < count; ++i) {
@@ -69,17 +69,17 @@ namespace uc_log { namespace detail {
     };
 
     inline constexpr std::array<std::string_view, 7>
-      FilterLevelNames{"trace", "debug", "info", "warn", "error", "crit", "off"};
+      filterLevelNames{"trace", "debug", "info", "warn", "error", "crit", "off"};
 
     constexpr int filterLevel(std::string_view name) {
-        for(std::size_t i = 0; i < FilterLevelNames.size(); ++i) {
-            if(FilterLevelNames[i] == name) { return static_cast<int>(i); }
+        for(std::size_t i = 0; i < filterLevelNames.size(); ++i) {
+            if(filterLevelNames[i] == name) { return static_cast<int>(i); }
         }
         return -1;
     }
 
     constexpr std::string_view filterLevelName(std::uint8_t level) {
-        return level < FilterLevelNames.size() ? FilterLevelNames[level] : std::string_view{"?"};
+        return level < filterLevelNames.size() ? filterLevelNames[level] : std::string_view{"?"};
     }
 
     constexpr std::string_view trimmed(std::string_view s UC_LOG_LIFETIMEBOUND) {
@@ -128,7 +128,7 @@ namespace uc_log { namespace detail {
             for(std::size_t i = 0; i < result.table.count; ++i) {
                 if(result.table.rules[i].name() == module) { return fail("a module named twice"); }
             }
-            if(result.table.count == FilterTable::MaxRules) { return fail("more than 64 rules"); }
+            if(result.table.count == FilterTable::maxRules) { return fail("more than 64 rules"); }
             auto& rule = result.table.rules[result.table.count++];
             for(char const c : module) { rule.module[rule.size++] = c; }
             rule.level = static_cast<std::uint8_t>(level);
@@ -137,19 +137,17 @@ namespace uc_log { namespace detail {
     }
 
     // never defined: naming it in a constant expression turns a bad file into a compile error
-    void logFilterFileIsInvalid(char const* message);
+    void logFilterFileIsInvalid(std::string_view message);
 
     consteval FilterTable checkedFilter(std::string_view text) {
         auto const parsed = parseFilter(text);
-        if(!parsed.error.empty()) { logFilterFileIsInvalid(parsed.error.data()); }
+        if(!parsed.error.empty()) { logFilterFileIsInvalid(parsed.error); }
         return parsed.table;
     }
 }}   // namespace uc_log::detail
 
-#if defined(__has_embed)
-    #if __has_embed(<uc_log_filter.txt>)
-        #define UC_LOG_HAS_FILTER_FILE 1
-    #endif
+#if __has_embed(<uc_log_filter.txt>)
+    #define UC_LOG_HAS_FILTER_FILE 1
 #endif
 
 namespace uc_log { namespace detail {

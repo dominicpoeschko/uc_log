@@ -1,30 +1,23 @@
-// detail/MapFacts.hpp: the RTT control block from the three map shapes (its address, and its buffer count from its
+// printer/MapFacts.hpp: the RTT control block from the three map shapes (its address, and its buffer count from its
 // size), the other facts from one read, and a map that changes on disk read again.
-#include "uc_log/detail/MapFacts.hpp"
+#include "support/Check.hpp"
+#include "uc_log/printer/MapFacts.hpp"
 
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
-#include <thread>
 #include <unistd.h>
 
 namespace {
-int failures = 0;
-
-#define CHECK(cond, msg)                                        \
-    do {                                                        \
-        if(!(cond)) {                                           \
-            std::printf("FAIL: %s (line %d)\n", msg, __LINE__); \
-            ++failures;                                         \
-        }                                                       \
-    } while(0)
 
 bool blockIs(std::string const& map,
              std::uint32_t      address,
              std::uint32_t      buffers) {
-    auto const b = uc_log::detail::controlBlockFromMap(map, "x.map");
+    std::istringstream in{map};
+    auto const b = uc_log::printer::rttBlockOf(uc_log::printer::MapSymbols::parse(in), "x.map");
     return b && b->address == address && b->totalBuffers == buffers;
 }
 
@@ -62,7 +55,8 @@ void shapes() {
                   0x2000'0310U,
                   1),
           "GNU ld with LTO, numbers on the next line");
-    CHECK(!uc_log::detail::controlBlockFromMap("20000100 20000100 10 1 something_else\n", "x.map"),
+    std::istringstream other{"20000100 20000100 10 1 something_else\n"};
+    CHECK(!uc_log::printer::rttBlockOf(uc_log::printer::MapSymbols::parse(other), "x.map"),
           "no block: said");
     CHECK(
       !blockIs("20000100 20000100       61     1                 uc_log::detail::rttControlBlock\n",
@@ -82,8 +76,8 @@ void cachedAndReread() {
                "20079780 20079780       30     1                 uc_log::detail::LossMembers<B, L, "
                "2u>::lossLedger\n";
     }
-    uc_log::detail::MapFacts facts{file};
-    auto const               first = facts.get();
+    uc_log::printer::MapFacts facts{file};
+    auto const                first = facts.get();
     CHECK(first->block && first->block->address == 0x2000'0100U && first->block->totalBuffers == 1,
           "the block");
     CHECK(first->announce == 0x2000'2cfcU && first->epoch == 0x2000'0000U,
@@ -92,7 +86,10 @@ void cachedAndReread() {
     CHECK(first->ledger && first->ledger->address == 0x2007'9780U && first->ledgers == 1,
           "the ledger");
     CHECK(facts.get() == first, "an unchanged file is not read again");
-    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    CHECK(first->map->error.empty() && first->map->symbols.find("uc_log_boot_words") != nullptr,
+          "the parse is handed on");
+    // the rebuild's time stamp is set, not waited for: a second after the rewrite's own, so it differs from the first
+    // file's whatever the file system's resolution (no clock read, no sleep)
     {
         std::ofstream out{file};
         out << "20000400 20000400       48     1                 uc_log::detail::rttControlBlock\n";
@@ -105,13 +102,17 @@ void cachedAndReread() {
             && !second->announce && !second->epoch && !second->loggedBoots && !second->ledger,
           "a rebuilt map is read again");
     std::filesystem::remove(file);
-    CHECK(!facts.get()->block, "a map that went: said, not the old one");
+    CHECK(!facts.get()->block && !facts.get()->map->error.empty(),
+          "a map that went: said, not the old one");
 }
 }   // namespace
 
-int main() {
-    shapes();
-    cachedAndReread();
-    std::printf(failures == 0 ? "ALL OK\n" : "%d FAILURES\n", failures);
-    return failures == 0 ? 0 : 1;
+int main(int    argc,
+         char** argv) {
+    return uc_log::test::run(argc,
+                             argv,
+                             {
+                               {         "shapes",          shapes},
+                               {"cachedAndReread", cachedAndReread},
+    });
 }

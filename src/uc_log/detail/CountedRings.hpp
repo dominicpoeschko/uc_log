@@ -1,6 +1,6 @@
 #pragma once
 
-// LossPolicy::Counted's write path, shared by the three RTT backends (LossPolicy.hpp, LossLedger.hpp).
+// LossPolicy::Counted's write path of the RTT backend (LossPolicy.hpp, LossLedger.hpp).
 // A backend with LossPolicy::Silent never instantiates any of this.
 //
 // In skip mode every record is staged and published at its end (all of it or none: no holes);
@@ -8,6 +8,7 @@
 // DebuggerPresentFunction refused are counted.
 
 #include "../LossPolicy.hpp"
+#include "LogRing.hpp"
 #include "LossLedger.hpp"
 #include "rtt/rtt.hpp"
 
@@ -19,21 +20,6 @@
 #include <utility>
 
 namespace uc_log::detail {
-
-// f(std::integral_constant<std::size_t, ring>) for a ring index known only at run time; false for
-// an index past the rings
-template<std::size_t NumRings,
-         typename F>
-[[gnu::always_inline]] inline bool onRing(std::size_t ring,
-                                          F&&         f) {
-    return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-        bool result = false;
-        static_cast<void>(
-          ((ring == Is ? (result = f(std::integral_constant<std::size_t, Is>{}), true) : false)
-           || ...));
-        return result;
-    }(std::make_index_sequence<NumRings>{});
-}
 
 // The static state of a counting backend; the backend is the first parameter, so two backends
 // never share a ledger. `lossLedger` is what the printer finds by name in the map.
@@ -80,18 +66,18 @@ struct Counting {
            && onRing<NumRings>(
              ring,
              [&](auto i) {
-                 constexpr std::size_t I = decltype(i)::value;
+                 constexpr std::size_t index = decltype(i)::value;
                  if constexpr(waits) {
                      // asked only when the piece does not fit; says no at once outside panic mode
                      StallWaiter waiter{wait.on ? Loss::panicStallPolls : 0U,
-                                        wait.goneAtPlus1[I],
+                                        wait.goneAtPlus1[index],
                                         Loss::panicStallUs,
                                         &kvasir_announced_reset_time_us};
-                     return rtt.template stage<I>(span, ledger.staged(ring), waiter);
+                     return rtt.template stage<index>(span, ledger.staged(ring), waiter);
                  } else if constexpr(staged) {
-                     return rtt.template stage<I>(span, ledger.staged(ring));
+                     return rtt.template stage<index>(span, ledger.staged(ring));
                  } else {
-                     static_cast<void>(rtt.template write<I>(span));
+                     static_cast<void>(rtt.template write<index>(span));
                      return true;
                  }
              }))

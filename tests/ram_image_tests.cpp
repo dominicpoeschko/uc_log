@@ -1,41 +1,37 @@
 // Where a RAM image starts: the vector table from the linker map, its words from the hex file.
 
-#include "uc_log/detail/RamImage.hpp"
+#include "support/Check.hpp"
+#include "uc_log/printer/RamImage.hpp"
 
 #include <cstdio>
 #include <sstream>
 #include <string>
 
-using namespace uc_log::detail;
+using namespace uc_log::printer;
 
-static int failures = 0;
+namespace {
 
-#define CHECK(cond, msg)                                        \
-    do {                                                        \
-        if(!(cond)) {                                           \
-            std::printf("FAIL: %s (line %d)\n", msg, __LINE__); \
-            ++failures;                                         \
-        }                                                       \
-    } while(0)
-
-static std::expected<std::uint32_t,
-                     std::string> tableOf(std::string const& map) {
+std::expected<std::uint32_t,
+              std::string>
+tableOf(std::string const& map) {
     std::istringstream in{map};
-    return vectorTableFromMap(in);
+    return vectorTableFromMap(MapSymbols::parse(in));
 }
 
-static std::vector<HexSegment> image(std::string const& hex) {
+std::vector<HexSegment> image(std::string const& hex) {
     std::istringstream in{hex};
     return parseIntelHex(in).value_or(std::vector<HexSegment>{});
 }
 
-static std::expected<JLink::RamImageStart,
-                     std::string>
+std::expected<JLink::RamImageStart,
+              std::string>
 startOf(std::string const& map,
         std::string const& hex) {
     std::istringstream in{map};
-    return ramImageStart(in, image(hex));
+    return ramImageStart(MapSymbols::parse(in), image(hex));
 }
+
+}   // namespace
 
 int main() {
     // lld (an RP2350 map), and the GNU ld shape
@@ -55,8 +51,7 @@ int main() {
           "not a longer name");
     CHECK(!tableOf("_LINKER_vectors_start_ = .\n").has_value(), "a line without an address");
     auto const none = tableOf("nothing here\n");
-    CHECK(!none && none.error().find("_LINKER_vectors_start_") != std::string::npos,
-          "a missing symbol is named");
+    CHECK(!none && none.error().contains("_LINKER_vectors_start_"), "a missing symbol is named");
 
     // SP 0x20082000, reset 0x20000199, at 0x20000000
     std::string const hex
@@ -69,8 +64,7 @@ int main() {
     if(!start) { std::printf("  %s\n", start.error().c_str()); }
 
     auto const elsewhere = startOf(gnu, hex);
-    CHECK(!elsewhere
-            && elsewhere.error().find("no vector table at 0x20000100") != std::string::npos,
+    CHECK(!elsewhere && elsewhere.error().contains("no vector table at 0x20000100"),
           "a table the hex does not hold");
 
     // reset vector without the Thumb bit
@@ -78,21 +72,16 @@ int main() {
                              ":020000042000DA\n"
                              ":080000000020082098010020F7\n"
                              ":00000001FF\n");
-    CHECK(!arm && arm.error().find("implausible") != std::string::npos, "an ARM reset vector");
+    CHECK(!arm && arm.error().contains("implausible"), "an ARM reset vector");
     // SP not word-aligned
     auto const odd = startOf(lld,
                              ":020000042000DA\n"
                              ":080000000220082099010020F4\n"
                              ":00000001FF\n");
-    CHECK(!odd && odd.error().find("implausible") != std::string::npos, "an unaligned SP");
+    CHECK(!odd && odd.error().contains("implausible"), "an unaligned SP");
 
-    auto const files = ramImageStart(std::string{"/nonexistent.map"}, std::string{"x.hex"});
-    CHECK(!files && files.error().find("cannot open") != std::string::npos, "a missing map file");
+    auto const files = ramImageStart(MapSnapshot::load("/nonexistent.map"), std::string{"x.hex"});
+    CHECK(!files && files.error().contains("cannot open"), "a missing map file");
 
-    if(failures == 0) {
-        std::printf("ALL OK\n");
-        return 0;
-    }
-    std::printf("%d FAILURES\n", failures);
-    return 1;
+    return uc_log::test::report();
 }

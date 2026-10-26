@@ -1,7 +1,9 @@
-// The printer's side of LossPolicy::Counted (detail/TargetLoss.hpp): the lost-record found by its site and
-// counted per channel, an old catalog that does not know the site, the ledger decoded from raw bytes, a ring that
+// The printer's side of LossPolicy::Counted (printer/TargetLoss.hpp): the lost-record found by its site and
+// counted per channel, a catalog that does not know the site, the ledger decoded from raw bytes, a ring that
 // stays quiet with an unannounced count reported once after 2 s, and the no-ring slot.
-#include "uc_log/detail/TargetLoss.hpp"
+#include "support/Check.hpp"
+#include "uc_log/printer/LostRecordLine.hpp"
+#include "uc_log/printer/TargetLoss.hpp"
 
 #include <array>
 #include <chrono>
@@ -14,20 +16,10 @@
 
 namespace {
 
-int failures = 0;
+using uc_log::printer::LogEntry;
+using uc_log::printer::SignatureInfo;
 
-#define CHECK(cond, msg)                                        \
-    do {                                                        \
-        if(!(cond)) {                                           \
-            std::printf("FAIL: %s (line %d)\n", msg, __LINE__); \
-            ++failures;                                         \
-        }                                                       \
-    } while(0)
-
-using uc_log::detail::LogEntry;
-using uc_log::detail::SignatureInfo;
-
-constexpr std::string_view LostLine{
+constexpr std::string_view lostLine{
   R"(("uc_log.hpp", 356, 3, 2086536[1/1000000]s, "uc_log", """""")⚠ 2106 log records lost on this channel (ring full, or no debugger))"};
 
 // a function-local static that is never destroyed (no exit-time destructor in a test)
@@ -50,26 +42,41 @@ SignatureInfo const& otherSite() {
 }
 
 void lostRecord() {
-    LogEntry const entry{1, LostLine, &lostSite()};
+    LogEntry const entry{1, lostLine, &lostSite()};
     CHECK(entry.parsedOk, "the lost-record's header parses");
-    auto const n = uc_log::detail::lostRecordCount(entry);
+    auto const n = uc_log::printer::lostRecordCount(entry);
     CHECK(n && *n == 2106, "the lost-record is found by its site and carries its count");
 
-    LogEntry const notLost{1, LostLine, &otherSite()};
-    CHECK(!uc_log::detail::lostRecordCount(notLost),
+    // the sign of an inline string (no catalog) counts the same: the text is shared (uc_log/detail/LostRecord.hpp)
+    constexpr std::string_view inlineLine{
+      R"(("uc_log.hpp", 356, 3, 2086536[1/1000000]s, "uc_log", """""")! 7 log records lost on this channel (ring full, or no debugger))"};
+    LogEntry const inlineSign{1, inlineLine, &lostSite()};
+    auto const     m = uc_log::printer::lostRecordCount(inlineSign);
+    CHECK(m && *m == 7, "the lost-record with the '!' sign carries its count too");
+    CHECK(uc_log::printer::lostRecordNumber("! 3 log records lost on this channel")
+            == uc_log::printer::lostRecordNumber("⚠ 3 log records lost on this channel"),
+          "both signs read alike");
+    CHECK(!uc_log::printer::lostRecordNumber("! 3 boots passed unread")
+            && !uc_log::printer::lostRecordNumber("? 3 log records lost on this channel")
+            && !uc_log::printer::lostRecordNumber("!3 log records lost on this channel"),
+          "another text, another sign, no space: none");
+
+    LogEntry const notLost{1, lostLine, &otherSite()};
+    CHECK(!uc_log::printer::lostRecordCount(notLost),
           "the same text from another site is just a line");
 
-    LogEntry const oldCatalog{1, LostLine, nullptr};
-    CHECK(!uc_log::detail::lostRecordCount(oldCatalog),
+    LogEntry const oldCatalog{1, lostLine, nullptr};
+    CHECK(!uc_log::printer::lostRecordCount(oldCatalog),
           "a catalog without the site: nothing recognised");
 
-    constexpr std::string_view Info{
+    constexpr std::string_view info{
       R"(("main.cpp", 12, 2, 5[1/1000]s, """""")⚠ 3 log records lost on this channel)"};
-    LogEntry const plain{0, Info, &lostSite()};
-    CHECK(!uc_log::detail::lostRecordCount(plain), "not a warn line of module uc_log");
+    LogEntry const plain{0, info, &lostSite()};
+    CHECK(!uc_log::printer::lostRecordCount(plain), "not a warn line of module uc_log");
 
-    uc_log::detail::TargetLoss loss;
-    auto const                 text = loss.lostRecord(1, *n, entry.ucTime.time);
+    uc_log::printer::TargetLoss loss;
+    auto const                  text
+      = loss.lostRecord(1, uc_log::test::need(n, "a lost-record count"), entry.ucTime.time);
     CHECK(text.contains("channel 1") && text.contains("2106 log records")
             && text.contains("2.087 s"),
           "the status message names the channel, the count and the time");
@@ -92,19 +99,19 @@ std::vector<std::byte> ledgerBytes(std::vector<std::array<std::uint32_t,
 }
 
 void ledger() {
-    using Clock        = uc_log::detail::TargetLoss::Clock;
-    auto const decoded = uc_log::detail::decodeLossLedger(ledgerBytes({
+    using Clock        = uc_log::printer::TargetLoss::Clock;
+    auto const decoded = uc_log::printer::decodeLossLedger(ledgerBytes({
       { 7, 7},
       {12, 2},
       { 0, 0}
     }));
     CHECK(decoded.size() == 3 && decoded[1].lost == 12 && decoded[1].reported == 2,
           "decoded from raw bytes");
-    CHECK(uc_log::detail::decodeLossLedger(std::vector<std::byte>(20)).empty(),
+    CHECK(uc_log::printer::decodeLossLedger(std::vector<std::byte>(20)).empty(),
           "a size that is no whole slot");
 
-    uc_log::detail::TargetLoss loss;
-    auto const                 t0 = Clock::now();
+    uc_log::printer::TargetLoss loss;
+    auto const                  t0 = Clock::now();
     CHECK(loss.ledger(decoded, t0).empty(), "a pending count is not reported at once");
     CHECK(loss.ledger(decoded, t0 + std::chrono::seconds{1}).empty(), "nor after 1 s");
     auto const late = loss.ledger(decoded, t0 + std::chrono::seconds{3});
@@ -112,7 +119,7 @@ void ledger() {
           "a ring quiet with 10 unannounced records: one message after 2 s");
     CHECK(loss.ledger(decoded, t0 + std::chrono::seconds{6}).empty(), "and only once");
 
-    auto const reported = uc_log::detail::decodeLossLedger(ledgerBytes({
+    auto const reported = uc_log::printer::decodeLossLedger(ledgerBytes({
       { 7,  7},
       {12, 12},
       { 0,  0}
@@ -120,7 +127,7 @@ void ledger() {
     CHECK(loss.ledger(reported, t0 + std::chrono::seconds{7}).empty(),
           "reported in-band: nothing to say");
 
-    auto const noRing = uc_log::detail::decodeLossLedger(ledgerBytes({
+    auto const noRing = uc_log::printer::decodeLossLedger(ledgerBytes({
       { 7,  7},
       {12, 12},
       { 3,  0}
@@ -139,7 +146,7 @@ void maps() {
       "20079780 20079780       30     1                 uc_log::detail::LossMembers<B, L, "
       "2u>::lossLedger\n"};
     std::size_t count = 0;
-    auto const  a     = uc_log::detail::findLossLedger(lld, count);
+    auto const  a = uc_log::printer::findLossLedger(uc_log::printer::MapSymbols::parse(lld), count);
     CHECK(a && a->address == 0x2007'9780U && a->size == 0x30 && count == 1, "lld map");
 
     // GNU ld: the input section with its numbers on the next line, then the demangled symbol (spaces in it)
@@ -148,7 +155,7 @@ void maps() {
       "                0x20079780       0x30 /tmp/ccuMybFE.ltrans0.ltrans.o\n"
       "                0x20079780                uc_log::detail::LossMembers<B, L, "
       "2u>::lossLedger\n"};
-    auto const b = uc_log::detail::findLossLedger(gnu, count);
+    auto const b = uc_log::printer::findLossLedger(uc_log::printer::MapSymbols::parse(gnu), count);
     CHECK(b && b->address == 0x2007'9780U && b->size == 0x30 && count == 1, "GNU ld map");
 
     std::istringstream two{
@@ -156,24 +163,36 @@ void maps() {
       "2u>::lossLedger\n"
       "200797b0 200797b0       30     1                 uc_log::detail::LossMembers<B, L, "
       "2u>::lossLedger\n"};
-    CHECK(!uc_log::detail::findLossLedger(two, count) && count == 2,
+    CHECK(!uc_log::printer::findLossLedger(uc_log::printer::MapSymbols::parse(two), count)
+            && count == 2,
           "two ledgers: none read, both counted");
+
+    // GNU ld: the copy --gc-sections dropped is listed at 0 under "Discarded input sections" - no ledger
+    std::istringstream discarded{
+      "Discarded input sections\n"
+      " .bss._ZN6uc_log6detail11LossMembersINS_1BELj2EE10lossLedgerE\n"
+      "                0x00000000       0x30 /tmp/cc.ltrans0.ltrans.o\n"
+      "Memory Configuration\n"
+      "Linker script and memory map\n"};
+    CHECK(!uc_log::printer::findLossLedger(uc_log::printer::MapSymbols::parse(discarded), count)
+            && count == 0,
+          "a discarded ledger at 0 is none");
 
     std::istringstream none{
       "20079440 20079440       48     4                 uc_log::X::rttControlBlock\n"};
-    CHECK(!uc_log::detail::findLossLedger(none, count) && count == 0,
+    CHECK(!uc_log::printer::findLossLedger(uc_log::printer::MapSymbols::parse(none), count)
+            && count == 0,
           "a firmware that does not count");
 }
 }   // namespace
 
-int main() {
-    lostRecord();
-    ledger();
-    maps();
-    if(failures != 0) {
-        std::printf("%d failure(s)\n", failures);
-        return 1;
-    }
-    std::printf("all target loss tests passed\n");
-    return 0;
+int main(int    argc,
+         char** argv) {
+    return uc_log::test::run(argc,
+                             argv,
+                             {
+                               {"lostRecord", lostRecord},
+                               {    "ledger",     ledger},
+                               {      "maps",       maps},
+    });
 }

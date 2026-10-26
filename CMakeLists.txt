@@ -1,8 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-if(POLICY CMP0174)
-    cmake_policy(SET CMP0174 NEW)
-endif()
+cmake_policy(SET CMP0174 NEW)
 
 set(uc_log_dir
     ${CMAKE_CURRENT_LIST_DIR}
@@ -69,15 +67,20 @@ include(${cmake_helpers_SOURCE_DIR}/FindOrFetch.cmake)
 add_subdirectory(rtt)
 add_subdirectory(remote_fmt)
 
+# target_add_uc_log_rtt_jlink(), its defaults (UC_LOG_SWD_DEFAULT_KHZ, UC_LOG_ID_KEY_STRIP) and the table of the printer
+# options it writes into <target>.printer_args (a ctest checks that file against a golden)
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/RttJlink.cmake)
+
 # Supplies the remote_fmt formatter for reflectable structs. On the interface library, not the printer: the struct is
-# formatted on the microcontroller into an @TYPENAME(...) marker the printer already parses. Also owns glaze (version
-# and patch); never link glaze::glaze by name, it may be an imported target scoped to aglio's directory.
+# formatted on the microcontroller into an @TYPENAME(...) marker the printer already parses. glaze comes first from
+# remote_fmt above (its catalog reader; the same version and a copy of aglio's glaze.patch), and aglio takes that one;
+# never link glaze::glaze by name here, it may be an imported target scoped to another directory.
 find_or_fetch_package(
     aglio
     GIT_REPOSITORY
     https://github.com/dominicpoeschko/aglio.git
     GIT_TAG
-    v0.2.8
+    v0.2.9
     GIT_BRANCH
     master)
 
@@ -86,6 +89,13 @@ target_include_directories(uc_log INTERFACE src)
 target_link_libraries(uc_log INTERFACE rtt::rtt remote_fmt::remote_fmt aglio::aglio)
 
 add_library(uc_log::uc_log ALIAS uc_log)
+
+# Host side: the printer's headers (reader, control server, map, catalog, TUI) under their own include root. A firmware
+# target links only uc_log::uc_log (src/), so a firmware file that includes a printer header does not compile.
+add_library(uc_log_host INTERFACE)
+target_include_directories(uc_log_host INTERFACE host)
+target_link_libraries(uc_log_host INTERFACE uc_log::uc_log)
+add_library(uc_log::host ALIAS uc_log_host)
 
 if(UC_LOG_BUILD_PRINTER)
 
@@ -152,8 +162,9 @@ if(UC_LOG_BUILD_PRINTER)
             GIT_BRANCH
             master)
         # FMT_USE_LOCALE / FMT_UNICODE as the compiled fmt library has them, in every host translation unit:
-        # string_constant.hpp defaults both to 0 (targets have no locale), which makes fmt::locale_ref an empty class
-        # here but a pointer in the library - an ODR violation, and a "{:L...}" spec reads a garbage locale pointer.
+        # string_constant/format.hpp defaults both to 0 (targets have no locale), which makes fmt::locale_ref an empty
+        # class here but a pointer in the library - an ODR violation, and a "{:L...}" spec reads a garbage locale
+        # pointer.
         if(TARGET fmt)
             target_compile_definitions(fmt PUBLIC FMT_USE_LOCALE=1 FMT_UNICODE=1)
         elseif(TARGET fmt::fmt)
@@ -194,42 +205,70 @@ if(UC_LOG_BUILD_PRINTER)
 
         add_subdirectory(jlink)
 
-        add_executable(uc_log_printer src/uc_log/jlinkPrinter.cpp)
-
         list(TRANSFORM Boost_Components PREPEND "Boost::")
-        target_link_libraries(
-            uc_log_printer
-            PRIVATE remote_fmt::parser
-                    fmt::fmt
-                    Threads::Threads
-                    uc_log::uc_log
-                    jlink::jlink
-                    cxxopts::cxxopts
-                    atomic
-                    ${Boost_Components}
-                    ftxui::screen
-                    ftxui::dom
-                    ftxui::component
-                    enchantum::enchantum)
 
-        target_compile_definitions(uc_log_printer PRIVATE CXXOPTS_NO_RTTI)
+        # the printer in pieces (host/uc_log/printer/): its core services and the J-Link reader, instantiated once, and
+        # the FTXUI window; uc_log_printer is main, uc_log_gui_test the window on a fake target
+        add_library(uc_log_printer_core STATIC host/uc_log/printer/BuildRunner.cpp host/uc_log/printer/Options.cpp
+                                               host/uc_log/printer/PrinterModel.cpp host/uc_log/printer/ReaderJLink.cpp)
+        target_link_libraries(
+            uc_log_printer_core
+            PUBLIC remote_fmt::parser
+                   fmt::fmt
+                   Threads::Threads
+                   uc_log::host
+                   jlink::jlink
+                   atomic
+                   ${Boost_Components}
+                   enchantum::enchantum
+            PRIVATE cxxopts::cxxopts)
+        target_compile_definitions(uc_log_printer_core PRIVATE CXXOPTS_NO_RTTI)
+        target_add_default_build_options(uc_log_printer_core PRIVATE)
+
+        add_library(
+            uc_log_tui STATIC
+            host/uc_log/printer/tui/Gui.cpp
+            host/uc_log/printer/tui/BuildTab.cpp
+            host/uc_log/printer/tui/DebuggerTab.cpp
+            host/uc_log/printer/tui/FilterTab.cpp
+            host/uc_log/printer/tui/HelpTab.cpp
+            host/uc_log/printer/tui/InspectTab.cpp
+            host/uc_log/printer/tui/LogsTab.cpp
+            host/uc_log/printer/tui/MetricsTab.cpp
+            host/uc_log/printer/tui/SettingsTab.cpp
+            host/uc_log/printer/tui/StatisticsTab.cpp
+            host/uc_log/printer/tui/StatusLine.cpp)
+        target_link_libraries(
+            uc_log_tui
+            PUBLIC remote_fmt::parser
+                   fmt::fmt
+                   Threads::Threads
+                   uc_log::host
+                   jlink::jlink
+                   ${Boost_Components}
+                   ftxui::screen
+                   ftxui::dom
+                   ftxui::component
+                   enchantum::enchantum
+                   uc_log_printer_core)
+        target_add_default_build_options(uc_log_tui PRIVATE)
+
+        add_executable(uc_log_printer host/jlinkPrinter.cpp)
+        target_link_libraries(uc_log_printer PRIVATE uc_log_printer_core uc_log_tui)
         target_add_default_build_options(uc_log_printer PRIVATE)
 
-        if(${UC_LOG_BUILD_TEST_GUI})
-            add_executable(uc_log_gui_test src/uc_log/gui_test.cpp)
-            target_link_libraries(
-                uc_log_gui_test
-                remote_fmt::parser
-                fmt::fmt
-                Threads::Threads
-                uc_log::uc_log
-                cxxopts::cxxopts
-                ${Boost_Components}
-                ftxui::screen
-                ftxui::dom
-                ftxui::component
-                enchantum::enchantum)
+        # the stress run's checker (host/uc_log/stress/LogStressCheck.hpp): reads what a printer wrote for a firmware
+        # that logs uc_log/stress/Records.hpp - a host tool beside the printer, not a test
+        add_executable(uc_log_log_stress_check host/log_stress_check.cpp)
+        target_link_libraries(uc_log_log_stress_check PRIVATE remote_fmt::parser fmt::fmt uc_log::host
+                                                              enchantum::enchantum)
+        target_add_default_build_options(uc_log_log_stress_check PRIVATE)
 
+        if(${UC_LOG_BUILD_TEST_GUI})
+            add_executable(uc_log_gui_test host/gui_test.cpp)
+            target_link_libraries(uc_log_gui_test PRIVATE uc_log_tui)
+            # the host tests' FakeTargetPort (tests/support/) is the demo's target too
+            target_include_directories(uc_log_gui_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/tests)
             target_add_default_build_options(uc_log_gui_test PUBLIC)
         endif()
 
@@ -248,216 +287,3 @@ if(UC_LOG_BUILD_PRINTER)
     endif()
 
 endif() # UC_LOG_BUILD_PRINTER
-
-function(target_add_uc_log_rtt_jlink targetname)
-    # RAM_IMAGE: the image lives in RAM (Kvasir's RAM_ONLY): the printer's flash and reset load it and start it at its
-    # vector table instead of resetting into the boot ROM (--ram_image)
-    set(options VERBOSE RAM_IMAGE)
-    set(oneValueArgs
-        LOG_FILTER
-        TARGET_MPU
-        SWD_SPEED
-        JLINK_IP
-        JLINK_PROBE
-        MAP_FILE
-        PREFIX
-        CONTROL_PORT
-        DUPLEX_BASE_PORT
-        TRANSPORT
-        HEX_FILE
-        PARK_SIGNATURE
-        STALL_SIGNATURE
-        FLASH_READY_SIGNATURE
-        FLASH_WINDOW
-        FLASH_UNCACHED_OFFSET)
-    # PRE_RESET_COMMANDS: `w4 <address> <value>` lines written before every reset and download (e.g. RP core 1 parking).
-    set(multiValueArgs PRE_RESET_COMMANDS STALL_RECOVERY)
-
-    cmake_parse_arguments(PARSE_ARGV 1 PARSED_ARGS "${options}" "${oneValueArgs}" "${multiValueArgs}")
-
-    if(PARSED_ARGS_UNPARSED_ARGUMENTS)
-        message(FATAL_ERROR "target_add_uc_log_rtt_jlink: Unknown arguments: ${PARSED_ARGS_UNPARSED_ARGUMENTS}")
-    endif()
-
-    if(NOT PARSED_ARGS_TARGET_MPU)
-        message(FATAL_ERROR "target_add_uc_log_rtt_jlink: TARGET_MPU is required")
-    endif()
-
-    if(NOT TARGET ${targetname})
-        message(FATAL_ERROR "target_add_uc_log_rtt_jlink: Target '${targetname}' does not exist")
-    endif()
-
-    if(NOT PARSED_ARGS_SWD_SPEED)
-        set(PARSED_ARGS_SWD_SPEED 100000)
-    elseif(${PARSED_ARGS_SWD_SPEED} LESS 1000 OR ${PARSED_ARGS_SWD_SPEED} GREATER 50000000)
-        message(WARNING "SWD_SPEED ${PARSED_ARGS_SWD_SPEED} may be out of valid range (1000-50000000)")
-    endif()
-
-    if(NOT PARSED_ARGS_MAP_FILE)
-        set(PARSED_ARGS_MAP_FILE "${targetname}.map")
-    endif()
-
-    if(NOT PARSED_ARGS_HEX_FILE)
-        set(PARSED_ARGS_HEX_FILE "${targetname}_flash.hex")
-    endif()
-
-    if(NOT PARSED_ARGS_PREFIX)
-        set(PARSED_ARGS_PREFIX "log_")
-    endif()
-
-    if(NOT PARSED_ARGS_CONTROL_PORT)
-        set(PARSED_ARGS_CONTROL_PORT 34565)
-    elseif(${PARSED_ARGS_CONTROL_PORT} LESS 1024 OR PARSED_ARGS_CONTROL_PORT GREATER 65535)
-        message(WARNING "CONTROL_PORT ${PARSED_ARGS_CONTROL_PORT} may be out of valid range (1024-65535)")
-    endif()
-
-    if(NOT PARSED_ARGS_DUPLEX_BASE_PORT)
-        set(PARSED_ARGS_DUPLEX_BASE_PORT 34600)
-    elseif(${PARSED_ARGS_DUPLEX_BASE_PORT} LESS 1024 OR PARSED_ARGS_DUPLEX_BASE_PORT GREATER 65535)
-        message(WARNING "DUPLEX_BASE_PORT ${PARSED_ARGS_DUPLEX_BASE_PORT} may be out of valid range (1024-65535)")
-    endif()
-
-    # unix: sockets in the log directory, the ports unused; tcp: CONTROL_PORT and DUPLEX_BASE_PORT + n.
-    if(NOT PARSED_ARGS_TRANSPORT)
-        set(PARSED_ARGS_TRANSPORT unix)
-    elseif(NOT PARSED_ARGS_TRANSPORT MATCHES "^(unix|tcp)$")
-        message(FATAL_ERROR "target_add_uc_log_rtt_jlink: TRANSPORT is unix or tcp, not ${PARSED_ARGS_TRANSPORT}")
-    endif()
-
-    target_generate_string_constants(${targetname})
-
-    # What a printer needs to know about this target - the chip, the probe, the image's files, the chip package's reset
-    # commands and signatures - in one list: the log_ target below passes it, and <target>.printer_args holds it for
-    # every other way a printer starts, one argument per line as it stands in argv. A new option goes here and nowhere
-    # else.
-    set(printer_args
-        --device
-        ${PARSED_ARGS_TARGET_MPU}
-        --speed
-        ${PARSED_ARGS_SWD_SPEED}
-        --map_file
-        ${PARSED_ARGS_MAP_FILE}
-        --hex_file
-        ${PARSED_ARGS_HEX_FILE}
-        --string_constants_file
-        "${targetname}_string_constants.json")
-
-    if(PARSED_ARGS_JLINK_IP AND NOT PARSED_ARGS_JLINK_IP STREQUAL "")
-        set(_val "${PARSED_ARGS_JLINK_IP}")
-        # Expand $ENV{VAR} if that's what the string is
-        if(_val MATCHES "^\\$ENV\\{([^}]+)\\}$")
-            set(_env_name "${CMAKE_MATCH_1}")
-            set(JLINK_IP_EXPANDED "$ENV{${_env_name}}")
-        else()
-            set(JLINK_IP_EXPANDED "${_val}")
-        endif()
-
-        list(APPEND printer_args --host ${JLINK_IP_EXPANDED})
-    endif()
-
-    if(PARSED_ARGS_JLINK_PROBE AND NOT PARSED_ARGS_JLINK_PROBE STREQUAL "")
-        list(APPEND printer_args --probe "${PARSED_ARGS_JLINK_PROBE}")
-    endif()
-
-    foreach(pre_reset_command IN LISTS PARSED_ARGS_PRE_RESET_COMMANDS)
-        list(APPEND printer_args --pre_reset_command "${pre_reset_command}")
-    endforeach()
-
-    # FLASH_UNCACHED_OFFSET <offset>: the firmware check reads the flash through its uncached alias (address + offset)
-    if(PARSED_ARGS_FLASH_UNCACHED_OFFSET AND NOT PARSED_ARGS_FLASH_UNCACHED_OFFSET STREQUAL "")
-        list(APPEND printer_args --flash_uncached_offset "${PARSED_ARGS_FLASH_UNCACHED_OFFSET}")
-    endif()
-
-    # PARK_SIGNATURE "<address>,<mask>,<value>": the chip's sign of a boot ROM park after a debug access during its
-    # reboot (the printer then resets it)
-    if(PARSED_ARGS_PARK_SIGNATURE AND NOT PARSED_ARGS_PARK_SIGNATURE STREQUAL "")
-        list(APPEND printer_args --park_signature "${PARSED_ARGS_PARK_SIGNATURE}")
-    endif()
-
-    # STALL_SIGNATURE "<address>,<mask>,<value>" and STALL_RECOVERY "w4 <a> <v>"...: a stall the chip package can
-    # recognise while the target is quiet, and the register writes that undo it
-    if(PARSED_ARGS_STALL_SIGNATURE AND NOT PARSED_ARGS_STALL_SIGNATURE STREQUAL "")
-        list(APPEND printer_args --stall_signature "${PARSED_ARGS_STALL_SIGNATURE}")
-    endif()
-    foreach(stall_recovery IN LISTS PARSED_ARGS_STALL_RECOVERY)
-        list(APPEND printer_args --stall_recovery "${stall_recovery}")
-    endforeach()
-
-    # FLASH_READY_SIGNATURE "<address>,<mask>,<value>[+...]": the register words of a mapped flash - the firmware check
-    # reads the flash only then, never while a boot ROM drives it by hand
-    if(PARSED_ARGS_FLASH_READY_SIGNATURE AND NOT PARSED_ARGS_FLASH_READY_SIGNATURE STREQUAL "")
-        list(APPEND printer_args --flash_ready_signature "${PARSED_ARGS_FLASH_READY_SIGNATURE}")
-    endif()
-    # FLASH_WINDOW "<base>,<size>": control-socket reads there go through the same gate
-    if(PARSED_ARGS_FLASH_WINDOW AND NOT PARSED_ARGS_FLASH_WINDOW STREQUAL "")
-        list(APPEND printer_args --flash_window "${PARSED_ARGS_FLASH_WINDOW}")
-    endif()
-
-    if(PARSED_ARGS_RAM_IMAGE)
-        list(APPEND printer_args --ram_image)
-    endif()
-
-    # the compile-time log filter the firmware was built with (LogFilter.hpp), for the printer to show
-    if(PARSED_ARGS_LOG_FILTER)
-        list(APPEND printer_args --log_filter "${PARSED_ARGS_LOG_FILTER}")
-    endif()
-
-    list(JOIN printer_args "\n" printer_args_text)
-    file(
-        GENERATE
-        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${targetname}.printer_args"
-        CONTENT "${printer_args_text}\n")
-
-    if(NOT UC_LOG_BUILD_PRINTER)
-        return()
-    endif()
-
-    get_target_property(build_dir uc_log_printer BINARY_DIR)
-    if(NOT build_dir)
-        message(FATAL_ERROR "Could not determine uc_log_printer binary directory")
-    endif()
-
-    if(NOT CMAKE_CROSSCOMPILING)
-        set(uc_log_printer_bin "${build_dir}/uc_log_printer")
-    else()
-        get_target_property(uc_log_printer_bin uc_log_printer HOST_EXECUTABLE_PATH)
-    endif()
-
-    set(log_base_dir "${CMAKE_CURRENT_BINARY_DIR}/rtt_log")
-    set(log_target_dir "${log_base_dir}/${targetname}")
-
-    file(MAKE_DIRECTORY "${log_base_dir}")
-    file(MAKE_DIRECTORY "${log_target_dir}")
-
-    if(PARSED_ARGS_VERBOSE)
-        message(STATUS "Log directory created: ${log_target_dir}")
-    endif()
-
-    set(command
-        ${uc_log_printer_bin}
-        --control_port
-        ${PARSED_ARGS_CONTROL_PORT}
-        --duplex_base_port
-        ${PARSED_ARGS_DUPLEX_BASE_PORT}
-        --transport
-        ${PARSED_ARGS_TRANSPORT}
-        ${printer_args}
-        --build_command
-        "cmake --build . --target=${targetname}"
-        --log_dir
-        ${CMAKE_CURRENT_BINARY_DIR}/rtt_log/${targetname})
-
-    add_custom_target(
-        ${PARSED_ARGS_PREFIX}${targetname}
-        COMMENT "start logging ${targetname}"
-        USES_TERMINAL
-        COMMAND ${command}
-        VERBATIM)
-
-    # The printer is a host tool the firmware never uses, so the dependency belongs on the log_ target, not on the elf -
-    # hanging it on the elf made every firmware build walk the whole nested host build (boost, ftxui, fmt, jlink).
-    # Target-level, not a DEPENDS on ${uc_log_printer_bin}: the host-build shim is a custom target that always runs, so
-    # a file dependency buys nothing and breaks parsing whenever the binary is not on disk yet.
-    add_dependencies(${PARSED_ARGS_PREFIX}${targetname} ${targetname} uc_log_printer)
-
-endfunction()

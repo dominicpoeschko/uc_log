@@ -26,22 +26,22 @@
 
 namespace uc_log::stress {
 
-// remote_fmt sends an enum's name (enchantum); the checker names it the same way
+// remote_fmt sends an enum's raw value and the catalog its names (the type entry); the checker names it the same way
 enum class Color : std::uint8_t { red, green, blue, cyan, magenta };
 
-inline constexpr std::array<std::string_view, 5> ColorNames{"red",
+inline constexpr std::array<std::string_view, 5> colorNames{"red",
                                                             "green",
                                                             "blue",
                                                             "cyan",
                                                             "magenta"};
 
-// The stress firmware's producers and the RTT up buffer each one writes (MulticoreRttComBackend with
+// The stress firmware's producers and the RTT up buffer each one writes (RttLog with a TwoCores layout and
 // one ISR ring per core: core 0 thread, core 0 ISRs, core 1 thread, core 1 ISR).
-inline constexpr unsigned NumProducers = 6;
+inline constexpr unsigned numProducers = 6;
 
-inline constexpr std::array<unsigned, NumProducers> ChannelOf{0, 1, 1, 1, 2, 3};
+inline constexpr std::array<unsigned, numProducers> channelOf{0, 1, 1, 1, 2, 3};
 
-inline constexpr unsigned NumShapes = 12;
+inline constexpr unsigned numShapes = 12;
 
 // a 32-bit mixer (the finaliser of murmur3's lowbias variant): every input bit moves every output bit
 constexpr std::uint32_t mix(std::uint32_t x) {
@@ -55,14 +55,14 @@ constexpr std::uint32_t mix(std::uint32_t x) {
 
 // ASCII only, no '|' (the checker splits on it), no '\\' or control characters (the .rttlog escapes
 // those); a slice may start and end anywhere
-inline constexpr std::string_view AsciiPool{
+inline constexpr std::string_view asciiPool{
   "The quick brown fox, \"quoted\" and 'single', jumps over the lazy dog; 0123456789 "
   "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz {braces} [brackets] (parens) <>=+-*/%&^~"};
 
 // whole UTF-8 words only: a slice through a code point would be escaped by the .rttlog
-inline constexpr std::array<std::string_view, 6> Utf8Words{"äöü", "€", "日本語", "✓ ok", "Ω≈π", ""};
+inline constexpr std::array<std::string_view, 6> utf8Words{"äöü", "€", "日本語", "✓ ok", "Ω≈π", ""};
 
-inline constexpr std::array<std::uint16_t, 16> U16Table{0,
+inline constexpr std::array<std::uint16_t, 16> u16Table{0,
                                                         1,
                                                         2,
                                                         255,
@@ -102,7 +102,7 @@ struct Values {
     std::string_view ascii;
     std::string_view utf8;
 
-    std::span<std::uint16_t const> u16s;   // 0..12 elements of U16Table
+    std::span<std::uint16_t const> u16s;   // 0..12 elements of u16Table
     std::array<std::uint8_t, 4>    bytes;
 
     Color                                  color;
@@ -144,19 +144,19 @@ constexpr Values values(unsigned      producer,
     v.d      = static_cast<double>(static_cast<std::int32_t>(v.r3 % 2'000'001U) - 1'000'000) / 16.0;
 
     std::size_t const len = v.r0 % 72U;
-    std::size_t const off = v.r1 % (AsciiPool.size() - len + 1U);
-    v.ascii               = AsciiPool.substr(off, len);
-    v.utf8                = Utf8Words[v.r2 % Utf8Words.size()];
+    std::size_t const off = v.r1 % (asciiPool.size() - len + 1U);
+    v.ascii               = asciiPool.substr(off, len);
+    v.utf8                = utf8Words[v.r2 % utf8Words.size()];
 
     std::size_t const n = v.r3 % 13U;
-    std::size_t const o = (v.r0 >> 4U) % (U16Table.size() - n + 1U);
-    v.u16s              = std::span<std::uint16_t const>{U16Table}.subspan(o, n);
+    std::size_t const o = (v.r0 >> 4U) % (u16Table.size() - n + 1U);
+    v.u16s              = std::span<std::uint16_t const>{u16Table}.subspan(o, n);
     v.bytes             = {static_cast<std::uint8_t>(v.r1 >> 24U),
                            static_cast<std::uint8_t>(v.r2 >> 24U),
                            static_cast<std::uint8_t>(v.r3 >> 24U),
                            static_cast<std::uint8_t>(v.r0 >> 24U)};
 
-    v.color = static_cast<Color>(v.r2 % ColorNames.size());
+    v.color = static_cast<Color>(v.r2 % colorNames.size());
     if((v.r3 & 2U) != 0U) { v.maybe = v.r1 % 100'000U; }
     v.pair = {static_cast<std::uint8_t>(v.r2 >> 8U), static_cast<std::int16_t>(v.r3 >> 8U)};
     if((v.r0 & 4U) != 0U) {
@@ -197,7 +197,7 @@ constexpr std::uint32_t metricValue(Values const& v) { return v.r0 % 1000U; }
 
 // X(shape, format, arguments...). `p`, `b`, `s`, `v` are the producer, boot, sequence number and
 // Values. Every format starts "LS|p|b|s|<shape letter>|". The metric shape (10) is not in here: its
-// text has the metric's marker in it, so each side writes it out (UC_LOG_STRESS_METRIC_*).
+// text has the metric's marker in it, so each side writes it out itself.
 #define UC_LOG_STRESS_SHAPES(X)                                                 \
     X(0, "LS|{}|{}|{}|a|{}", p, b, s, v.u32)                                    \
     X(1,                                                                        \

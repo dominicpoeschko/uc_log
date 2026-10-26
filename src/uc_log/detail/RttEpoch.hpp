@@ -8,14 +8,14 @@
 // reset nobody announced (SYSRESETREQ, a watchdog) keeps RAM; if the new boot re-initialises the block between the
 // printer's read and its write, the old read offset lands in the NEW block - and the printer then reads from there
 // through the old boot's bytes still in the ring: the previous run's lines a second time. With the epoch read after
-// each pass, the printer knows when a re-init fell inside it (detail/DirectRtt.hpp): it drops what it read, puts the
+// each pass, the printer knows when a re-init fell inside it (printer/DirectRtt.hpp): it drops what it read, puts the
 // read offset back to 0 (where the new block starts) and begins a new session. And while the epoch is odd the block in
 // RAM is still the ended boot's: the printer opens no session then - one opened there took the moved epoch for a new
 // block and read on from the old block's read offset, the middle of a record ("corrupted data removed").
 //
 // The logged count (word 1) moves once per boot that wrote a record: bits 31:16 the count, bits 15:0 the epoch's low
 // half of the boot that last moved it - which is how a boot sees it was counted already. The printer counts the boots
-// nobody read with it (detail/BootLedger.hpp); the epoch cannot do that, it also moves for a start that never logs (a
+// nobody read with it (printer/BootLedger.hpp); the epoch cannot do that, it also moves for a start that never logs (a
 // debugger parking the core before main).
 //
 // Both sit in a section of their own, first in .noInitLowRam - the start of RAM in every image built for a chip, so
@@ -37,8 +37,8 @@ extern "C" {
 }
 
 namespace uc_log::detail {
-inline constexpr std::string_view RttEpochSymbol{"uc_log_boot_words"};
-inline constexpr std::uint32_t    LoggedBootsOffset{
+inline constexpr std::string_view rttEpochSymbol{"uc_log_boot_words"};
+inline constexpr std::uint32_t    loggedBootsOffset{
   4};   // the logged count's word, after the epoch, then its complement
 
 // Before .data is initialised: odd, and another value than before (also after a boot that died while it was odd).
@@ -68,15 +68,15 @@ constexpr std::uint32_t countedBoot(std::uint32_t const logged,
          | mark;   // the count wraps modulo 2^16, as the printer reads it
 }
 
-// The check word is the logged word's complement, with bit 0 flipped (RestartMark) by the boot that started the count
+// The check word is the logged word's complement, with bit 0 flipped (restartMark) by the boot that started the count
 // again: the printer learns from it that the count restarted here (a count of 1 after a 1 is no repeat then).
-inline constexpr std::uint32_t RestartMark = 1U;
+inline constexpr std::uint32_t restartMark = 1U;
 
 // The logged word as it may be counted on: itself if the check word matches it (plain or marked), else nothing - the
 // RAM was not kept (on the RP2350 a watchdog reboot loses it); the count then starts again.
 constexpr std::optional<std::uint32_t> keptLogged(std::uint32_t const logged,
                                                   std::uint32_t const check) {
-    if(check == ~logged || check == (~logged ^ RestartMark)) { return logged; }
+    if(check == ~logged || check == (~logged ^ restartMark)) { return logged; }
     return std::nullopt;
 }
 
@@ -89,7 +89,7 @@ countLoggedBoot() {
     auto const kept      = keptLogged(uc_log_boot_words[1], uc_log_boot_words[2]);
     auto const counted   = countedBoot(kept.value_or(0U), uc_log_boot_words[0]);
     uc_log_boot_words[1] = counted;
-    uc_log_boot_words[2] = kept ? ~counted : ~counted ^ RestartMark;
+    uc_log_boot_words[2] = kept ? ~counted : ~counted ^ restartMark;
 }
 
 // The first record of a boot counts it; every later one is a load and a branch. In .bss: zero at every boot.
@@ -101,13 +101,10 @@ inline void noteRecord() {
         countLoggedBoot();
     }
 }
-}   // namespace uc_log::detail
 
-namespace uc_log {
-/// This board's count of boots that logged - this boot included once it wrote its first record - as the printer
-/// reads it to say how many boots passed unread: 16 bits, wraps. Kept across resets and across flashes of images built
-/// for the same chip; undefined after a power-on. Moves only with an RTT backend.
-inline std::uint16_t bootsThatLogged() {
+// The count of boots that logged, bits 31:16 of the logged word: what uc_log::bootsThatLogged() (Runtime.hpp) reads
+// through the RTT backend.
+inline std::uint16_t loggedBootCount() {
     return static_cast<std::uint16_t>(uc_log_boot_words[1] >> 16U);
 }
-}   // namespace uc_log
+}   // namespace uc_log::detail

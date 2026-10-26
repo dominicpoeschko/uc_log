@@ -1,11 +1,12 @@
-// Hammer test for TcpServerCommon / ControlServer / DuplexChannelServer over TCP: clients that churn, a client that
+// Hammer test for SocketSession / ControlServer / DuplexChannelServer over TCP: clients that churn, a client that
 // never reads, restarts and bind-address changes under traffic, the duplex hub. Real sockets on real time: every check
 // waits for the state it names, none for a time (the ctest TIMEOUT is the hang guard); ControlServer's behaviour on a
 // virtual clock is control_server_tests. Run under TSan and ASan.
 #include "SocketTestSupport.hpp"
-#include "uc_log/detail/ControlServer.hpp"
-#include "uc_log/detail/DuplexChannelServer.hpp"
-#include "uc_log/detail/TcpServerCommon.hpp"
+#include "support/FakeTargetPort.hpp"
+#include "uc_log/printer/ControlServer.hpp"
+#include "uc_log/printer/DuplexChannelServer.hpp"
+#include "uc_log/printer/SocketSession.hpp"
 
 #include <algorithm>
 #include <array>
@@ -23,9 +24,11 @@ using namespace std::chrono_literals;
 
 using boost::asio::ip::tcp;
 
+namespace {
+
 // Ports below the kernel's ephemeral range: one in it may be any outgoing connection's local port (this test's own
 // churn clients too), and the server could not bind it - it then waited for good.
-static std::uint16_t basePort() {
+std::uint16_t basePort() {
     unsigned      first = 32768;   // Linux's default start of ip_local_port_range
     std::ifstream range{"/proc/sys/net/ipv4/ip_local_port_range"};
     if(unsigned v{}; range >> v && v > 12000) { first = v; }
@@ -34,34 +37,37 @@ static std::uint16_t basePort() {
 
 // what is TCP's own on the control port: requests over it, and a client that half-closes right after its line
 // (`echo ... | socat`) - on TCP the server sees the half-close only at the next failed send
-static void testControlServerTcp(boost::asio::ip::address const&              loopback,
-                                 std::uint16_t                                port,
-                                 uc_log::detail::ControlServer::ErrorF const& errf) {
+void testControlServerTcp(boost::asio::ip::address const&               loopback,
+                          std::uint16_t                                 port,
+                          uc_log::printer::ControlServer::ErrorF const& errf) {
     note("control server over TCP");
-    namespace ctl     = uc_log::control;
-    auto const reader = [](std::span<ctl::Piece const> pieces) -> uc_log::detail::MemoryResult {
-        std::vector<std::vector<std::byte>> out;
-        for(auto const& p : pieces) {
-            out.emplace_back(p.size);
-            for(std::uint32_t i = 0; i != p.size; ++i) {
-                out.back()[i] = static_cast<std::byte>((p.address + i) & 0xFFU);
-            }
-        }
-        return out;
-    };
+    namespace ctl = uc_log::printer::control;
+    uc_log::test::FakeTargetPort readerPort{
+      [](std::span<uc_log::printer::TargetOp const> ops) -> uc_log::printer::TargetPort::Result {
+          std::vector<std::vector<std::byte>> out;
+          for(auto const& op : ops) {
+              auto const& r = std::get<uc_log::printer::target_op::Read>(op);
+              out.emplace_back(r.size);
+              for(std::uint32_t i = 0; i != r.size; ++i) {
+                  out.back()[i] = static_cast<std::byte>((r.address + i) & 0xFFU);
+              }
+          }
+          return out;
+      }};
     auto const readLine = std::string{R"({"cmd":"read","pieces":[{"address":536870928,"size":2}]})"
                                       "\n"};
-    uc_log::detail::ControlServer server{loopback, port, {}, errf, {}};
-    CHECK(waitUntil([&] { return server.getStatus() == TcpPortStatus::Active; }),
-          "control server bound");
+    uc_log::printer::ControlServer server{loopback, port, {}, errf, {}};
+    CHECK(
+      waitUntil([&] { return server.getStatus() == uc_log::printer::SocketPortStatus::active; }),
+      "control server bound");
     boost::asio::io_context clientIo;
     LineClient<tcp::socket> client{clientIo};
     client.socket.connect(tcp::endpoint{loopback, port});
-    CHECK(client.ask("{\"cmd\":\"ping\"}\n") == R"({"cmd":"ping","protocol":2})",
+    CHECK(client.ask("{\"cmd\":\"ping\"}\n") == R"({"cmd":"ping"})",
           "ping answers without a target");
     CHECK(std::holds_alternative<ctl::Error>(answerOf(client.ask(readLine))),
           "no target yet: an error, not a hang");
-    server.setTarget(uc_log::detail::ControlTarget{.read = reader});
+    server.setTarget(uc_log::printer::ControlTarget{.target = &readerPort});
     auto const  a = answerOf(client.ask(readLine));
     auto const* r = std::get_if<ctl::ReadAnswer>(&a);
     CHECK(r != nullptr && r->data == std::vector<std::string>{"1011"}, "answer over TCP");
@@ -74,6 +80,8 @@ static void testControlServerTcp(boost::asio::ip::address const&              lo
               "a half-closed TCP client gets its answer");
     }
 }
+
+}   // namespace
 
 int main() {
     std::setvbuf(stdout,
@@ -93,39 +101,39 @@ int main() {
 
     auto const loopback = boost::asio::ip::make_address("127.0.0.1");
 
-    uc_log::detail::AsioContext ctx;
+    uc_log::printer::AsioContext ctx;
 
     // a rebind is done when the listener reports Active again: the status alone still reads Active from before it
-    std::atomic<int>              controlBinds{0};
-    uc_log::detail::ControlServer control{loopback,
-                                          portA,
-                                          {},
-                                          errf,
-                                          [&](TcpPortStatus status, std::uint16_t) {
-                                              if(status == TcpPortStatus::Active) {
-                                                  ++controlBinds;
-                                              }
-                                          }};
+    std::atomic<int>               controlBinds{0};
+    uc_log::printer::ControlServer control{
+      loopback,
+      portA,
+      {},
+      errf,
+      [&](uc_log::printer::SocketPortStatus status, std::uint16_t) {
+          if(status == uc_log::printer::SocketPortStatus::active) { ++controlBinds; }
+      }};
 
-    uc_log::detail::DuplexChannelHub hub{ctx.ioc, loopback, duplexBase, errf, msgf, []() {}};
+    uc_log::printer::DuplexChannelHub hub{ctx.ioc, loopback, duplexBase, errf, msgf, []() {}};
 
-    uc_log::detail::AsioContextRunner runner{ctx};
+    uc_log::printer::AsioContextRunner runner{ctx};
 
-    CHECK(waitUntil([&] { return control.getStatus() == TcpPortStatus::Active; }),
-          "control port bound");
+    CHECK(
+      waitUntil([&] { return control.getStatus() == uc_log::printer::SocketPortStatus::active; }),
+      "control port bound");
 
     std::string const subscribeMetrics = R"({"cmd":"subscribe","streams":["metrics"]})"
                                          "\n";
 
     // ---- part A: the control server's metrics stream ----------------------------
     note("A: producer + client churn");
-    std::atomic<bool>                   produce{true};
-    uc_log::control::MetricSample const bigSample{.name  = std::string(4096, 'x'),
-                                                  .scope = "test",
-                                                  .unit  = "",
-                                                  .time  = 1.0,
-                                                  .value = 2.0};
-    std::jthread                        producer{[&]() {
+    std::atomic<bool>                            produce{true};
+    uc_log::printer::control::MetricSample const bigSample{.name  = std::string(4096, 'x'),
+                                                           .scope = "test",
+                                                           .unit  = "",
+                                                           .time  = 1.0,
+                                                           .value = 2.0};
+    std::jthread                                 producer{[&]() {
         while(produce) {
             control.publish(bigSample);
             Clock::sleep_for(50us);
@@ -135,6 +143,7 @@ int main() {
     {
         std::atomic<int>          connected{0};
         std::vector<std::jthread> churners;
+        churners.reserve(4);
         for(int t = 0; t < 4; ++t) {
             churners.emplace_back([&, t]() {
                 for(int i = 0; i < 25; ++i) {
@@ -151,7 +160,9 @@ int main() {
                             if(ec) { break; }
                         }
                         s.close(ec);
-                    } catch(std::exception const&) {}
+                    } catch(
+                      std::exception const&) { /* ignored: a refused connect is part of the churn */
+                    }
                     Clock::sleep_for(1ms);
                 }
             });
@@ -178,7 +189,7 @@ int main() {
     control.restart(portA2);
     CHECK(waitUntil([&] {
               return controlBinds.load() > binds && control.getPort() == portA2
-                  && control.getStatus() == TcpPortStatus::Active;
+                  && control.getStatus() == uc_log::printer::SocketPortStatus::active;
           }),
           "rebound on the new port after restart");
     {
@@ -197,7 +208,7 @@ int main() {
         control.setBindAddress(anyAddr);
         CHECK(waitUntil([&] {
                   return controlBinds.load() > binds
-                      && control.getStatus() == TcpPortStatus::Active;
+                      && control.getStatus() == uc_log::printer::SocketPortStatus::active;
               }),
               "rebound on new address");
         {
@@ -213,7 +224,7 @@ int main() {
         control.setBindAddress(loopback);
         CHECK(waitUntil([&] {
                   return controlBinds.load() > binds
-                      && control.getStatus() == TcpPortStatus::Active;
+                      && control.getStatus() == uc_log::printer::SocketPortStatus::active;
               }),
               "rebound back to loopback");
     }
@@ -222,24 +233,28 @@ int main() {
     producer.join();
 
     control.stop();
-    CHECK(waitUntil([&] { return control.getStatus() == TcpPortStatus::NotStarted; }), "stopped");
+    CHECK(waitUntil(
+            [&] { return control.getStatus() == uc_log::printer::SocketPortStatus::notStarted; }),
+          "stopped");
     CHECK(waitUntil([&] { return control.getClientCount() == 0; }), "sessions closed on stop");
 
     // ---- part B: duplex ----------------------------------------------------------
     note("B: duplex configure + echo integrity");
     hub.configure({
-      uc_log::detail::DuplexChannelDesc{0, "shell", std::uint32_t{2}, 0},
-      uc_log::detail::DuplexChannelDesc{1,   "raw",     std::nullopt, 1},
+      uc_log::printer::DuplexChannelDesc{0, "shell", std::uint32_t{2}, 0},
+      uc_log::printer::DuplexChannelDesc{1,   "raw",     std::nullopt, 1},
     });
     CHECK(waitUntil([&] {
               auto const infos = hub.info();
-              return infos.size() == 2 && infos[0].status == TcpPortStatus::Active;
+              return infos.size() == 2
+                  && infos[0].status == uc_log::printer::SocketPortStatus::active;
           }),
           "two duplex channels, shell bound");
     {
         auto const infos = hub.info();
         CHECK(infos.size() == 2, "two duplex channels");
-        CHECK(infos.size() == 2 && infos[0].status == TcpPortStatus::Active, "shell bound");
+        CHECK(infos.size() == 2 && infos[0].status == uc_log::printer::SocketPortStatus::active,
+              "shell bound");
         CHECK(infos.size() == 2 && infos[1].hostToTargetOnly, "raw is host->target only");
     }
 
@@ -275,33 +290,33 @@ int main() {
         }
 
         // echo integrity: 1 MiB patterned data through recvQueue (64k cap => backpressure path)
-        constexpr std::size_t Total = 1024 * 1024;
-        std::vector<char>     tx(Total);
-        for(std::size_t i = 0; i < Total; ++i) { tx[i] = static_cast<char>((i * 7 + 13) & 0xFF); }
+        constexpr std::size_t total = 1024 * 1024;
+        std::vector<char>     tx(total);
+        for(std::size_t i = 0; i < total; ++i) { tx[i] = static_cast<char>((i * 7 + 13) & 0xFF); }
         std::jthread      writer{[&]() {
             std::size_t off = 0;
-            while(off < Total) {
+            while(off < total) {
                 auto const chunk
-                  = std::span{tx}.subspan(off, std::min<std::size_t>(32768, Total - off));
+                  = std::span{tx}.subspan(off, std::min<std::size_t>(32768, total - off));
                 auto const n = client.write_some(boost::asio::buffer(chunk.data(), chunk.size()));
                 off += n;
             }
         }};
         std::vector<char> rx;
-        rx.reserve(Total);
+        rx.reserve(total);
         std::array<char, 65536> buf;
-        while(rx.size() < Total) {
+        while(rx.size() < total) {
             auto const n        = client.read_some(boost::asio::buffer(buf));
             auto const received = std::span{buf}.first(n);
             rx.insert(rx.end(), received.begin(), received.end());
         }
         writer.join();
-        CHECK(rx.size() == Total, "echoed byte count");
+        CHECK(rx.size() == total, "echoed byte count");
         CHECK(std::equal(rx.begin(), rx.end(), tx.begin()), "echoed bytes identical");
 
         auto const infos = hub.info();
-        CHECK(infos[0].bytesToTarget >= Total, "bytesToTarget counted");
-        CHECK(infos[0].bytesFromTarget >= Total, "bytesFromTarget counted");
+        CHECK(infos[0].bytesToTarget >= total, "bytesToTarget counted");
+        CHECK(infos[0].bytesFromTarget >= total, "bytesFromTarget counted");
 
         boost::system::error_code ec;
         client.shutdown(tcp::socket::shutdown_both, ec);
@@ -319,7 +334,7 @@ int main() {
     auto const rebound = [&](std::uint64_t before) {
         return waitUntil([&] {
             auto const info = hub.info()[0];
-            return info.binds > before && info.status == TcpPortStatus::Active;
+            return info.binds > before && info.status == uc_log::printer::SocketPortStatus::active;
         });
     };
     // the churn ends disabled: enabling binds on its last port first, then the port moves - one bind each, in order
@@ -354,8 +369,8 @@ int main() {
         CHECK(!connectError, "a client for the reconfigure churn");
         for(int i = 0; i < 5; ++i) {
             hub.configure({
-              uc_log::detail::DuplexChannelDesc{0, "shell", std::uint32_t{2}, 0},
-              uc_log::detail::DuplexChannelDesc{1,   "raw",     std::nullopt, 1},
+              uc_log::printer::DuplexChannelDesc{0, "shell", std::uint32_t{2}, 0},
+              uc_log::printer::DuplexChannelDesc{1,   "raw",     std::nullopt, 1},
             });
             Clock::sleep_for(20ms);
         }
@@ -368,10 +383,5 @@ int main() {
 
     testControlServerTcp(loopback, static_cast<std::uint16_t>(portA + 3), errf);
 
-    if(failures.load() == 0) {
-        std::printf("ALL OK\n");
-        return 0;
-    }
-    std::printf("%d FAILURES\n", failures.load());
-    return 1;
+    return uc_log::test::report();
 }

@@ -15,9 +15,9 @@
 #include <cstdint>
 
 /// A free-running microsecond counter, if the chip package has one - the one Kvasir::AnnouncedReset times its waits
-/// with (Kvasir_SDK Util/AnnouncedReset.hpp; chip_rp_common: the TIMER's raw low word, TIMERAWL). Not defined: null,
+/// with (Kvasir_SDK Runtime/AnnouncedReset.hpp; chip_rp_common: the TIMER's raw low word, TIMERAWL). Not defined: null,
 /// and a panic's wait counts polls.
-// Also declared in Kvasir_SDK Util/AnnouncedReset.hpp; the guard avoids gcc's -Wredundant-decls.
+// Also declared in Kvasir_SDK Runtime/AnnouncedReset.hpp; the guard avoids gcc's -Wredundant-decls.
 #ifndef KVASIR_ANNOUNCED_RESET_TIME_US_DECLARED
     #define KVASIR_ANNOUNCED_RESET_TIME_US_DECLARED
 extern "C" [[gnu::weak]] std::uint32_t kvasir_announced_reset_time_us();
@@ -44,11 +44,11 @@ template<std::size_t NumRings>
 struct LossLedger {
     // the last slot: records of an ISR level that has no ring (a SilentLevels promise broken),
     // or of any ring index past the rings
-    static constexpr std::size_t NoRing = NumRings;
+    static constexpr std::size_t noRing = NumRings;
 
     std::array<RingLoss, NumRings + 1> rings;   // .bss: a boot starts at 0
 
-    static constexpr std::size_t slot(std::size_t ring) { return ring < NumRings ? ring : NoRing; }
+    static constexpr std::size_t slot(std::size_t ring) { return ring < NumRings ? ring : noRing; }
 
     // a record starts at the ring's published write offset
     void recordBegin(std::size_t   ring,
@@ -59,7 +59,7 @@ struct LossLedger {
     // where the record's next piece goes
     std::uint32_t& staged(std::size_t ring) { return rings[slot(ring)].staged; }
 
-    bool admits(std::size_t ring) const { return rings[slot(ring)].dropping == 0; }
+    [[nodiscard]] bool admits(std::size_t ring) const { return rings[slot(ring)].dropping == 0; }
 
     void dropped(std::size_t ring) { rings[slot(ring)].dropping = 1; }
 
@@ -81,9 +81,9 @@ struct LossLedger {
           pending;   // dropped, not announced yet; 0 for the no-ring slot (nowhere to say it)
     };
 
-    Mark mark(std::size_t ring) const {
+    [[nodiscard]] Mark mark(std::size_t ring) const {
         auto const& r = rings[slot(ring)];
-        return {ring, r.lost, slot(ring) == NoRing ? 0U : r.lost - r.reported};
+        return {ring, r.lost, slot(ring) == noRing ? 0U : r.lost - r.reported};
     }
 
     // After the lost-record went out, or did not: its own drop is not a lost line (taken back), and

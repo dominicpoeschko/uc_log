@@ -2,28 +2,27 @@
 
 #include "../ComBackend.hpp"
 #include "../LogLevel.hpp"
+#include "../Sink.hpp"
 
 #include <cstddef>
 #include <span>
-#include <utility>
 
 namespace uc_log::detail {
 
 // The backend's record guard, forwarded for uc_log::detail::Log, which sees the backend only
 // through LevelBoundBackend; a backend without one gets an empty guard.
-template<typename Backend>
-struct RecordGuardOf {
+template<typename Guard>
+struct LevelBoundGuard {
+    using RecordGuard = Guard;
+};
+
+template<>
+struct LevelBoundGuard<void> {
     struct RecordGuard {};
 };
 
-template<typename Backend>
-    requires requires { typename Backend::RecordGuard; }
-struct RecordGuardOf<Backend> {
-    using RecordGuard = typename Backend::RecordGuard;
-};
-
 template<typename Backend, LogLevel Level>
-struct LevelBoundBackend : RecordGuardOf<Backend> {
+struct LevelBoundBackend : LevelBoundGuard<typename RecordGuardOf<Backend>::type> {
     static void write(std::span<std::byte const> span) {
         if constexpr(requires { Backend::template write<Level>(span); }) {
             Backend::template write<Level>(span);
@@ -80,43 +79,15 @@ struct LevelBoundBackend : RecordGuardOf<Backend> {
     }
 };
 
-template<typename Backend, LogLevel Level>
-concept TakesLevel
-  = requires(std::span<std::byte const> span) { Backend::template write<Level>(span); }
- || requires { Backend::template initTransfer<Level>(); }
- || requires { Backend::template finalizeTransfer<Level>(); };
+}   // namespace uc_log::detail
 
-// A backend that ignores the level gets one instantiation for all levels. Every level is asked:
-// a backend may constrain its write<L> (requires L >= warn).
-template<typename Backend,
-         std::size_t... Ls>
-consteval bool takesAnyLevel(std::index_sequence<Ls...>) {
-    return (TakesLevel<Backend, static_cast<LogLevel>(Ls)> || ...);
-}
-
-template<typename Backend>
-concept LevelAware = takesAnyLevel<Backend>(
-  std::make_index_sequence<static_cast<std::size_t>(LogLevel::crit) + 1>{});
-
-// A backend may declare `static constexpr LogLevel kLevelFloor`: every level from there up is
-// handled alike (a backend that only compares the level against a minimum). Those levels then
-// share one LevelBoundBackend -- and with it one Printer, record frame and formatter set,
-// instead of a copy per level. The record's level is not the backend's: it travels in the
-// format string, so nothing on the wire changes.
-template<typename Backend,
-         LogLevel Level>
-consteval LogLevel canonicalLevel() {
-    if constexpr(requires { Backend::kLevelFloor; }) {
-        return Level >= Backend::kLevelFloor ? Backend::kLevelFloor : Level;
-    } else {
-        return Level;
-    }
-}
-
+namespace uc_log {
+/// The backend a line of `Level` on `Tag` writes through: ComBackend<Tag> bound to its canonical level. What the log
+/// macros use, and what a backend that wraps another one (a fan-out to a ring and RTT) names for the inner one.
 template<typename Tag, LogLevel Level>
 using ResolveBackend
-  = LevelBoundBackend<ComBackend<Tag>,
-                      LevelAware<ComBackend<Tag>> ? canonicalLevel<ComBackend<Tag>, Level>()
-                                                  : LogLevel::info>;
-
-}   // namespace uc_log::detail
+  = detail::LevelBoundBackend<ComBackend<Tag>,
+                              detail::LevelAware<ComBackend<Tag>>
+                                ? detail::canonicalLevel<ComBackend<Tag>, Level>()
+                                : LogLevel::info>;
+}   // namespace uc_log

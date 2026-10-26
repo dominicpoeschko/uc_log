@@ -1,0 +1,10 @@
+--device
+RP2040_M0_0
+--speed
+100000
+--map_file
+empty_values.map
+--hex_file
+empty_values_flash.hex
+--string_constants_file
+empty_values_string_constants.json

@@ -1,0 +1,35 @@
+--device
+RP2350_M33_0
+--speed
+4000
+--map_file
+app.map
+--hex_file
+app_flash.hex
+--string_constants_file
+every_keyword_string_constants.json
+--host
+192.0.2.7
+--probe
+probe a
+--pre_reset_command
+w4 0x4001A004 0x01000000
+--pre_reset_command
+w4 0x4001B004 0x01000000
+--flash_uncached_offset
+0x04000000
+--park_signature
+0x40010008,0x100000,0x100000,0x2000
+--stall_signature
+0x400d0000,0x3,0x3+0x400d0004,0x1,0x0
+--stall_recovery
+w4 0x400d801c 0x00000000
+--stall_recovery
+w4 0x400d8020 0x00000001
+--flash_ready_signature
+0x400d0000,0x5,0x0
+--flash_window
+0x10000000,0x04000000
+--ram_image
+--log_filter
+/src/uc_log_filter.txt

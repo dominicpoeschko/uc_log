@@ -5,8 +5,10 @@
 // piece 2 does - and the ring then holds a frame with a hole. Built -m32 (rtt needs 4-byte
 // pointers).
 #include "rtt/rtt.hpp"
-#include "uc_log/DefaultRttComBackend.hpp"
+#include "support/Check.hpp"
+#include "uc_log/ChannelRouter.hpp"
 #include "uc_log/LossPolicy.hpp"
+#include "uc_log/RttLog.hpp"
 #include "uc_log/detail/LevelBoundBackend.hpp"
 #include "uc_log/detail/LossLedger.hpp"
 
@@ -25,49 +27,41 @@
 #include <type_traits>
 #include <vector>
 
-#if defined(__clang__)
+#ifdef __clang__
     #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
 #endif
 
 namespace {
 
-int failures = 0;
-
-#define CHECK(cond, msg)                                        \
-    do {                                                        \
-        if(!(cond)) {                                           \
-            std::printf("FAIL: %s (line %d)\n", msg, __LINE__); \
-            ++failures;                                         \
-        }                                                       \
-    } while(0)
-
 struct Name {
     constexpr operator std::string_view() const { return "uc_log0"; }
 };
 
-constexpr std::size_t RingSize = 64;
-using Buffer                   = rtt::detail::Buffer<rtt::BufferMode::skip, RingSize, Name>;
+constexpr std::size_t ringSize = 64;
+using Buffer                   = rtt::detail::Buffer<rtt::BufferMode::skip, ringSize, Name>;
 using Ledger                   = uc_log::detail::LossLedger<1>;
+// the CPU clock ceiling the policies below are given (LossPolicy::Counted has no default)
+constexpr std::uint64_t cpuHz = 200'000'000;
 
 // A frame as remote_fmt's is shaped: start marker, a kind, a length, the payload, end marker.
-constexpr std::byte Start{0x55};
-constexpr std::byte End{0xAA};
-constexpr std::byte DataKind{'D'};
-constexpr std::byte LostKind{'L'};
+constexpr std::byte start{0x58};
+constexpr std::byte end{0xAA};
+constexpr std::byte dataKind{'D'};
+constexpr std::byte lostKind{'L'};
 
 struct Ring {
-    std::unique_ptr<std::byte[]>    storage = std::make_unique<std::byte[]>(RingSize);
+    std::unique_ptr<std::byte[]>    storage = std::make_unique<std::byte[]>(ringSize);
     rtt::detail::BufferControlBlock block   = Buffer::make(storage.get());
 };
 
 std::vector<std::byte> frame(std::byte     kind,
                              std::uint32_t value,
                              std::size_t   payload) {
-    std::vector<std::byte> f{Start, kind, std::byte{static_cast<std::uint8_t>(payload)}};
+    std::vector<std::byte> f{start, kind, std::byte{static_cast<std::uint8_t>(payload)}};
     for(std::size_t i = 0; i != payload; ++i) {
         f.push_back(std::byte{static_cast<std::uint8_t>(value >> (8U * (i % 4U)))});
     }
-    f.push_back(End);
+    f.push_back(end);
     return f;
 }
 
@@ -83,7 +77,7 @@ struct Reader {
     Parsed                 parsed;
 
     void take(Ring& ring) {
-        std::array<std::byte, RingSize> out{};
+        std::array<std::byte, ringSize> out{};
         auto const                      got = Buffer::read(ring.block, out);
         pending.insert(pending.end(), got.begin(), got.end());
         parse();
@@ -92,7 +86,7 @@ struct Reader {
     void parse() {
         std::size_t i = 0;
         while(i < pending.size()) {
-            if(pending[i] != Start) {
+            if(pending[i] != start) {
                 ++parsed.discarded;
                 ++i;
                 continue;
@@ -100,8 +94,8 @@ struct Reader {
             if(i + 3 > pending.size()) { break; }
             auto const n = std::to_integer<std::size_t>(pending[i + 2]);
             if(i + 3 + n + 1 > pending.size()) { break; }
-            if(pending[i + 3 + n] != End
-               || (pending[i + 1] != DataKind && pending[i + 1] != LostKind))
+            if(pending[i + 3 + n] != end
+               || (pending[i + 1] != dataKind && pending[i + 1] != lostKind))
             {
                 ++parsed.discarded;
                 ++i;
@@ -111,7 +105,7 @@ struct Reader {
             for(std::size_t k = 0; k != std::min<std::size_t>(n, 4); ++k) {
                 v |= std::to_integer<std::uint32_t>(pending[i + 3 + k]) << (8U * k);
             }
-            (pending[i + 1] == DataKind ? parsed.data : parsed.lost).push_back(v);
+            (pending[i + 1] == dataKind ? parsed.data : parsed.lost).push_back(v);
             i += 3 + n + 1;
         }
         pending.erase(pending.begin(), std::next(pending.begin(), static_cast<std::ptrdiff_t>(i)));
@@ -164,10 +158,10 @@ void recordCounted(Ring&         ring,
                    std::size_t   piece,
                    Between&&     between) {
     if(auto const m = ledger.mark(0); m.pending != 0) {
-        writePiecesCounted(ring, ledger, present, frame(LostKind, m.pending, 4), piece, between);
+        writePiecesCounted(ring, ledger, present, frame(lostKind, m.pending, 4), piece, between);
         ledger.settle(m);
     }
-    writePiecesCounted(ring, ledger, present, frame(DataKind, value, payload), piece, between);
+    writePiecesCounted(ring, ledger, present, frame(dataKind, value, payload), piece, between);
 }
 
 void middlePieceHole() {
@@ -176,15 +170,15 @@ void middlePieceHole() {
     {
         Ring   ring;
         Reader reader;
-        auto   filler = frame(DataKind, 1, 46);   // 50 bytes
+        auto   filler = frame(dataKind, 1, 46);   // 50 bytes
         static_cast<void>(Buffer::write(ring.block, filler));
         int pieces = 0;
-        writePiecesToday(ring, frame(DataKind, 2, 26), 12, [&] {
+        writePiecesToday(ring, frame(dataKind, 2, 26), 12, [&] {
             if(++pieces == 2) { reader.take(ring); }
         });
         // the reader is inside a frame that claims 26 more bytes: later records complete it
         for(std::uint32_t v = 3; v != 6; ++v) {
-            writePiecesToday(ring, frame(DataKind, v, 4), 12, [] {});
+            writePiecesToday(ring, frame(dataKind, v, 4), 12, [] {});
             reader.take(ring);
         }
         CHECK(reader.parsed.discarded > 0,
@@ -199,7 +193,7 @@ void middlePieceHole() {
         Ring   ring;
         Reader reader;
         Ledger ledger{};
-        static_cast<void>(Buffer::write(ring.block, frame(DataKind, 1, 46)));
+        static_cast<void>(Buffer::write(ring.block, frame(dataKind, 1, 46)));
         int pieces = 0;
         recordCounted(ring, ledger, true, 2, 26, 12, [&] {
             if(++pieces == 2) { reader.take(ring); }
@@ -221,7 +215,7 @@ void lostRecordThatDoesNotFit() {
     Reader reader;
     Ledger ledger{};
     // fill the ring, lose two records, still no room: the lost-record itself is dropped
-    static_cast<void>(Buffer::write(ring.block, frame(DataKind, 1, 58)));
+    static_cast<void>(Buffer::write(ring.block, frame(dataKind, 1, 58)));
     recordCounted(ring, ledger, true, 2, 8, 12, [] {});
     recordCounted(ring, ledger, true, 3, 8, 12, [] {});
     // the second call tried a lost-record first: dropped, and taken back by settle()
@@ -240,7 +234,7 @@ void shortRecordAfterAFailedLostRecord() {
     Reader reader;
     Ledger ledger{};
     // 7 bytes free: a 12-byte record is lost; the next record is 4 bytes, its lost-record 8
-    static_cast<void>(Buffer::write(ring.block, frame(DataKind, 1, 52)));
+    static_cast<void>(Buffer::write(ring.block, frame(dataKind, 1, 52)));
     recordCounted(ring, ledger, true, 2, 8, 12, [] {});
     recordCounted(ring, ledger, true, 3, 0, 12, [] {});
     CHECK(ledger.rings[0].lost == 2,
@@ -319,8 +313,10 @@ void model() {
 // wherever the ring stands. Invariants every time: only whole frames, decoded + announced + pending == issued, in
 // order, and a record that fits a drained ring is never lost while the reader keeps up.
 void wrapSweep() {
-    std::size_t cases = 0, bad = 0, lostWhileDrained = 0;
-    for(std::uint32_t start = 0; start != RingSize; ++start) {
+    std::size_t cases            = 0;
+    std::size_t bad              = 0;
+    std::size_t lostWhileDrained = 0;
+    for(std::uint32_t origin = 0; origin != ringSize; ++origin) {
         for(std::size_t payload = 0; payload != 64; ++payload) {
             for(std::size_t const piece :
                 {std::size_t{1}, std::size_t{5}, std::size_t{12}, std::size_t{32}})
@@ -329,8 +325,8 @@ void wrapSweep() {
                     Ring   ring;
                     Reader reader;
                     Ledger ledger{};
-                    ring.block.writePosition = start;
-                    ring.block.readPosition  = start;
+                    ring.block.writePosition = origin;
+                    ring.block.readPosition  = origin;
                     std::uint32_t issued     = 0;
                     for(; issued != 6; ++issued) {
                         recordCounted(ring, ledger, true, issued, payload, piece, [&] {
@@ -357,7 +353,7 @@ void wrapSweep() {
                           "  wrap: start %u payload %zu piece %zu habit %d: %zu decoded, %llu "
                           "announced, "
                           "%u pending, %zu discarded of %u issued, sorted %d, data",
-                          start,
+                          origin,
                           payload,
                           piece,
                           habit,
@@ -371,7 +367,7 @@ void wrapSweep() {
                         std::printf("\n");
                     }
                     // a frame of payload + 4 bytes fits a drained 64-byte ring (63 usable) when <= 63
-                    if(habit == 2 && payload + 4 <= RingSize - 1 && announced != 0) {
+                    if(habit == 2 && payload + 4 <= ringSize - 1 && announced != 0) {
                         ++lostWhileDrained;
                     }
                 }
@@ -385,13 +381,13 @@ void wrapSweep() {
 
 // writeWaiting with the panic's waiter: waits while the reader moves, gives up `polls` after it
 // stops, then the latch ends the next wait at once until the host reads again. The host reads at a
-// pace counted in the writer's polls (one read every HostEvery polls), not as a thread that may or
+// pace counted in the writer's polls (one read every hostEvery polls), not as a thread that may or
 // may not get the CPU: every outcome below is the same on every run.
 void panicWait() {
     Ring                         ring;
     uc_log::detail::PanicWait<1> wait{};
     constexpr std::uint32_t      polls = 200'000;
-    constexpr std::uint32_t      HostEvery
+    constexpr std::uint32_t      hostEvery
       = 50;   // well inside `polls`: a reading host never stalls the writer
     std::size_t readBytes = 0;
     auto const  hostRead  = [&] {
@@ -408,13 +404,13 @@ void panicWait() {
 
         bool operator()(std::uint32_t host) {
             ++asked;
-            if(reading && asked % HostEvery == 0) { read(); }
+            if(reading && asked % hostEvery == 0) { read(); }
             return waiter(host);
         }
     };
 
-    static_cast<void>(Buffer::write(ring.block, frame(DataKind, 1, 58)));   // full
-    auto const big = frame(DataKind, 2, 40);
+    static_cast<void>(Buffer::write(ring.block, frame(dataKind, 1, 58)));   // full
+    auto const big = frame(dataKind, 2, 40);
     // one staged record that waits with the panic's waiter: whole or nothing
     auto const writeWaiting = [&](HostPaced& waiter) {
         std::uint32_t staged = ring.block.writePosition;
@@ -428,7 +424,7 @@ void panicWait() {
         CHECK(writeWaiting(paced), "waits while the host reads, then lands whole");
         CHECK(wait.goneAtPlus1[0] == 0, "no latch");
     }
-    while(Buffer::unread(ring.block) < RingSize - 2) {   // the host has stopped reading
+    while(Buffer::unread(ring.block) < ringSize - 2) {   // the host has stopped reading
         static_cast<void>(Buffer::write(ring.block, std::array<std::byte, 1>{std::byte{0}}));
     }
     {
@@ -474,33 +470,33 @@ std::uint32_t pollsUntilGiveUp(std::uint32_t polls,
 }
 
 void timedStall() {
-    constexpr std::uint32_t StallUs = 250'000;
-    constexpr std::uint32_t Polls
-      = 12'500'000;   // LossPolicy::Counted<>'s: 250 ms at 200 MHz, 4 cycles a poll
+    constexpr std::uint32_t stallUs = 250'000;
+    constexpr std::uint32_t pollLimit
+      = 12'500'000;   // LossPolicy::Counted<CpuHz>'s: 250 ms at 200 MHz, 4 cycles a poll
     for(std::uint32_t const step : {1U, 10U, 1000U}) {
         fakeUs            = 0xFFFF'0000U;   // across the counter's wrap
         fakeStep          = step;
-        auto const polls  = pollsUntilGiveUp(Polls, StallUs, &fakeClock);
+        auto const polls  = pollsUntilGiveUp(pollLimit, stallUs, &fakeClock);
         auto const waited = polls * step;
-        CHECK(waited >= StallUs - step && waited <= StallUs + 2 * step,
+        CHECK(waited >= stallUs - step && waited <= stallUs + 2 * step,
               "the stall ends after its time on the counter, however long a poll takes");
     }
     fakeStep         = 0;   // a counter that stands still (its tick not set up)
-    auto const polls = pollsUntilGiveUp(Polls, StallUs, &fakeClock);
-    CHECK(polls == Polls, "a counter that stands still: the polls decide");
-    CHECK(pollsUntilGiveUp(1000, StallUs, nullptr) == 1000, "no counter: the polls decide");
-    CHECK(pollsUntilGiveUp(0, StallUs, &fakeClock) == 0, "no wait outside panic mode");
+    auto const polls = pollsUntilGiveUp(pollLimit, stallUs, &fakeClock);
+    CHECK(polls == pollLimit, "a counter that stands still: the polls decide");
+    CHECK(pollsUntilGiveUp(1000, stallUs, nullptr) == 1000, "no counter: the polls decide");
+    CHECK(pollsUntilGiveUp(0, stallUs, &fakeClock) == 0, "no wait outside panic mode");
 }
 
 void unreadEdges() {
     Ring ring;
     CHECK(Buffer::unread(ring.block) == 0, "empty");
-    static_cast<void>(Buffer::write(ring.block, frame(DataKind, 1, 20)));
+    static_cast<void>(Buffer::write(ring.block, frame(dataKind, 1, 20)));
     CHECK(Buffer::unread(ring.block) == 24, "24 written");
     std::array<std::byte, 10> out{};
     static_cast<void>(Buffer::read(ring.block, out));
     CHECK(Buffer::unread(ring.block) == 14, "10 read");
-    ring.block.readPosition = RingSize + 3;   // a corrupt host offset
+    ring.block.readPosition = ringSize + 3;   // a corrupt host offset
     CHECK(Buffer::unread(ring.block) == 0, "a host offset out of range: nothing to wait for");
 }
 
@@ -513,29 +509,66 @@ template<typename B>
 concept HasPanicWait = requires { B::enterPanicMode(); } && requires { B::drain(); };
 
 template<typename Loss>
-using Default = uc_log::DefaultRttComBackend<uc_log::AlwaysAttached,
-                                             64,
-                                             64,
-                                             rtt::BufferMode::skip,
-                                             uc_log::DuplexChannels<>,
-                                             uc_log::IsrPolicy::SingleLevel<>,
-                                             Loss>;
+using Default = uc_log::RttLog<uc_log::AlwaysAttached, uc_log::Rings<64>, Loss>;
 static_assert(!HasLossHooks<Default<uc_log::LossPolicy::Silent>>);
 static_assert(!HasPanicWait<Default<uc_log::LossPolicy::Silent>>);
-static_assert(HasLossHooks<Default<uc_log::LossPolicy::Counted<>>>);
-static_assert(HasPanicWait<Default<uc_log::LossPolicy::Counted<>>>);
-static_assert(HasLossHooks<Default<uc_log::LossPolicy::Counted<0>>>);
-static_assert(!HasPanicWait<Default<uc_log::LossPolicy::Counted<0>>>);
-// the default is Silent: an existing backend type is unchanged
-static_assert(std::is_same_v<uc_log::DefaultRttComBackend<uc_log::AlwaysAttached,
-                                                          64>,
-                             uc_log::DefaultRttComBackend<uc_log::AlwaysAttached,
-                                                          64,
-                                                          64,
-                                                          rtt::BufferMode::block,
-                                                          uc_log::DuplexChannels<>,
-                                                          uc_log::IsrPolicy::SingleLevel<>,
-                                                          uc_log::LossPolicy::Silent>>);
+static_assert(HasLossHooks<Default<uc_log::LossPolicy::Counted<cpuHz>>>);
+static_assert(HasPanicWait<Default<uc_log::LossPolicy::Counted<cpuHz>>>);
+static_assert(HasLossHooks<Default<uc_log::LossPolicy::Counted<cpuHz,
+                                                               0>>>);
+static_assert(!HasPanicWait<Default<uc_log::LossPolicy::Counted<cpuHz,
+                                                                0>>>);
+
+// RttLog: the options in any order, the missing ones defaulted (Silent, skip, SingleLevel, no duplex, one core and
+// channel), and Rings repeated per group - all naming the one canonical RttComBackend
+struct CoreOne {
+    [[maybe_unused]] std::uint32_t operator()() const { return 1; }
+};
+
+using Canonical
+  = uc_log::RttComBackend<uc_log::AlwaysAttached,
+                          uc_log::RingLayout<uc_log::SingleCore, uc_log::SingleChannelRouter>,
+                          uc_log::ChannelSizes<64, 64>,
+                          rtt::BufferMode::skip,
+                          uc_log::DuplexChannels<>,
+                          uc_log::IsrPolicy::SingleLevel<>,
+                          uc_log::LossPolicy::Silent>;
+static_assert(std::is_same_v<uc_log::RttLog<uc_log::AlwaysAttached,
+                                            uc_log::Rings<64>>,
+                             Canonical>);
+static_assert(std::is_same_v<uc_log::RttLog<uc_log::AlwaysAttached,
+                                            uc_log::ChannelSizes<64,
+                                                                 64>>,
+                             Canonical>);
+static_assert(std::is_same_v<uc_log::RttLog<uc_log::AlwaysAttached,
+                                            uc_log::LossPolicy::Silent,
+                                            uc_log::Mode<rtt::BufferMode::skip>,
+                                            uc_log::Rings<64>,
+                                            uc_log::IsrPolicy::SingleLevel<>>,
+                             Canonical>);
+static_assert(std::is_same_v<uc_log::RttLog<uc_log::AlwaysAttached,
+                                            uc_log::LossPolicy::Counted<cpuHz>,
+                                            uc_log::IsrPolicy::MaskedRecord,
+                                            uc_log::Rings<1024,
+                                                          256>,
+                                            uc_log::RingLayout<uc_log::TwoCores<CoreOne>>>,
+                             uc_log::RttComBackend<uc_log::AlwaysAttached,
+                                                   uc_log::RingLayout<uc_log::TwoCores<CoreOne>>,
+                                                   uc_log::ChannelSizes<1024,
+                                                                        256,
+                                                                        1024,
+                                                                        256>,
+                                                   rtt::BufferMode::skip,
+                                                   uc_log::DuplexChannels<>,
+                                                   uc_log::IsrPolicy::MaskedRecord,
+                                                   uc_log::LossPolicy::Counted<cpuHz>>>,
+              "Rings repeated per core");
+// two cores x two channels: Rings fills four groups (the backend checks the count)
+using Split2 = uc_log::RttLog<
+  uc_log::AlwaysAttached,
+  uc_log::Rings<16, 8>,
+  uc_log::RingLayout<uc_log::TwoCores<CoreOne>, uc_log::LevelSplitRouter<uc_log::LogLevel::warn>>>;
+static_assert(sizeof(Split2) > 0 && Split2::perCoreIsrContexts);
 // RecordFrame asks LevelBoundBackend
 template<typename B>
 concept ForwardsLossMark = requires { B::lossMark(); };
@@ -543,31 +576,37 @@ static_assert(
   !ForwardsLossMark<uc_log::detail::LevelBoundBackend<Default<uc_log::LossPolicy::Silent>,
                                                       uc_log::LogLevel::info>>);
 static_assert(
-  ForwardsLossMark<uc_log::detail::LevelBoundBackend<Default<uc_log::LossPolicy::Counted<>>,
+  ForwardsLossMark<uc_log::detail::LevelBoundBackend<Default<uc_log::LossPolicy::Counted<cpuHz>>,
                                                      uc_log::LogLevel::info>>);
 
 static_assert(uc_log::LossPolicy::Policy<uc_log::LossPolicy::Silent>);
-static_assert(uc_log::LossPolicy::Policy<uc_log::LossPolicy::Counted<>>);
+static_assert(uc_log::LossPolicy::Policy<uc_log::LossPolicy::Counted<cpuHz>>);
 static_assert(!uc_log::LossPolicy::Policy<int>);
-static_assert(uc_log::LossPolicy::Counted<0>::panicStallPolls == 0);
-static_assert(uc_log::LossPolicy::Counted<>::panicStallPolls == 12'500'000);
+static_assert(uc_log::LossPolicy::Counted<cpuHz,
+                                          0>::panicStallPolls
+              == 0);
+static_assert(uc_log::LossPolicy::Counted<cpuHz>::panicStallPolls == 12'500'000);
+// the ceiling counts: a 48 MHz part waits a quarter of the polls, a 266 MHz one a third more
+static_assert(uc_log::LossPolicy::Counted<48'000'000>::panicStallPolls == 3'000'000);
+static_assert(uc_log::LossPolicy::Counted<266'000'000>::panicStallPolls == 16'625'000);
+static_assert(uc_log::LossPolicy::Counted<cpuHz>::cpuHzCeiling == cpuHz);
 }   // namespace
 
-int main() {
-    middlePieceHole();
-    lostRecordThatDoesNotFit();
-    shortRecordAfterAFailedLostRecord();
-    debuggerAbsent();
-    noRingSlot();
-    model();
-    wrapSweep();
-    panicWait();
-    timedStall();
-    unreadEdges();
-    if(failures != 0) {
-        std::printf("%d failure(s)\n", failures);
-        return 1;
-    }
-    std::printf("all loss ledger tests passed\n");
-    return 0;
+int main(int    argc,
+         char** argv) {
+    return uc_log::test::run(
+      argc,
+      argv,
+      {
+        {                  "middlePieceHole",                   middlePieceHole},
+        {         "lostRecordThatDoesNotFit",          lostRecordThatDoesNotFit},
+        {"shortRecordAfterAFailedLostRecord", shortRecordAfterAFailedLostRecord},
+        {                   "debuggerAbsent",                    debuggerAbsent},
+        {                       "noRingSlot",                        noRingSlot},
+        {                            "model",                             model},
+        {                        "wrapSweep",                         wrapSweep},
+        {                        "panicWait",                         panicWait},
+        {                       "timedStall",                        timedStall},
+        {                      "unreadEdges",                       unreadEdges},
+    });
 }

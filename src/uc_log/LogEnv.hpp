@@ -2,6 +2,7 @@
 
 #include "LogLevel.hpp"
 #include "Tag.hpp"
+#include "detail/LastOf.hpp"
 #include "detail/Signature.hpp"
 #include "string_constant/string_constant.hpp"
 
@@ -29,13 +30,19 @@ struct Env {};
 
 namespace setting {
     template<LogLevel Level>
-    struct MinLevel {};
+    struct MinLevel {
+        static constexpr LogLevel level = Level;
+    };
 
     template<typename Tag>
-    struct Backend {};
+    struct Backend {
+        using BackendTag = Tag;
+    };
 
     template<typename Name>
-    struct Module {};
+    struct Module {
+        using ModuleName = Name;
+    };
 }   // namespace setting
 
 namespace detail {
@@ -45,9 +52,9 @@ namespace detail {
     inline constexpr bool isEnvSetting<setting::MinLevel<Level>> = true;
     template<typename Tag>
     inline constexpr bool isEnvSetting<setting::Backend<Tag>> = true;
-    template<char... chars>
-    inline constexpr bool isEnvSetting<setting::Module<sc::StringConstant<chars...>>> = [] {
-        static_assert(validModuleName(sc::StringConstant<chars...>::stringView),
+    template<char... Chars>
+    inline constexpr bool isEnvSetting<setting::Module<sc::StringConstant<Chars...>>> = [] {
+        static_assert(validModuleName(sc::StringConstant<Chars...>::stringView),
                       "a log module name is 1-63 characters of a-z 0-9 _ . : / -");
         return true;
     }();
@@ -68,77 +75,51 @@ template<typename E, typename... Settings>
 using ExtendEnv_t = typename ExtendEnv<E, Settings...>::type;
 
 namespace detail {
-    template<typename Setting>
-    struct LevelOf {
-        static constexpr LogLevel apply(LogLevel current) { return current; }
-    };
+    // the kinds of setting; the last of a kind wins (detail/LastOf.hpp): an inner UC_LOG_ENV extends the outer Env
+    template<typename T>
+    struct IsMinLevel : std::false_type {};
 
     template<LogLevel Level>
-    struct LevelOf<setting::MinLevel<Level>> {
-        static constexpr LogLevel apply(LogLevel) { return Level; }
-    };
+    struct IsMinLevel<setting::MinLevel<Level>> : std::true_type {};
+
+    template<typename T>
+    struct IsBackend : std::false_type {};
+
+    template<typename Tag>
+    struct IsBackend<setting::Backend<Tag>> : std::true_type {};
+
+    template<typename T>
+    struct IsModule : std::false_type {};
+
+    template<typename Name>
+    struct IsModule<setting::Module<Name>> : std::true_type {};
 
     template<typename... Settings>
     consteval LogLevel scopeMinLevel(Env<Settings...>) {
-        LogLevel level = LogLevel::trace;
-        ((level = LevelOf<Settings>::apply(level)), ...);
-        return level;
+        return LastOfT<IsMinLevel, setting::MinLevel<LogLevel::trace>, Settings...>::level;
     }
-
-    template<typename Current, typename Setting>
-    struct TagOf {
-        using type = Current;
-    };
-
-    template<typename Current, typename Tag>
-    struct TagOf<Current, setting::Backend<Tag>> {
-        using type = Tag;
-    };
-
-    template<typename Current, typename... Settings>
-    struct LastTag {
-        using type = Current;
-    };
-
-    template<typename Current, typename First, typename... Rest>
-    struct LastTag<Current, First, Rest...>
-      : LastTag<typename TagOf<Current, First>::type, Rest...> {};
 
     template<typename E>
     struct EnvTag;
 
     template<typename... Settings>
-    struct EnvTag<Env<Settings...>> : LastTag<Tag::User, Settings...> {};
+    struct EnvTag<Env<Settings...>> {
+        using type =
+          typename LastOfT<IsBackend, setting::Backend<Tag::User>, Settings...>::BackendTag;
+    };
 
     template<typename E>
     using EnvTag_t = typename EnvTag<E>::type;
 
     struct NoModule {};
 
-    template<typename Current, typename Setting>
-    struct ModuleOf {
-        using type = Current;
-    };
-
-    template<typename Current, typename Name>
-    struct ModuleOf<Current, setting::Module<Name>> {
-        using type = Name;
-    };
-
-    template<typename Current, typename... Settings>
-    struct LastModule {
-        using type = Current;
-    };
-
-    template<typename Current, typename First, typename... Rest>
-    struct LastModule<Current, First, Rest...>
-      : LastModule<typename ModuleOf<Current, First>::type, Rest...> {};
-
     template<typename E>
     struct EnvModule;
 
     template<typename... Settings>
-    struct EnvModule<Env<Settings...>> : LastModule<NoModule, Settings...> {};
+    struct EnvModule<Env<Settings...>> {
+        using type = typename LastOfT<IsModule, setting::Module<NoModule>, Settings...>::ModuleName;
+    };
 
     template<typename E>
     using EnvModule_t = typename EnvModule<E>::type;
@@ -154,7 +135,7 @@ namespace detail {
         }
     }
 
-    // No function name here: the call-site tag names it (UC_LOG_IMPL), which costs no
+    // No function name here: the call-site tag names it (UC_LOG_AT), which costs no
     // __PRETTY_FUNCTION__ read (Signature.hpp scanSignature).
     template<typename E>
     consteval auto headerTail() {

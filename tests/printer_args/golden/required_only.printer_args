@@ -1,0 +1,10 @@
+--device
+ATSAMD21G18A
+--speed
+100000
+--map_file
+required_only.map
+--hex_file
+required_only_flash.hex
+--string_constants_file
+required_only_string_constants.json

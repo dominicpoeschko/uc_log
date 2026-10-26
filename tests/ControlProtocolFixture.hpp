@@ -3,12 +3,13 @@
 // The fake target and the contents of the golden files in doc/control_protocol/, which
 // control_protocol_tool writes and control_protocol_tests checks.
 
-#include "uc_log/detail/ControlEvents.hpp"
-#include "uc_log/detail/ControlHistory.hpp"
-#include "uc_log/detail/ControlProtocol.hpp"
-#include "uc_log/detail/ControlServer.hpp"
-#include "uc_log/detail/LogEntry.hpp"
-#include "uc_log/detail/TcpServerCommon.hpp"
+#include "support/FakeTargetPort.hpp"
+#include "uc_log/printer/ControlAnswer.hpp"
+#include "uc_log/printer/ControlEvents.hpp"
+#include "uc_log/printer/ControlHistory.hpp"
+#include "uc_log/printer/ControlProtocol.hpp"
+#include "uc_log/printer/LogEntry.hpp"
+#include "uc_log/printer/SocketPath.hpp"
 
 #include <atomic>
 #include <cctype>
@@ -17,6 +18,7 @@
 #include <fmt/format.h>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unistd.h>
@@ -24,15 +26,15 @@
 
 namespace uc_log::control_fixture {
 
-namespace ctl = uc_log::control;
+namespace ctl = uc_log::printer::control;
 
-/// Memory reads as its address, except a counter at CounterAddress and nothing from
-/// DisconnectedFrom on. Fake clocks keep every answer reproducible.
+/// Memory reads as its address, except a counter at counterAddress and nothing from
+/// disconnectedFrom on. Fake clocks keep every answer reproducible.
 struct FakeTarget {
-    static constexpr std::uint32_t CounterAddress   = 0x3000'0000;
-    static constexpr std::uint32_t DisconnectedFrom = 0xE000'0000;
-    static constexpr std::int64_t  UnixMicros       = 1'758'448'800'000'000;   // 2025-09-21 10:00Z
-    static constexpr std::int64_t  SteadyStepMicros = 1000;
+    static constexpr std::uint32_t counterAddress   = 0x3000'0000;
+    static constexpr std::uint32_t disconnectedFrom = 0xE000'0000;
+    static constexpr std::int64_t  unixMicros       = 1'758'448'800'000'000;   // 2025-09-21 10:00Z
+    static constexpr std::int64_t  steadyStepMicros = 1000;
 
     std::atomic<std::uint32_t> counter{0};
     std::atomic<std::int64_t>  steady{0};
@@ -40,17 +42,17 @@ struct FakeTarget {
     int                        lineResets{};   // resets through the reset pin ("line": true)
     bool                       coreHalted{};
 
-    detail::MemoryResult read(std::span<ctl::Piece const> pieces) {
+    printer::TargetPort::Result read(std::span<ctl::Piece const> pieces) {
         std::vector<std::vector<std::byte>> out;
         for(auto const& p : pieces) {
-            if(p.address >= DisconnectedFrom) {
+            if(p.address >= disconnectedFrom) {
                 return std::unexpected{std::string{"the target is not connected"}};
             }
             out.emplace_back(p.size);
-            std::uint32_t const moving = p.address == CounterAddress ? ++counter : 0;
+            std::uint32_t const moving = p.address == counterAddress ? ++counter : 0;
             for(std::uint32_t i = 0; i != p.size; ++i) {
                 out.back()[i] = static_cast<std::byte>(
-                  (p.address == CounterAddress ? (i < 4 ? moving >> (8U * i) : 0U) : p.address + i)
+                  (p.address == counterAddress ? (i < 4 ? moving >> (8U * i) : 0U) : p.address + i)
                   & 0xFFU);
             }
         }
@@ -65,10 +67,10 @@ struct FakeTarget {
         };
     }
 
-    detail::MemoryResult write(std::span<ctl::WordWrite const> words) {
+    printer::TargetPort::Result write(std::span<ctl::WordWrite const> words) {
         std::vector<std::vector<std::byte>> out;
         for(auto const& w : words) {
-            if(w.address >= DisconnectedFrom) {
+            if(w.address >= disconnectedFrom) {
                 return std::unexpected{std::string{"the target is not connected"}};
             }
             out.emplace_back(4);
@@ -79,10 +81,45 @@ struct FakeTarget {
         return out;
     }
 
-    detail::ControlTarget target() {
-        return detail::ControlTarget{
-          .read  = [this](std::span<ctl::Piece const> pieces) { return read(pieces); },
-          .write = [this](std::span<ctl::WordWrite const> words) { return write(words); },
+    // each transcript request runs against a fresh target: whether the core is halted is the reader's check
+    // (tests/rtt_reader/), not this fake's
+    printer::TargetPort::Result access(std::span<printer::TargetOp const> ops) {
+        namespace to = printer::target_op;
+        std::vector<ctl::Piece>     pieces;
+        std::vector<ctl::WordWrite> words;
+        for(auto const& op : ops) {
+            if(auto const* r = std::get_if<to::Read>(&op)) {
+                pieces.push_back({.address = r->address, .size = r->size});
+            } else if(auto const* w = std::get_if<to::WriteWord>(&op)) {
+                words.push_back({.address = w->address, .value = w->value});
+            }
+        }
+        if(!pieces.empty()) { return read(pieces); }
+        if(!words.empty()) { return write(words); }
+        std::vector<std::vector<std::byte>> out;
+        for(auto const& op : ops) {
+            if(std::holds_alternative<to::Halt>(op) || std::holds_alternative<to::Go>(op)) {
+                coreHalted = std::holds_alternative<to::Halt>(op);
+                out.push_back({std::byte{coreHalted ? std::uint8_t{1} : std::uint8_t{0}}});
+            } else if(std::holds_alternative<to::ReadRegisters>(op)) {
+                std::vector<std::byte> regs;
+                for(std::uint32_t r = 0; r != uc_log::printer::cortex_m::coreRegisterCount; ++r) {
+                    uc_log::printer::appendLe32(regs, 0x1000U + r);
+                }
+                out.push_back(std::move(regs));
+            } else {
+                out.emplace_back();
+            }
+        }
+        return out;
+    }
+
+    test::FakeTargetPort port{
+      [this](std::span<printer::TargetOp const> ops) { return access(ops); }};
+
+    printer::ControlTarget target() {
+        return printer::ControlTarget{
+          .target = &port,
           .status =
             [] {
                 return ctl::StatusAnswer{
@@ -105,21 +142,6 @@ struct FakeTarget {
           .flash = [](std::function<bool()> const&) -> std::expected<void, std::string> {
               return std::unexpected{std::string{"no hex file"}};
           },
-          .core = [this](bool halt) -> std::expected<bool, std::string> {
-              coreHalted = halt;
-              return coreHalted;
-          },
-          // each transcript request runs against a fresh target: whether the core is halted is the reader's
-          // check (rtt_reader_tests), not this fake's
-          .registers = []() -> std::expected<std::vector<std::uint32_t>, std::string> {
-              std::vector<std::uint32_t> values;
-              for(std::uint32_t r = 0; r != 19; ++r) { values.push_back(0x1000U + r); }
-              return values;
-          },
-          .writeRegisters
-          = [](std::span<ctl::RegisterWrite const>) -> std::expected<void, std::string> {
-              return {};
-          },
           .messages =
             [](std::size_t count) {
                 auto const all = allMessages();
@@ -127,8 +149,8 @@ struct FakeTarget {
                 return std::vector<ctl::StatusMessage>{all.end() - static_cast<std::ptrdiff_t>(n),
                                                        all.end()};
             },
-          .unixMicros   = [] { return UnixMicros; },
-          .steadyMicros = [this] { return steady += SteadyStepMicros; },
+          .unixMicros   = [] { return unixMicros; },
+          .steadyMicros = [this] { return steady += steadyStepMicros; },
           .stop         = {}};
     }
 };
@@ -184,6 +206,9 @@ inline std::vector<Exchange> exchanges() {
       {"write_nothing", R"({"cmd":"write","words":[]})"},
       {"write_unaligned", R"({"cmd":"write","words":[{"address":1342177294,"value":0}]})"},
       {"write_disconnected", R"({"cmd":"write","words":[{"address":3758096384,"value":1}]})"},
+      {"records_no_map", R"({"cmd":"records","kinds":["crash","trace"]})"},
+      {"records_unknown_kind", R"({"cmd":"records","kinds":["coredump"]})"},
+      {"raise_panic_no_map", R"({"cmd":"raise_panic","cause":"user"})"},
       {"not_json", R"(read 20000010:4)"},
       {"unknown_cmd", R"({"cmd":"poke","pieces":[]})"},
       {"unknown_key", R"({"cmd":"ping","verbose":true})"},
@@ -222,7 +247,7 @@ inline std::vector<ctl::Event> streamEvents() {
                           std::int64_t     ucNs,
                           std::string      module,
                           std::string      message) {
-        detail::LogEntry e{0, {}};
+        printer::LogEntry e{0, {}};
         e.fileName     = std::move(file);
         e.line         = line;
         e.functionName = std::move(function);
@@ -236,14 +261,17 @@ inline std::vector<ctl::Event> streamEvents() {
     using L = uc_log::LogLevel;
     std::vector<ctl::Event> events;
     std::uint64_t           seq = 0;
-    auto const              log = [&](int ms, detail::LogEntry const& e) {
-        auto line = detail::toLogLine(at(ms), e);
+    auto const              log = [&](int ms, printer::LogEntry const& e) {
+        auto line = printer::toLogLine(at(ms), e);
         line.seq  = seq++;
         events.emplace_back(std::move(line));
-        for(auto const& m : detail::toMetricSamples(at(ms), e)) { events.emplace_back(m); }
+        for(auto const& m : printer::toMetricSamples(at(ms), e)) { events.emplace_back(m); }
     };
-    auto const message = [&](int ms, std::string_view level, std::string_view text) {
-        events.emplace_back(detail::toStatusMessage(at(ms), level, text));
+    auto const message = [&](int                             ms,
+                             std::string_view                level,
+                             std::string_view                text,
+                             std::optional<ctl::MessageKind> kind = {}) {
+        events.emplace_back(printer::toStatusMessage(at(ms), level, text, kind));
     };
     log(0, entry("main.cpp", 10, "main", L::info, 1'500'000'000, "", "boot"));
     log(1, entry("Bus.hpp", 42, "Bus<>::run", L::warn, 1'600'000'000, "i2c.bus", "nack from 0x40"));
@@ -258,7 +286,7 @@ inline std::vector<ctl::Event> streamEvents() {
               "status: temperature @METRIC(valve::temperature[m℃]=58300) flow "
               "@METRIC(regulator::flow[]=0)"));
     log(4, entry("I2C.hpp", 3, "recover", L::error, 1'800'000'000, "i2c", "bus stuck"));
-    message(5, "error", "core halted: pc=0x10001234\nlr=0x10005678");
+    message(5, "error", "core halted: pc=0x10001234\nlr=0x10005678", ctl::MessageKind::halt);
     log(6, entry("i2cx.hpp", 9, "x", L::warn, 1'900'000'000, "i2cx", "not under i2c"));
     log(7,
         entry("main.cpp",
@@ -286,7 +314,7 @@ inline std::string transcript() {
     std::string out;
     for(auto const& x : exchanges()) {
         FakeTarget fake;
-        auto const answer = detail::controlAnswerLine(x.request, fake.target());
+        auto const answer = printer::controlAnswerLine(x.request, fake.target());
         out += fmt::format(R"({{"name":{},"stable":{},"request":{},"answer":{}}})",
                            jsonString(x.name),
                            x.stable ? "true" : "false",
@@ -306,9 +334,9 @@ inline std::string streams() {
         auto const* subscribe = request != nullptr ? std::get_if<ctl::Subscribe>(request) : nullptr;
         auto const  refused = subscribe != nullptr ? ctl::subscribeError(*subscribe) : std::nullopt;
         std::string lines;
-        if(subscribe != nullptr && !refused && (subscribe->since_seq || subscribe->last)) {
+        if(subscribe != nullptr && !refused && (subscribe->sinceSeq || subscribe->last)) {
             // what a server holding these events sends: ControlHistory's read and a BacklogEnd
-            detail::ControlHistory history;
+            printer::ControlHistory history;
             for(auto const& e : events) {
                 if(auto const* line = std::get_if<ctl::LogLine>(&e)) {
                     auto copy = *line;
@@ -317,7 +345,7 @@ inline std::string streams() {
             }
             auto chunk = history.read(*subscribe, history.start(*subscribe), SIZE_MAX);
             chunk.text += ctl::toLine(ctl::Event{
-              ctl::BacklogEnd{.next_seq = chunk.next, .lost = chunk.lost}
+              ctl::BacklogEnd{.nextSeq = chunk.next, .lost = chunk.lost}
             });
             for(std::string_view rest = chunk.text; !rest.empty();) {
                 auto const end = rest.find('\n');
@@ -379,20 +407,20 @@ inline std::string socketPaths() {
     std::vector<std::string> const dirs{
       "/home/user/firmware/build/rtt_log/sanitize",
       "/a/b/../c/rtt_log/t",
-      "/home/user/some/deeper/firmware/checkout/build_pico2/rtt_log/"
+      "/home/user/some/deeper/firmware/checkout/build_board/rtt_log/"
       "a_target_name_long_enough_to_push_the_socket_path_past_108_bytes"};
     std::string out   = "[";
     auto const  uid   = fmt::format("uc_log_{}", ::getuid());
     bool        first = true;
     for(auto const& d : dirs) {
-        auto path = detail::unixSocketPath(d, ctl::SocketName).native();
+        auto path = printer::unixSocketPath(d, ctl::socketName).native();
         if(auto const at = path.find(uid); at != std::string::npos) {
             path.replace(at, uid.size(), "uc_log_{uid}");
         }
         out += fmt::format(R"({}{{"log_dir":{},"name":{},"path":{}}})",
                            first ? "" : ",",
                            jsonString(d),
-                           jsonString(ctl::SocketName),
+                           jsonString(ctl::socketName),
                            jsonString(path));
         first = false;
     }
@@ -404,11 +432,8 @@ inline std::string schema() {
     auto const answer  = glz::write_json_schema<ctl::Answer>();
     auto const event   = glz::write_json_schema<ctl::Event>();
     if(!request || !answer || !event) { return "schema generation failed\n"; }
-    return jqPretty(fmt::format(R"({{"protocol":{},"request":{},"answer":{},"event":{}}})",
-                                ctl::ProtocolVersion,
-                                *request,
-                                *answer,
-                                *event));
+    return jqPretty(
+      fmt::format(R"({{"request":{},"answer":{},"event":{}}})", *request, *answer, *event));
 }
 
 inline std::map<std::string,

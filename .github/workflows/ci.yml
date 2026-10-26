@@ -29,7 +29,7 @@ jobs:
 
         steps:
             - name: Set up C++ environment
-              # multilib: the 32-bit glibc and libgcc uc_log_test_rtt_ring links with -m32
+              # multilib: the 32-bit glibc and libgcc uc_log_test_loss_ledger links with -m32 (rtt's ring tests run in rtt's own CI)
               # (the libc++ jobs skip it, there is no 32-bit libc++ package)
               run: |
                 sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
@@ -63,3 +63,13 @@ jobs:
 
             - name: Run tests
               run: cd build && ctest --output-on-failure
+
+            # clang-tidy (Kvasir_SDK master's tools/tidy.py and .clang-tidy, .github/actions/tidy) over this tree:
+            # this repository's findings (rtt, remote_fmt and string_constant included) fail, the SDK's are foreign
+            - name: clang-tidy
+              if: matrix.compiler.cc == 'clang' && !matrix.compiler.sanitizer
+              uses: kvasir-io/Kvasir_SDK/.github/actions/tidy@master
+              timeout-minutes: 30
+              with:
+                trees: build
+                nested: 'true'

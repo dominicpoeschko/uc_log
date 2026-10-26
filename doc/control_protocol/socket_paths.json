@@ -10,8 +10,8 @@
     "path": "/a/c/rtt_log/t/control.sock"
   },
   {
-    "log_dir": "/home/user/some/deeper/firmware/checkout/build_pico2/rtt_log/a_target_name_long_enough_to_push_the_socket_path_past_108_bytes",
+    "log_dir": "/home/user/some/deeper/firmware/checkout/build_board/rtt_log/a_target_name_long_enough_to_push_the_socket_path_past_108_bytes",
     "name": "control.sock",
-    "path": "/tmp/uc_log_{uid}/98722a487ad1c690.control.sock"
+    "path": "/tmp/uc_log_{uid}/4cb87b50171650a7.control.sock"
   }
 ]

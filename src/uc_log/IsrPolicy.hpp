@@ -29,7 +29,7 @@
 // NMI and HardFault are outside the NVIC levels, cannot be masked and preempt anything: their
 // records go on the first ISR ring under every policy, after whatever they cut off.
 
-#include "detail/IsrRecordGuard.hpp"
+#include "uc_log/CortexM.hpp"
 
 #include <array>
 #include <cstddef>
@@ -44,8 +44,12 @@ template<int... Ls>
 struct SilentLevels {};
 
 namespace detail {
-    // Four priority bits is the most a Cortex-M implements.
-    inline constexpr int MaxIsrLevel = 15;
+    // A level is the priority field in its implemented bits (Kvasir::Nvic::ActiveIsrPriority
+    // shifts the unimplemented low bits out): 0 .. 2^bits - 1. A Cortex-M implements 2 bits
+    // (Armv6-M B1.5.4, DDI0419E md l.7093; Armv8-M without the Main Extension, DDI0553B.y B3.9
+    // RCMGH) up to 8 (Armv7-M B1.5.4 "Maximum supported priority value", DDI0403E md l.17581;
+    // Armv8-M Main Extension, DDI0553B.y B3.9 RGGCP, md l.4060): 255 is the highest level.
+    inline constexpr int maxIsrLevel = 255;
 
     inline constexpr std::size_t noLogRing = ~std::size_t{0};
 
@@ -59,16 +63,12 @@ namespace detail {
     template<int... Ls>
     inline constexpr bool isSilentLevels<SilentLevels<Ls...>> = true;
 
+    // the levels of a Levels<...> or SilentLevels<...> (the callers check which it is first)
     template<typename T>
     struct LevelArray;
 
-    template<int... Ls>
-    struct LevelArray<Levels<Ls...>> {
-        static constexpr std::array<int, sizeof...(Ls)> value{Ls...};
-    };
-
-    template<int... Ls>
-    struct LevelArray<SilentLevels<Ls...>> {
+    template<template<int...> class List, int... Ls>
+    struct LevelArray<List<Ls...>> {
         static constexpr std::array<int, sizeof...(Ls)> value{Ls...};
     };
 
@@ -76,7 +76,7 @@ namespace detail {
     constexpr bool levelsValid(std::array<int,
                                           N> const& ls) {
         for(std::size_t i = 0; i < N; ++i) {
-            if(ls[i] < 0 || ls[i] > MaxIsrLevel) { return false; }
+            if(ls[i] < 0 || ls[i] > maxIsrLevel) { return false; }
             for(std::size_t j = i + 1; j < N; ++j) {
                 if(ls[i] == ls[j]) { return false; }
             }
@@ -98,13 +98,25 @@ namespace detail {
         return true;
     }
 
-    // level -> position in the served list, 0xFF when not served
     template<std::size_t N>
+    constexpr int highestLevel(std::array<int,
+                                          N> const& ls) {
+        int highest = 0;
+        for(auto const l : ls) {
+            if(l > highest) { highest = l; }
+        }
+        return highest;
+    }
+
+    // level -> position in the served list, 0xFF when not served; Size = the highest served
+    // level + 1, so a table holds only the levels up to the last served one
+    template<std::size_t Size,
+             std::size_t N>
     constexpr std::array<std::uint8_t,
-                         MaxIsrLevel + 1>
+                         Size>
     ringTable(std::array<int,
                          N> const& served) {
-        std::array<std::uint8_t, MaxIsrLevel + 1> table{};
+        std::array<std::uint8_t, Size> table{};
         for(auto& t : table) { t = 0xFF; }
         for(std::size_t i = 0; i < N; ++i) {
             table[static_cast<std::size_t>(served[i])] = static_cast<std::uint8_t>(i);
@@ -120,9 +132,9 @@ namespace IsrPolicy {
         static_assert(detail::isSilentLevels<Silent>,
                       "SingleLevel takes a SilentLevels<...>");
         static_assert(detail::levelsValid(detail::LevelArray<Silent>::value),
-                      "SilentLevels: each level once, in 0..15");
+                      "SilentLevels: each level once, in 0..255");
 
-        static constexpr std::size_t NumIsrRings = 1;
+        static constexpr std::size_t numIsrRings = 1;
 
         // The Startup contract: every enabled interrupt outside the silent levels is at one level.
         static constexpr bool singleIsrPriorityLevel  = true;
@@ -142,15 +154,17 @@ namespace IsrPolicy {
         static_assert(detail::LevelArray<Served>::value.size() > 0,
                       "PerLevel needs at least one served level");
         static_assert(detail::levelsValid(detail::LevelArray<Served>::value),
-                      "Levels: each level once, in 0..15");
+                      "Levels: each level once, in 0..255");
         static_assert(detail::levelsValid(detail::LevelArray<Silent>::value),
-                      "SilentLevels: each level once, in 0..15");
+                      "SilentLevels: each level once, in 0..255");
         static_assert(
           detail::levelsDisjoint(detail::LevelArray<Served>::value,
                                  detail::LevelArray<Silent>::value),
           "a level cannot both have a ring (Levels) and be declared silent (SilentLevels)");
 
-        static constexpr std::size_t NumIsrRings = detail::LevelArray<Served>::value.size();
+        static constexpr std::size_t numIsrRings = detail::LevelArray<Served>::value.size();
+        static_assert(numIsrRings < 0xFF,
+                      "Levels: at most 254 served levels (0xFF marks an unserved one)");
 
         // The Startup contract: every enabled interrupt is at a served or a silent level.
         static constexpr auto isrPriorityLevels       = detail::LevelArray<Served>::value;
@@ -158,7 +172,7 @@ namespace IsrPolicy {
 
         static constexpr std::size_t isrRing(int level) {
             if(level < 0) { return 0; }
-            if(level > detail::MaxIsrLevel) { return detail::noLogRing; }
+            if(static_cast<std::size_t>(level) >= table.size()) { return detail::noLogRing; }
             auto const ring = table[static_cast<std::size_t>(level)];
             return ring == 0xFF ? detail::noLogRing : ring;
         }
@@ -166,13 +180,15 @@ namespace IsrPolicy {
         static int activeLevel() { return ActivePriorityFunction{}(); }
 
     private:
-        static constexpr auto table = detail::ringTable(isrPriorityLevels);
+        static constexpr std::size_t tableSize
+          = static_cast<std::size_t>(detail::highestLevel(isrPriorityLevels)) + 1;
+        static constexpr auto table = detail::ringTable<tableSize>(isrPriorityLevels);
     };
 
     struct MaskedRecord {
-        static constexpr std::size_t NumIsrRings = 1;
+        static constexpr std::size_t numIsrRings = 1;
 
-        using RecordGuard = detail::IsrRecordGuard;
+        using RecordGuard = IsrRecordGuard;
 
         static constexpr std::size_t isrRing(int /*level*/) { return 0; }
     };

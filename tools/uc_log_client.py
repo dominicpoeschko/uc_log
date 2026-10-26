@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """uc_log_client: a uc_log_printer seen from a script.
 
-The control socket (src/uc_log/detail/ControlProtocol.hpp). Knows no build system or firmware:
+The control socket (host/uc_log/printer/ControlProtocol.hpp). Knows no build system or firmware:
 that is Kvasir_SDK's tools/kvasir_bench.py.
 """
+import csv
 import json
 import os
 import socket
+import typing
 from pathlib import Path
 
 # ---- the printer's control socket -------------------------------------------------------------
 
-PROTOCOL = 2   # ControlProtocol.hpp ProtocolVersion
+# ControlProtocol.hpp MaxReadBytes: what one read request may ask for, all pieces together
+READ_BYTES = 4096
+READ_PIECES = 64    # ControlProtocol.hpp MaxPieces: pieces in one read request
 
 
 class ControlError(Exception):
@@ -19,7 +23,7 @@ class ControlError(Exception):
 
 
 def control_socket_path(log_dir: Path) -> Path:
-    """TcpServerCommon.hpp unixSocketPath: control.sock in the log directory, or
+    """SocketPath.hpp unixSocketPath: control.sock in the log directory, or
     /tmp/uc_log_<uid>/<FNV-1a of the directory>.control.sock when that exceeds sun_path's 108 bytes."""
     log_dir = Path(os.path.abspath(log_dir))
     direct = log_dir / "control.sock"
@@ -85,9 +89,7 @@ class Connection:
         try:
             return json.loads(line)
         except ValueError:
-            raise ControlError(f"not a line of protocol {PROTOCOL}: {line.strip()[:80]!r} - an "
-                               "older uc_log_printer? rebuild it in this tree "
-                               "(cmake --build <build> --target uc_log_printer) and restart it")
+            raise ControlError(f"not a JSON line: {line.strip()[:80]!r}")
 
     def ask(self, req: dict, timeout: float | None = None) -> dict:
         if timeout is not None:
@@ -100,6 +102,19 @@ def request(control: Path, req: dict, timeout: float = 5) -> dict:
     """One request on a connection of its own."""
     with Connection(control, timeout) as c:
         return c.ask(req)
+
+
+def alive(control: Path, timeout: float = 2) -> bool:
+    """Whether a printer serves `control` and answers a ping there. False for no socket file or a socket nobody
+    accepts on (a killed printer's file); a printer that answers wrongly raises ControlError."""
+    if not control.is_socket():
+        return False
+    try:
+        with Connection(control, timeout) as c:
+            c.ask(req_ping())
+    except OSError:
+        return False
+    return True
 
 
 # ---- requests
@@ -142,6 +157,27 @@ def req_registers() -> dict:
     """the core's registers through the probe's own calls, only while halted (req_halt first);
     the answer's `values` in REGISTER_NAMES' order"""
     return {"cmd": "registers"}
+
+
+RECORD_KINDS = ("crash", "health", "ubsan", "stacks", "trace")
+
+
+def req_records(kinds: list[str]) -> dict:
+    """what the firmware leaves for a debugger, read and decoded by the printer with its map (RECORD_KINDS: crash =
+    fault, stack snapshot, panic; health = starvation, recoveries, boot guard; ubsan; stacks; trace); a record the
+    image has no symbol for has no key, {"valid": false} is one whose bytes are no record"""
+    return {"cmd": "records", "kinds": list(kinds)}
+
+
+def req_raise_panic(cause: str) -> dict:
+    """the core calls Kvasir::Panic::raise(cause): a cause of the records answer's panic_causes, or that name with
+    dashes for spaces ("check-failed"; KVASIR_PANIC's is "user") - an unknown one's error lists them"""
+    return {"cmd": "raise_panic", "cause": cause}
+
+
+def req_read_words(addresses: list[int]) -> dict:
+    """32-bit words, one piece each: answered by `words`."""
+    return req_read([(a, 4) for a in addresses])
 
 
 def req_write(words: list[tuple[int, int]]) -> dict:
@@ -210,9 +246,23 @@ def read_bytes(answer: dict) -> tuple[int, list[bytes]]:
     return answer["unix_us"], [bytes.fromhex(d) for d in answer["data"]]
 
 
+def words(answer: dict) -> tuple[int, list[int]]:
+    """A `read` or `write` answer as little-endian words: (unix µs on the log's recv_time clock, one value per
+    piece; a piece of other than 4 bytes is read as its own width)."""
+    stamp, data = read_bytes(answer)
+    return stamp, [int.from_bytes(d, "little") for d in data]
+
+
 def message_line(m: dict) -> str:
     """A Status tab line as <stamp>.status.log holds it."""
     return f"{m['time']} [{m['level']}] {m['text']}"
+
+
+def message_kind(m: dict) -> str:
+    """What a status message (a `messages` entry or a `message` event) is: "halt" for the core's halt (its text is the
+    `core halted:` line), "format_error" for a log line the printer could not render, "plain" for every other - the
+    printer writes the key only when it is not plain. Match the kind, never the text."""
+    return m.get("kind", "plain")
 
 
 def firmware_text(firmware: dict) -> str:
@@ -244,3 +294,23 @@ LEVELS = ["trace", "debug", "info", "warn", "error", "crit"]
 def format_fields(ms: float, level: str, module: str, file: str, line, message: str) -> str:
     tag = f"[{module}] " if module else ""
     return f"{ms:12.3f} ms {level:5} {tag}{file}:{line} {message}"
+
+
+# ---- the .rttlog -----------------------------------------------------------------------------
+
+# host/uc_log/printer/LogFormat.hpp's header line; RttlogRows.hpp names the same columns
+RTTLOG_COLUMNS = ["recv_time_utc", "channel", "file", "line", "function", "log_level", "uc_time", "message",
+                  "module"]
+
+
+def rttlog_rows(path: Path) -> typing.Iterator[list[str]]:
+    """The rows of a .rttlog (RFC 4180 CSV, one physical line per record; the text columns as fmt's {:?} escapes
+    them), the header skipped. A row of another width raises ValueError: read the message as row[7], never row[-1]."""
+    with open(path, newline="", encoding="utf-8", errors="replace") as f:
+        for n, row in enumerate(csv.reader(f)):
+            if n == 0 and row == RTTLOG_COLUMNS:
+                continue
+            if len(row) != len(RTTLOG_COLUMNS):
+                raise ValueError(
+                    f"{path}: row {n}: {len(row)} columns, not {len(RTTLOG_COLUMNS)}")
+            yield row

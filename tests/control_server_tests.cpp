@@ -3,9 +3,10 @@
 // history. Every wait is the printer's own time - no check depends on how fast the machine runs. What needs TCP is in
 // tcp_server_tests. Run under TSan and ASan.
 #include "SocketTestSupport.hpp"
-#include "uc_log/detail/ControlServer.hpp"
-#include "uc_log/detail/DuplexChannelServer.hpp"
-#include "uc_log/detail/TcpServerCommon.hpp"
+#include "support/FakeTargetPort.hpp"
+#include "uc_log/printer/ControlServer.hpp"
+#include "uc_log/printer/DuplexChannelServer.hpp"
+#include "uc_log/printer/SocketSession.hpp"
 
 #include <algorithm>
 #include <array>
@@ -26,43 +27,48 @@ using namespace std::chrono_literals;
 
 using local = boost::asio::local::stream_protocol;
 
-static void testControlServer(boost::asio::ip::address const&              loopback,
-                              std::filesystem::path const&                 baseDir,
-                              uc_log::detail::ControlServer::ErrorF const& errf) {
+namespace {
+
+void testControlServer(boost::asio::ip::address const&               loopback,
+                       std::filesystem::path const&                  baseDir,
+                       uc_log::printer::ControlServer::ErrorF const& errf) {
     note("control server: requests and a stream side by side");
-    namespace ctl = uc_log::control;
+    namespace ctl = uc_log::printer::control;
     std::array<std::atomic<int>, 256> readsAt{};   // tells that a wait has started
-    auto const                        reader
-      = [&readsAt](std::span<ctl::Piece const> pieces) -> uc_log::detail::MemoryResult {
-        std::vector<std::vector<std::byte>> out;
-        for(auto const& p : pieces) {
-            if(p.address < readsAt.size()) { ++readsAt[p.address]; }
-            out.emplace_back(p.size);
-            for(std::uint32_t i = 0; i != p.size; ++i) {
-                out.back()[i] = static_cast<std::byte>((p.address + i) & 0xFFU);
-            }
-        }
-        return out;
-    };
+    uc_log::test::FakeTargetPort      readerPort{
+      [&readsAt](
+        std::span<uc_log::printer::TargetOp const> ops) -> uc_log::printer::TargetPort::Result {
+          std::vector<std::vector<std::byte>> out;
+          for(auto const& op : ops) {
+              auto const& r = std::get<uc_log::printer::target_op::Read>(op);
+              if(r.address < readsAt.size()) { ++readsAt[r.address]; }
+              out.emplace_back(r.size);
+              for(std::uint32_t i = 0; i != r.size; ++i) {
+                  out.back()[i] = static_cast<std::byte>((r.address + i) & 0xFFU);
+              }
+          }
+          return out;
+      }};
     auto const readLine = std::string{R"({"cmd":"read","pieces":[{"address":536870928,"size":2}]})"
                                       "\n"};
     auto const requestsPath = baseDir / "requests.sock";
-    local::endpoint const         requests{requestsPath.native()};
-    uc_log::detail::ControlServer server{loopback, 0, requestsPath, errf, {}};
-    for(int i = 0; i != 200 && server.getStatus() != TcpPortStatus::Active; ++i) {
+    local::endpoint const          requests{requestsPath.native()};
+    uc_log::printer::ControlServer server{loopback, 0, requestsPath, errf, {}};
+    for(int i = 0; i != 200 && server.getStatus() != uc_log::printer::SocketPortStatus::active; ++i)
+    {
         Clock::sleep_for(10ms);
     }
-    CHECK(server.getStatus() == TcpPortStatus::Active, "control server bound");
+    CHECK(server.getStatus() == uc_log::printer::SocketPortStatus::active, "control server bound");
 
     boost::asio::io_context   clientIo;
     LineClient<local::socket> client{clientIo};
     client.socket.connect(requests);
-    CHECK(client.ask("{\"cmd\":\"ping\"}\n") == R"({"cmd":"ping","protocol":2})",
+    CHECK(client.ask("{\"cmd\":\"ping\"}\n") == R"({"cmd":"ping"})",
           "ping answers without a target");
     auto const early = answerOf(client.ask(readLine));
     CHECK(std::holds_alternative<ctl::Error>(early), "no target yet: an error, not a hang");
 
-    server.setTarget(uc_log::detail::ControlTarget{.read = reader});
+    server.setTarget(uc_log::printer::ControlTarget{.target = &readerPort});
     for(int i = 0; i != 3; ++i) {
         auto const  a = answerOf(client.ask(readLine));
         auto const* r = std::get_if<ctl::ReadAnswer>(&a);
@@ -79,19 +85,19 @@ static void testControlServer(boost::asio::ip::address const&              loopb
     CHECK(
       subscriber.ask(R"({"cmd":"subscribe","streams":["log"],"min_level":"warn","modules":["i2c"]})"
                      "\n")
-        == R"({"cmd":"subscribe","protocol":2})",
+        == R"({"cmd":"subscribe"})",
       "subscribe answers first");
     Clock::Thread publisher{[&] {
         for(int i = 0; i != 300; ++i) {
-            server.publish(ctl::LogLine{.recv_time = "t",
-                                        .channel   = 0,
-                                        .file      = "f.cpp",
-                                        .line      = 1,
-                                        .function  = "f",
+            server.publish(ctl::LogLine{.recvTime = "t",
+                                        .channel  = 0,
+                                        .file     = "f.cpp",
+                                        .line     = 1,
+                                        .function = "f",
                                         .level = i % 3 == 0 ? ctl::Level::warn : ctl::Level::info,
-                                        .uc_time_ns = i,
-                                        .message    = std::to_string(i),
-                                        .module     = i % 2 == 1 ? "i2c.bus" : "usb"});
+                                        .ucTimeNs = i,
+                                        .message  = std::to_string(i),
+                                        .module   = i % 2 == 1 ? "i2c.bus" : "usb"});
             server.publish(
               ctl::MetricSample{.name = "m", .scope = "", .unit = "", .time = 0, .value = 0});
         }
@@ -124,40 +130,43 @@ static void testControlServer(boost::asio::ip::address const&              loopb
     CHECK(Clock::now() - start < 1s, "reads go on while a wait waits");
     auto const  waited = answerOf(waiter.next());
     auto const* w      = std::get_if<ctl::WaitAnswer>(&waited);
-    CHECK(w != nullptr && !w->hit && w->waited_us >= 1'500'000, "the wait runs out");
+    CHECK(w != nullptr && !w->hit && w->waitedUs >= 1'500'000, "the wait runs out");
 
     {
-        std::atomic<int> reads{0};
-        auto const instant = [&reads](std::span<ctl::Piece const>) -> uc_log::detail::MemoryResult {
-            ++reads;
-            return std::vector<std::vector<std::byte>>{std::vector<std::byte>(4)};
-        };
-        auto const a = uc_log::detail::controlAnswer(
+        std::atomic<int>             reads{0};
+        uc_log::test::FakeTargetPort instantPort{
+          [&reads](
+            std::span<uc_log::printer::TargetOp const>) -> uc_log::printer::TargetPort::Result {
+              ++reads;
+              return std::vector<std::vector<std::byte>>{std::vector<std::byte>(4)};
+          }};
+        auto const a = uc_log::printer::controlAnswer(
           ctl::Wait{
-            .piece      = {.address = 0, .size = 4},
-            .condition  = ctl::Condition::ne,
-            .value      = 0,
-            .mask       = std::nullopt,
-            .timeout_ms = 200
+            .piece     = {.address = 0, .size = 4},
+            .condition = ctl::Condition::ne,
+            .value     = 0,
+            .mask      = std::nullopt,
+            .timeoutMs = 200
         },
-          uc_log::detail::ControlTarget{.read = instant});
+          uc_log::printer::ControlTarget{.target = &instantPort});
         auto const* paced = std::get_if<ctl::WaitAnswer>(&a);
         CHECK(paced != nullptr && !paced->hit, "a wait on an instant reader runs out");
         CHECK(reads.load() >= 50 && reads.load() < 400,
               "and reads about once a millisecond, not as fast as it can");
 
-        auto const empty = [](std::span<ctl::Piece const>) -> uc_log::detail::MemoryResult {
-            return std::vector<std::vector<std::byte>>{};
-        };
-        auto const e = uc_log::detail::controlAnswer(
+        uc_log::test::FakeTargetPort emptyPort{
+          [](std::span<uc_log::printer::TargetOp const>) -> uc_log::printer::TargetPort::Result {
+              return std::vector<std::vector<std::byte>>{};
+          }};
+        auto const e = uc_log::printer::controlAnswer(
           ctl::Wait{
-            .piece      = {.address = 0, .size = 4},
-            .condition  = ctl::Condition::changed,
-            .value      = std::nullopt,
-            .mask       = std::nullopt,
-            .timeout_ms = 200
+            .piece     = {.address = 0, .size = 4},
+            .condition = ctl::Condition::changed,
+            .value     = std::nullopt,
+            .mask      = std::nullopt,
+            .timeoutMs = 200
         },
-          uc_log::detail::ControlTarget{.read = empty});
+          uc_log::printer::ControlTarget{.target = &emptyPort});
         CHECK(std::holds_alternative<ctl::Error>(e), "a read that returns nothing is an error");
     }
 
@@ -219,21 +228,23 @@ static void testControlServer(boost::asio::ip::address const&              loopb
     auto const dir
       = fs::temp_directory_path() / ("uc_log_control_test_" + std::to_string(::getpid()));
     fs::create_directories(dir);
-    auto const path = uc_log::detail::controlSocketPath(dir);
+    auto const path = uc_log::printer::controlSocketPath(dir);
     CHECK(path == dir / "control.sock", "the socket lies in the log directory");
-    auto const deep = uc_log::detail::controlSocketPath(dir / std::string(120, 'x'));
+    auto const deep = uc_log::printer::controlSocketPath(dir / std::string(120, 'x'));
     CHECK(deep.native().size() < 108 && deep.native().starts_with("/tmp/uc_log_"),
           "a directory too deep for sun_path gets a hashed name");
     CHECK(deep.native().ends_with(".control.sock"), "and keeps the socket's name");
-    CHECK(uc_log::detail::duplexSocketName(0) == "duplex.0.sock",
+    CHECK(uc_log::printer::duplexSocketName(0) == "duplex.0.sock",
           "a duplex channel's socket is named after its ordinal");
 
     auto const waitFor = [](auto const& condition) { return waitUntil(condition); };
     {
         std::ofstream{path} << "not a socket";
         {
-            uc_log::detail::ControlServer notOurs{loopback, 0, path, errf, {}};
-            CHECK(waitFor([&] { return notOurs.getStatus() == TcpPortStatus::PortOccupied; }),
+            uc_log::printer::ControlServer notOurs{loopback, 0, path, errf, {}};
+            CHECK(waitFor([&] {
+                      return notOurs.getStatus() == uc_log::printer::SocketPortStatus::portOccupied;
+                  }),
                   "a path that is not a socket is refused");
         }
         std::string content;
@@ -246,9 +257,11 @@ static void testControlServer(boost::asio::ip::address const&              loopb
             stale.bind(local::endpoint{path.native()});
         }
         CHECK(fs::is_socket(path), "a stale socket file");
-        uc_log::detail::ControlServer unixServer{loopback, 0, path, errf, {}};
-        unixServer.setTarget(uc_log::detail::ControlTarget{.read = reader});
-        CHECK(waitFor([&] { return unixServer.getStatus() == TcpPortStatus::Active; }),
+        uc_log::printer::ControlServer unixServer{loopback, 0, path, errf, {}};
+        unixServer.setTarget(uc_log::printer::ControlTarget{.target = &readerPort});
+        CHECK(waitFor([&] {
+                  return unixServer.getStatus() == uc_log::printer::SocketPortStatus::active;
+              }),
               "a stale file is replaced");
         CHECK(fs::is_socket(path), "the socket file is there");
         CHECK((fs::status(path).permissions() & (fs::perms::group_all | fs::perms::others_all))
@@ -284,7 +297,7 @@ static void testControlServer(boost::asio::ip::address const&              loopb
                 quietSubscriber.socket.connect(local::endpoint{path.native()});
                 CHECK(quietSubscriber.ask(R"({"cmd":"subscribe","streams":["metrics"]})"
                                           "\n")
-                        == R"({"cmd":"subscribe","protocol":2})",
+                        == R"({"cmd":"subscribe"})",
                       "a quiet subscriber");
                 quietSubscriber.socket.shutdown(local::socket::shutdown_send);
                 Clock::sleep_for(100ms);
@@ -323,7 +336,7 @@ static void testControlServer(boost::asio::ip::address const&              loopb
 
         // long requests leave workers free: one past the limit is refused, a read still goes
         {
-            constexpr auto limit = uc_log::detail::ControlServer::MaxLongRequests;
+            constexpr auto limit = uc_log::printer::ControlServer::maxLongRequests;
             CHECK(waitUntil([&] { return unixServer.requestsInFlight() == 0; }),
                   "the abandoned waits have ended");
             std::vector<std::unique_ptr<LineClient<local::socket>>> waiters;
@@ -356,27 +369,29 @@ static void testControlServer(boost::asio::ip::address const&              loopb
         }
 
         {
-            uc_log::detail::ControlServer second{loopback, 0, path, errf, {}};
-            CHECK(waitFor([&] { return second.getStatus() == TcpPortStatus::PortOccupied; }),
+            uc_log::printer::ControlServer second{loopback, 0, path, errf, {}};
+            CHECK(waitFor([&] {
+                      return second.getStatus() == uc_log::printer::SocketPortStatus::portOccupied;
+                  }),
                   "a second server on the same path does not bind");
         }
         CHECK(fs::is_socket(path), "and leaves the first one's socket");
 
-        uc_log::detail::AsioContext      unixCtx;
-        uc_log::detail::DuplexChannelHub unixHub{unixCtx.ioc,
-                                                 loopback,
-                                                 0,
-                                                 [](std::string_view) {},
-                                                 [](std::string_view) {},
-                                                 []() {},
-                                                 dir};
+        uc_log::printer::AsioContext      unixCtx;
+        uc_log::printer::DuplexChannelHub unixHub{unixCtx.ioc,
+                                                  loopback,
+                                                  0,
+                                                  [](std::string_view) {},
+                                                  [](std::string_view) {},
+                                                  []() {},
+                                                  dir};
         {
-            uc_log::detail::AsioContextRunner unixRunner{unixCtx};
+            uc_log::printer::AsioContextRunner unixRunner{unixCtx};
             unixHub.configure({
-              uc_log::detail::DuplexChannelDesc{.ordinal   = 0,
-                                                .name      = "control",
-                                                .upIndex   = 1,
-                                                .downIndex = 1}
+              uc_log::printer::DuplexChannelDesc{.ordinal   = 0,
+                                                 .name      = "control",
+                                                 .upIndex   = 1,
+                                                 .downIndex = 1}
             });
             auto const duplexPath = dir / "duplex.0.sock";
             CHECK(waitFor([&] { return fs::is_socket(duplexPath); }),
@@ -414,7 +429,7 @@ static void testControlServer(boost::asio::ip::address const&              loopb
             CHECK(waitFor([&] { return !fs::exists(path) && !fs::exists(duplexPath); }),
                   "switched to TCP: the socket files are gone");
             CHECK(waitFor([&] {
-                      return unixServer.getStatus() == TcpPortStatus::Active
+                      return unixServer.getStatus() == uc_log::printer::SocketPortStatus::active
                           && unixHub.info()[0].socketPath.empty();
                   }),
                   "and the servers listen on TCP");
@@ -424,24 +439,24 @@ static void testControlServer(boost::asio::ip::address const&              loopb
                   "switched back: the socket files are there again");
             LineClient<local::socket> again{clientIo};
             again.socket.connect(local::endpoint{path.native()});
-            CHECK(again.ask("{\"cmd\":\"ping\"}\n") == R"({"cmd":"ping","protocol":2})",
-                  "and take a client");
+            CHECK(again.ask("{\"cmd\":\"ping\"}\n") == R"({"cmd":"ping"})", "and take a client");
 
             // a reflash puts a new channel at ordinal 0 and moves "control" to 1
             unixHub.configure({
-              uc_log::detail::DuplexChannelDesc{.ordinal   = 0,
-                                                .name      = "fresh",
-                                                .upIndex   = 2,
-                                                .downIndex = 2},
-              uc_log::detail::DuplexChannelDesc{.ordinal   = 1,
-                                                .name      = "control",
-                                                .upIndex   = 1,
-                                                .downIndex = 1}
+              uc_log::printer::DuplexChannelDesc{.ordinal   = 0,
+                                                 .name      = "fresh",
+                                                 .upIndex   = 2,
+                                                 .downIndex = 2},
+              uc_log::printer::DuplexChannelDesc{.ordinal   = 1,
+                                                 .name      = "control",
+                                                 .upIndex   = 1,
+                                                 .downIndex = 1}
             });
             CHECK(waitFor([&] {
                       auto const info = unixHub.info();
-                      return info.size() == 2 && info[0].status == TcpPortStatus::Active
-                          && info[1].status == TcpPortStatus::Active
+                      return info.size() == 2
+                          && info[0].status == uc_log::printer::SocketPortStatus::active
+                          && info[1].status == uc_log::printer::SocketPortStatus::active
                           && info[0].socketPath == (dir / "duplex.0.sock").native()
                           && info[1].socketPath == (dir / "duplex.1.sock").native();
                   }),
@@ -456,22 +471,26 @@ static void testControlServer(boost::asio::ip::address const&              loopb
 
 // a subscriber that never reads must cost the others nothing: its queue fills and drops, the
 // socket thread and the workers go on serving the other clients
-static void testStalledSubscriber(boost::asio::ip::address const&              loopback,
-                                  std::filesystem::path const&                 path,
-                                  uc_log::detail::ControlServer::ErrorF const& errf) {
+void testStalledSubscriber(boost::asio::ip::address const&               loopback,
+                           std::filesystem::path const&                  path,
+                           uc_log::printer::ControlServer::ErrorF const& errf) {
     note("control server: a subscriber that never reads");
-    namespace ctl     = uc_log::control;
-    auto const reader = [](std::span<ctl::Piece const> pieces) -> uc_log::detail::MemoryResult {
-        std::vector<std::vector<std::byte>> out;
-        for(auto const& p : pieces) { out.emplace_back(p.size); }
-        return out;
-    };
-    uc_log::detail::ControlServer server{loopback, 0, path, errf, {}};
-    for(int i = 0; i != 200 && server.getStatus() != TcpPortStatus::Active; ++i) {
+    namespace ctl = uc_log::printer::control;
+    uc_log::test::FakeTargetPort readerPort{
+      [](std::span<uc_log::printer::TargetOp const> ops) -> uc_log::printer::TargetPort::Result {
+          std::vector<std::vector<std::byte>> out;
+          for(auto const& op : ops) {
+              out.emplace_back(std::get<uc_log::printer::target_op::Read>(op).size);
+          }
+          return out;
+      }};
+    uc_log::printer::ControlServer server{loopback, 0, path, errf, {}};
+    for(int i = 0; i != 200 && server.getStatus() != uc_log::printer::SocketPortStatus::active; ++i)
+    {
         Clock::sleep_for(10ms);
     }
-    CHECK(server.getStatus() == TcpPortStatus::Active, "control server bound");
-    server.setTarget(uc_log::detail::ControlTarget{.read = reader});
+    CHECK(server.getStatus() == uc_log::printer::SocketPortStatus::active, "control server bound");
+    server.setTarget(uc_log::printer::ControlTarget{.target = &readerPort});
 
     auto const subscribeLine = std::string{R"({"cmd":"subscribe","streams":["log"]})"
                                            "\n"};
@@ -482,22 +501,22 @@ static void testStalledSubscriber(boost::asio::ip::address const&              l
     stalled.socket.connect(local::endpoint{path.native()});
     // a small receive buffer, so the kernel takes little and the server's queue fills
     stalled.socket.set_option(boost::asio::socket_base::receive_buffer_size{4096});
-    CHECK(stalled.ask(subscribeLine) == R"({"cmd":"subscribe","protocol":2})",
+    CHECK(stalled.ask(subscribeLine) == R"({"cmd":"subscribe"})",
           "the stalled one subscribes, then never reads again");
 
     // well past what the kernel buffers and the 4 MiB queue together hold
     auto const message = std::string(200, 'x');
     auto const flood   = [&](int from, int to) {
         for(int i = from; i != to; ++i) {
-            server.publish(ctl::LogLine{.recv_time  = "t",
-                                        .channel    = 0,
-                                        .file       = "f.cpp",
-                                        .line       = 1,
-                                        .function   = "f",
-                                        .level      = ctl::Level::info,
-                                        .uc_time_ns = i,
-                                        .message    = message,
-                                        .module     = ""});
+            server.publish(ctl::LogLine{.recvTime = "t",
+                                        .channel  = 0,
+                                        .file     = "f.cpp",
+                                        .line     = 1,
+                                        .function = "f",
+                                        .level    = ctl::Level::info,
+                                        .ucTimeNs = i,
+                                        .message  = message,
+                                        .module   = ""});
         }
     };
     std::atomic<bool> flooded{false};
@@ -520,8 +539,7 @@ static void testStalledSubscriber(boost::asio::ip::address const&              l
     LineClient<local::socket> other{clientIo};
     other.socket.connect(local::endpoint{path.native()});
     auto const start = Clock::now();
-    CHECK(other.ask(subscribeLine) == R"({"cmd":"subscribe","protocol":2})",
-          "a second client still subscribes");
+    CHECK(other.ask(subscribeLine) == R"({"cmd":"subscribe"})", "a second client still subscribes");
     Clock::Thread publisher{[&] { flood(60'000, 60'100); }};
     publisher.join();
     bool got = true;
@@ -529,7 +547,7 @@ static void testStalledSubscriber(boost::asio::ip::address const&              l
         auto const  parsed = ctl::fromLine<ctl::Event>(other.next(2s));
         auto const* event  = std::get_if<ctl::Event>(&parsed);
         auto const* line   = event != nullptr ? std::get_if<ctl::LogLine>(event) : nullptr;
-        got                = got && line != nullptr && line->uc_time_ns == i;
+        got                = got && line != nullptr && line->ucTimeNs == i;
     }
     CHECK(got, "and gets every line published after it, in order");
 
@@ -569,64 +587,69 @@ static void testStalledSubscriber(boost::asio::ip::address const&              l
 
 // reads stuck in the target (a probe call that does not come back) must not take ping and
 // subscribe with them: they need no target
-static void testStuckReads(boost::asio::ip::address const& loopback,
-                           std::filesystem::path const&    path) {
+void testStuckReads(boost::asio::ip::address const& loopback,
+                    std::filesystem::path const&    path) {
     note("control server: every worker stuck in a read");
-    namespace ctl = uc_log::control;
-    std::mutex               mutex;
-    Clock::ConditionVariable release;
-    bool                     released = false;
-    std::atomic<int>         inside{0};
-    auto const reader = [&](std::span<ctl::Piece const> pieces) -> uc_log::detail::MemoryResult {
-        ++inside;
-        std::unique_lock<std::mutex> lock{mutex};
-        release.wait(lock, [&] { return released; });
-        std::vector<std::vector<std::byte>> out;
-        for(auto const& p : pieces) { out.emplace_back(p.size); }
-        return out;
-    };
+    namespace ctl = uc_log::printer::control;
+    std::mutex                   mutex;
+    Clock::ConditionVariable     release;
+    bool                         released = false;
+    std::atomic<int>             inside{0};
+    uc_log::test::FakeTargetPort readerPort{
+      [&](std::span<uc_log::printer::TargetOp const> ops) -> uc_log::printer::TargetPort::Result {
+          ++inside;
+          std::unique_lock<std::mutex> lock{mutex};
+          release.wait(lock, [&] { return released; });
+          std::vector<std::vector<std::byte>> out;
+          for(auto const& op : ops) {
+              out.emplace_back(std::get<uc_log::printer::target_op::Read>(op).size);
+          }
+          return out;
+      }};
     std::mutex               messagesMutex;
     std::vector<std::string> messages;
     auto const               said = [&](std::string_view part) {
-        std::lock_guard<std::mutex> const lock{messagesMutex};
+        std::scoped_lock<std::mutex> const lock{messagesMutex};
         return std::ranges::any_of(messages, [&](auto const& m) {
             return m.find(part) != std::string::npos;
         });
     };
-    uc_log::detail::ControlServer server{loopback, 0, path, [&](std::string_view msg) {
-                                             std::lock_guard<std::mutex> const lock{messagesMutex};
-                                             messages.emplace_back(msg);
-                                         }};
+    uc_log::printer::ControlServer server{loopback, 0, path, [&](std::string_view msg) {
+                                              std::scoped_lock<std::mutex> const lock{
+                                                messagesMutex};
+                                              messages.emplace_back(msg);
+                                          }};
     server.setStuckLimit(300ms);
-    for(int i = 0; i != 200 && server.getStatus() != TcpPortStatus::Active; ++i) {
+    for(int i = 0; i != 200 && server.getStatus() != uc_log::printer::SocketPortStatus::active; ++i)
+    {
         Clock::sleep_for(10ms);
     }
-    CHECK(server.getStatus() == TcpPortStatus::Active, "control server bound");
-    server.setTarget(uc_log::detail::ControlTarget{.read = reader});
+    CHECK(server.getStatus() == uc_log::printer::SocketPortStatus::active, "control server bound");
+    server.setTarget(uc_log::printer::ControlTarget{.target = &readerPort});
 
     auto const readLine = std::string{R"({"cmd":"read","pieces":[{"address":16,"size":4}]})"
                                       "\n"};
     boost::asio::io_context                                 clientIo;
     std::vector<std::unique_ptr<LineClient<local::socket>>> stuck;
-    for(std::size_t i = 0; i != uc_log::detail::ControlServer::Workers; ++i) {
+    for(std::size_t i = 0; i != uc_log::printer::ControlServer::workers; ++i) {
         stuck.push_back(std::make_unique<LineClient<local::socket>>(clientIo));
         stuck.back()->socket.connect(local::endpoint{path.native()});
         stuck.back()->send(readLine);
     }
     CHECK(waitUntil([&] {
-              return inside.load() == static_cast<int>(uc_log::detail::ControlServer::Workers);
+              return inside.load() == static_cast<int>(uc_log::printer::ControlServer::workers);
           }),
           "every worker sits in a read");
 
     LineClient<local::socket> other{clientIo};
     other.socket.connect(local::endpoint{path.native()});
     other.send("{\"cmd\":\"ping\"}\n");
-    CHECK(other.next(2s) == R"({"cmd":"ping","protocol":2})", "ping still answers");
+    CHECK(other.next(2s) == R"({"cmd":"ping"})", "ping still answers");
     LineClient<local::socket> subscriber{clientIo};
     subscriber.socket.connect(local::endpoint{path.native()});
     subscriber.send(R"({"cmd":"subscribe","streams":["log"]})"
                     "\n");
-    CHECK(subscriber.next(2s) == R"({"cmd":"subscribe","protocol":2})", "subscribe still answers");
+    CHECK(subscriber.next(2s) == R"({"cmd":"subscribe"})", "subscribe still answers");
     CHECK(waitUntil([&] { return said("self-check: no worker free") && said("read for"); }),
           "the self-check says that the workers are stuck, and in what");
     CHECK(!said("socket thread has not turned"), "and not the socket thread, which turns");
@@ -635,7 +658,7 @@ static void testStuckReads(boost::asio::ip::address const& loopback,
     }
 
     {
-        std::lock_guard<std::mutex> const lock{mutex};
+        std::scoped_lock<std::mutex> const lock{mutex};
         released = true;
     }
     release.notify_all();
@@ -648,8 +671,8 @@ static void testStuckReads(boost::asio::ip::address const& loopback,
 }
 
 // the self-check names a socket thread that does not turn (here: held in the status callback)
-static void testStuckSocketThread(boost::asio::ip::address const& loopback,
-                                  std::filesystem::path const&    path) {
+void testStuckSocketThread(boost::asio::ip::address const& loopback,
+                           std::filesystem::path const&    path) {
     note("control server: the socket thread stuck");
     std::mutex               mutex;
     Clock::ConditionVariable release;
@@ -657,31 +680,32 @@ static void testStuckSocketThread(boost::asio::ip::address const& loopback,
     std::atomic<bool>        holding{false};
     std::vector<std::string> messages;
     auto const               said = [&](std::string_view part) {
-        std::lock_guard<std::mutex> const lock{mutex};
+        std::scoped_lock<std::mutex> const lock{mutex};
         return std::ranges::any_of(messages, [&](auto const& m) {
             return m.find(part) != std::string::npos;
         });
     };
     {
-        uc_log::detail::ControlServer server{loopback,
-                                             0,
-                                             path,
-                                             [&](std::string_view msg) {
-                                                 std::lock_guard<std::mutex> const lock{mutex};
-                                                 messages.emplace_back(msg);
-                                             },
-                                             [&](TcpPortStatus, std::uint16_t) {
-                                                 std::unique_lock<std::mutex> lock{mutex};
-                                                 holding = true;
-                                                 release.wait(lock, [&] { return released; });
-                                             }};
+        uc_log::printer::ControlServer server{
+          loopback,
+          0,
+          path,
+          [&](std::string_view msg) {
+              std::scoped_lock<std::mutex> const lock{mutex};
+              messages.emplace_back(msg);
+          },
+          [&](uc_log::printer::SocketPortStatus, std::uint16_t) {
+              std::unique_lock<std::mutex> lock{mutex};
+              holding = true;
+              release.wait(lock, [&] { return released; });
+          }};
         server.setStuckLimit(300ms);
         CHECK(waitUntil([&] { return holding.load(); }), "the socket thread is held");
         CHECK(waitUntil([&] { return said("self-check: the socket thread has not turned"); }),
               "the self-check says so");
         CHECK(!said("no worker free"), "and not the workers, which are free");
         {
-            std::lock_guard<std::mutex> const lock{mutex};
+            std::scoped_lock<std::mutex> const lock{mutex};
             released = true;
         }
         release.notify_all();
@@ -690,18 +714,19 @@ static void testStuckSocketThread(boost::asio::ip::address const& loopback,
     }
 }
 
-static void testLogHistory(boost::asio::ip::address const&              loopback,
-                           uc_log::detail::ControlServer::ErrorF const& errf) {
+void testLogHistory(boost::asio::ip::address const&               loopback,
+                    uc_log::printer::ControlServer::ErrorF const& errf) {
     note("control server: log history");
     namespace fs  = std::filesystem;
-    namespace ctl = uc_log::control;
+    namespace ctl = uc_log::printer::control;
     auto const dir
       = fs::temp_directory_path() / ("uc_log_history_test_" + std::to_string(::getpid()));
     fs::create_directories(dir);
-    auto const                    path = uc_log::detail::controlSocketPath(dir);
-    uc_log::detail::ControlServer server{loopback, 0, path, errf, {}};
-    CHECK(waitUntil([&] { return server.getStatus() == TcpPortStatus::Active; }),
-          "history server bound");
+    auto const                     path = uc_log::printer::controlSocketPath(dir);
+    uc_log::printer::ControlServer server{loopback, 0, path, errf, {}};
+    CHECK(
+      waitUntil([&] { return server.getStatus() == uc_log::printer::SocketPortStatus::active; }),
+      "history server bound");
     auto const publish = [&](int i, std::size_t bytes = 0) {
         ctl::LogLine l;
         l.level   = i % 4 == 0 ? ctl::Level::warn : ctl::Level::info;
@@ -758,7 +783,7 @@ static void testLogHistory(boost::asio::ip::address const&              loopback
         Seen seen;
         for(int i = 0; i != 4; ++i) { take(seen, c.next()); }
         CHECK(seen.messages == (std::vector<std::string>{"88", "92", "96"}) && seen.end
-                && seen.end->next_seq == 100 && seen.end->lost == 0 && !seen.other,
+                && seen.end->nextSeq == 100 && seen.end->lost == 0 && !seen.other,
               "last 3 warn lines, then backlog_end");
         CHECK(c.next().empty() && c.eof, "follow false: closed after backlog_end");
     }
@@ -769,7 +794,7 @@ static void testLogHistory(boost::asio::ip::address const&              loopback
           = answerOf(c.ask(R"({"cmd":"subscribe","streams":["metrics"],"since_seq":0})"
                            "\n"));
         CHECK(std::holds_alternative<ctl::Error>(refused), "history without log: an error");
-        CHECK(c.ask("{\"cmd\":\"ping\"}\n") == R"({"cmd":"ping","protocol":2})",
+        CHECK(c.ask("{\"cmd\":\"ping\"}\n") == R"({"cmd":"ping"})",
               "and the connection still takes requests");
     }
     {
@@ -786,13 +811,15 @@ static void testLogHistory(boost::asio::ip::address const&              loopback
         go = true;
         CHECK(std::holds_alternative<ctl::SubscribeAnswer>(answerOf(c.next())), "subscribed");
         Seen seen;
-        while(seen.seqs.size() + (seen.end ? 1 : 0) < 20'050 + 1 && failures.load() == 0) {
+        while(seen.seqs.size() + (seen.end ? 1 : 0) < 20'050 + 1
+              && uc_log::test::failures.load() == 0)
+        {
             take(seen, c.next());
         }
         publisher.join();
         CHECK(contiguous(seen.seqs, 50) && seen.seqs.size() == 20'050,
               "history then live: seq 50 .. 20099, none twice, none missing");
-        CHECK(seen.end && seen.end->next_seq == 50 + seen.endAt && seen.end->lost == 0
+        CHECK(seen.end && seen.end->nextSeq == 50 + seen.endAt && seen.end->lost == 0
                 && !seen.other,
               "backlog_end sits exactly where the live lines begin");
         CHECK(server.droppedBytes() == 0, "nothing dropped on the way");
@@ -812,9 +839,9 @@ static void testLogHistory(boost::asio::ip::address const&              loopback
         Clock::sleep_for(200ms);   // let the send queue fill up
         CHECK(std::holds_alternative<ctl::SubscribeAnswer>(answerOf(c.next())), "subscribed");
         Seen seen;
-        while(!seen.end && failures.load() == 0) { take(seen, c.next()); }
+        while(!seen.end && uc_log::test::failures.load() == 0) { take(seen, c.next()); }
         CHECK(contiguous(seen.seqs, first) && seen.seqs.size() == 20'000 && seen.end
-                && seen.end->next_seq == first + 20'000,
+                && seen.end->nextSeq == first + 20'000,
               "a history larger than the send queue arrives whole");
         CHECK(server.droppedBytes() == 0, "paced by the client, not dropped");
     }
@@ -827,13 +854,15 @@ static void testLogHistory(boost::asio::ip::address const&              loopback
                "\n");
         CHECK(std::holds_alternative<ctl::SubscribeAnswer>(answerOf(c.next())), "subscribed");
         Seen seen;
-        while(!seen.end && failures.load() == 0) { take(seen, c.next()); }
+        while(!seen.end && uc_log::test::failures.load() == 0) { take(seen, c.next()); }
         CHECK(seen.end && !seen.seqs.empty() && seen.end->lost == seen.seqs.front()
-                && seen.end->lost > 0 && seen.end->next_seq == server.logSeq(),
+                && seen.end->lost > 0 && seen.end->nextSeq == server.logSeq(),
               "lines dropped past the limit are counted as lost");
     }
     fs::remove_all(dir);
 }
+
+}   // namespace
 
 int main() {
     std::setvbuf(stdout,
@@ -841,8 +870,8 @@ int main() {
                  _IOLBF,
                  0);   // a hang killed by a time limit still shows its last step
     // first: every thread below takes part in it (the servers' socket threads, workers and self-checks too)
-    uc_log::detail::VirtualTime const virtualTime;
-    auto const                        errf = [](std::string_view msg) {
+    uc_log::printer::VirtualTime const virtualTime;
+    auto const                         errf = [](std::string_view msg) {
         if(!quiet) { std::printf("   [err] %.*s\n", static_cast<int>(msg.size()), msg.data()); }
     };
     auto const loopback = boost::asio::ip::make_address("127.0.0.1");
@@ -857,10 +886,5 @@ int main() {
     testStuckSocketThread(loopback, dir / "stuck_socket.sock");
     std::filesystem::remove_all(dir);
 
-    if(failures.load() == 0) {
-        std::printf("ALL OK\n");
-        return 0;
-    }
-    std::printf("%d FAILURES\n", failures.load());
-    return 1;
+    return uc_log::test::report();
 }

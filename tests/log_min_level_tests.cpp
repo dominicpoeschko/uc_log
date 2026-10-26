@@ -7,6 +7,7 @@
 //    init, write..., finalize.
 //  * The backend's RecordGuard is held by Log::log around the whole record: constructed
 //    before initTransfer, destroyed after finalizeTransfer.
+#include "support/Check.hpp"
 #include "uc_log/detail/LevelBoundBackend.hpp"
 #include "uc_log/uc_log.hpp"
 
@@ -21,16 +22,6 @@ static_assert(uc_log::minLevel == uc_log::LogLevel::warn,
               "target must set UC_LOG_MIN_LEVEL=warn");
 
 namespace {
-
-int failures = 0;
-
-#define CHECK(cond, msg)                                        \
-    do {                                                        \
-        if(!(cond)) {                                           \
-            std::printf("FAIL: %s (line %d)\n", msg, __LINE__); \
-            ++failures;                                         \
-        }                                                       \
-    } while(0)
 
 // Leaked on purpose: avoids global-constructor / exit-time-destructor warnings.
 std::vector<std::string>& events() {
@@ -47,9 +38,9 @@ namespace uc_log {
 template<>
 struct ComBackend<Tag::User> {
     struct RecordGuard {
-        RecordGuard() { events().push_back("guard-begin"); }
+        RecordGuard() { events().emplace_back("guard-begin"); }
 
-        ~RecordGuard() { events().push_back("guard-end"); }
+        ~RecordGuard() { events().emplace_back("guard-end"); }
 
         RecordGuard(RecordGuard const&)            = delete;
         RecordGuard& operator=(RecordGuard const&) = delete;
@@ -81,15 +72,15 @@ namespace {
 
 // Direct LevelBoundBackend probes for the fallback shapes the macro backend above does not cover.
 struct PlainHooks {
-    static void write(std::span<std::byte const>) { events().push_back("plain-write"); }
+    static void write(std::span<std::byte const>) { events().emplace_back("plain-write"); }
 
-    static void initTransfer() { events().push_back("plain-init"); }
+    static void initTransfer() { events().emplace_back("plain-init"); }
 
-    static void finalizeTransfer() { events().push_back("plain-fini"); }
+    static void finalizeTransfer() { events().emplace_back("plain-fini"); }
 };
 
 struct NoHooks {
-    static void write(std::span<std::byte const>) { events().push_back("nohooks-write"); }
+    static void write(std::span<std::byte const>) { events().emplace_back("nohooks-write"); }
 };
 
 bool wroteSomething() {
@@ -149,10 +140,5 @@ int main() {
     None::finalizeTransfer();
     CHECK(events() == std::vector<std::string>{"nohooks-write"}, "missing hooks are no-ops");
 
-    if(failures != 0) {
-        std::printf("%d checks failed\n", failures);
-        return 1;
-    }
-    std::printf("all checks passed\n");
-    return 0;
+    return uc_log::test::report();
 }

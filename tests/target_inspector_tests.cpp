@@ -1,10 +1,14 @@
 // The TUI's target inspectors: map symbols (lld and GNU ld), the record decoders, and the worker
 // against a fake target - what kvasir_bench.py crash/ub/stack/trace/peek/profile/panic read.
-#include "uc_log/detail/Clock.hpp"
-#include "uc_log/detail/MapSymbols.hpp"
-#include "uc_log/detail/TargetInspector.hpp"
-#include "uc_log/detail/TargetOp.hpp"
-#include "uc_log/detail/TargetRecords.hpp"
+#include "support/Check.hpp"
+#include "support/FakeTargetPort.hpp"
+#include "uc_log/printer/Clock.hpp"
+#include "uc_log/printer/HaltCapture.hpp"
+#include "uc_log/printer/MapFacts.hpp"
+#include "uc_log/printer/MapSymbols.hpp"
+#include "uc_log/printer/TargetInspector.hpp"
+#include "uc_log/printer/TargetOp.hpp"
+#include "uc_log/printer/TargetRecords.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -12,25 +16,16 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <unistd.h>
 
-static int failures = 0;
-
-#define CHECK(cond, msg)                                        \
-    do {                                                        \
-        if(!(cond)) {                                           \
-            std::printf("FAIL: %s (line %d)\n", msg, __LINE__); \
-            ++failures;                                         \
-        }                                                       \
-    } while(0)
-
-using namespace uc_log::detail;
+using namespace uc_log::printer;
 
 // the shape of a real lld map
-static constexpr char const* LldMap
+static constexpr char const* lldMap
   = "     VMA      LMA     Size Align Out     In      Symbol\n"
     "10000000 10000000     1a18     4 .text\n"
     "100001c4 100001c4       24     4         "
@@ -40,6 +35,7 @@ static constexpr char const* LldMap
     "100001e8 100001e8      424     4         x.lto.o:(.text.ResetISR)\n"
     "100001e9 100001e9      424     1                 ResetISR\n"
     "10000149 10000149       12     1                 Kvasir::Panic::raise(Kvasir::Panic::Cause)\n"
+    "1000a878 1000a878        c     4                 Kvasir::Trace::Ring<X, 4u, Y>::descriptor\n"
     "1000a884 1000a884       17     1                 Kvasir::Trace::Ring<X, 4u, Y>::layout\n"
     "20000000 20000000     1020     4 .stack\n"
     "20000000 20000000        0     1         _LINKER_INTERN_stack_start_ = .\n"
@@ -51,16 +47,18 @@ static constexpr char const* LldMap
     "20000100 20000100      100     4 .bss\n"
     "20000100 20000100        8     1                 Kvasir::Ubsan::ubsanReports\n"
     "20000108 20000108        4     1                 counter\n"
-    "2000010c 2000010c       30     1                 Kvasir::Trace::Ring<X, 4u, Y>::storage\n"
-    "200012bc 200012bc     8044     4 .noInit\n"
-    "200012bc 200012bc       14     1                 Kvasir::Panic::lastPanic\n"
-    "200012d4 200012d4       2c     1                 Kvasir::Fault::lastFault\n"
+    "2000010c 2000010c       24     1                 Kvasir::Trace::Ring<X, 4u, Y>::storage\n"
+    "200012b4 200012b4     804c     4 .noInit\n"
+    "200012b4 200012b4       28     1                 Kvasir::Panic::lastPanic\n"
+    "200012e0 200012e0       90     1                 Kvasir::Fault::lastFault\n"
     "20009300 20009300        0     1 _LINKER_stack_start_ = _LINKER_INTERN_stack_start_\n"
     "20009300 20009300        0     1 _LINKER_stack_end_ = _LINKER_INTERN_stack_end_\n"
     "20009300 20009300        0     1 _LINKER_stack1_start_ = c ? a : b\n";
 
-static void mapTests() {
-    std::istringstream in{LldMap};
+namespace {
+
+void mapTests() {
+    std::istringstream in{lldMap};
     auto const         m = MapSymbols::parse(in);
     CHECK(m.fromLld(), "lld map recognised");
     CHECK(m.find("$t") == nullptr, "mapping symbols left out");
@@ -68,7 +66,7 @@ static void mapTests() {
     CHECK(reset && reset->code && reset->start() == 0x100001e8U && reset->size == 0x424,
           "ResetISR");
     auto const* fault = m.find("Kvasir::Fault::lastFault");
-    CHECK(fault && !fault->code && fault->address == 0x200012d4U && fault->size == 0x2c,
+    CHECK(fault && !fault->code && fault->address == 0x200012e0U && fault->size == 0x90,
           "lastFault: address and size");
     CHECK(m.value("_LINKER_stack_start_") == 0x20000000U, "stack start through the alias");
     CHECK(m.value("_LINKER_stack_end_") == 0x20000040U, "stack end: `= .` gives the VMA");
@@ -97,7 +95,7 @@ static void mapTests() {
     CHECK(g.describe(0x10000110U) == "main+0x10", "GNU ld: describe");
 }
 
-static std::vector<std::byte> words(std::initializer_list<std::uint32_t> ws) {
+std::vector<std::byte> words(std::initializer_list<std::uint32_t> ws) {
     std::vector<std::byte> out;
     for(auto w : ws) {
         for(int i = 0; i != 4; ++i) {
@@ -107,40 +105,111 @@ static std::vector<std::byte> words(std::initializer_list<std::uint32_t> ws) {
     return out;
 }
 
-static void recordTests() {
+// A Kvasir::Persistent record as the firmware stores it: id, the value, zlib's crc32.
+std::vector<std::byte> persistent(std::uint32_t                     id,
+                                  std::vector<std::uint32_t> const& value) {
+    std::vector<std::byte> out;
+    auto const             put = [&](std::uint32_t w) {
+        for(int i = 0; i != 4; ++i) {
+            out.push_back(static_cast<std::byte>((w >> (8 * i)) & 0xFF));
+        }
+    };
+    put(id);
+    for(auto w : value) { put(w); }
+    put(crc32(out));
+    return out;
+}
+
+// Fault::FullRecord's 33 words with the frame, EXC_RETURN, flags and CFSR given, the rest 0
+std::vector<std::uint32_t> fullFault(std::uint32_t count,
+                                     std::uint32_t flags,
+                                     std::uint32_t pc,
+                                     std::uint32_t lr,
+                                     std::uint32_t xpsr,
+                                     std::uint32_t excReturn,
+                                     std::uint32_t cfsr) {
+    std::vector<std::uint32_t> w(33, 0U);
+    w[0]  = count;
+    w[1]  = flags;
+    w[2]  = 1;   // r0..r3, r12
+    w[3]  = 2;
+    w[4]  = 3;
+    w[5]  = 4;
+    w[6]  = 12;
+    w[7]  = lr;
+    w[8]  = pc;
+    w[9]  = xpsr;
+    w[18] = excReturn;
+    w[22] = 0x2000'0ff0U;   // sp
+    w[23] = cfsr;
+    return w;
+}
+
+void recordTests() {
     using namespace records;
-    auto const f
-      = decodeFault(words({FaultMagic, 2, 0x1001, 0x2001, 0x3, 0xFFFFFFF9, 1, 2, 3, 4, 12}));
-    CHECK(f && f->count == 2 && f->pc == 0x1001 && f->r[3] == 4 && f->r12 == 12
-            && f->exception() == 3,
+    auto const raw = persistent(
+      faultId,
+      fullFault(2, Fault::frameValid | 1U << 8U, 0x1001, 0x2001, 0x3, 0xFFFFFFF9, 1U << 25U));
+    auto const f = decodeFault(raw);
+    CHECK(f && f->count == 2 && f->pc == 0x1001 && f->lr == 0x2001 && f->r[3] == 4 && f->r12 == 12
+            && f->exception() == 3 && f->core() == 1 && f->hasFrame() && f->excReturn == 0xFFFFFFF9U
+            && f->sp == 0x2000'0ff0U && cfsrText(f->cfsr) == "DIVBYZERO",
           "fault record");
-    CHECK(!decodeFault(words({0, 2, 0x1001, 0x2001, 0x3, 0, 1, 2, 3, 4, 12})), "no magic: none");
-    auto const p = decodePanic(words({PanicMagic, 1, 5, 0x10000101, 21}));
-    CHECK(p && p->causeName() == "unhandled interrupt" && p->detail == 21U
-            && p->site() == 0x100000FEU,
-          "panic record, 20 bytes");
-    auto const p16 = decodePanic(words({PanicMagic, 1, 0, 0}));
-    CHECK(p16 && !p16->detail && !p16->site() && p16->causeName() == "assertion",
-          "panic record, 16 bytes, no site");
-    CHECK(decodePanic(words({PanicMagic, 1, 42, 0}))->causeName() == "cause 42", "unknown cause");
+    CHECK(raw.size() == faultSize && faultSize == 140U, "fault record: 35 words");
+    bool everyFlipRejected = true;
+    for(std::size_t bit = 0; bit != 8 * raw.size(); ++bit) {
+        auto flipped = raw;
+        flipped[bit / 8] ^= static_cast<std::byte>(1U << (bit % 8));
+        if(decodeFault(flipped)) { everyFlipRejected = false; }
+    }
+    CHECK(everyFlipRejected, "fault record: every flipped bit rejected (id, value, CRC)");
+    CHECK(!decodeFault(persistent(panicId, fullFault(1, 0, 0, 0, 0, 0, 0))), "another id: none");
+    CHECK(!decodeFault(std::span{raw}.first(raw.size() - 4)), "cut short: none");
+    auto const noFrame = decodeFault(persistent(faultId, fullFault(1, 0, 0, 0, 0, 0, 1U << 4U)));
+    CHECK(noFrame && !noFrame->hasFrame() && cfsrText(noFrame->cfsr) == "MSTKERR"
+            && cfsrText(0) == "-",
+          "fault record without a frame");
+    auto const p
+      = decodePanic(persistent(panicId, {1, 5, 0x10000101, 21, 1, 0x20000ff0, 0x80000007, 2}));
+    CHECK(p && p->causeName() == "unhandled interrupt" && p->detail == 21U && p->core == 1
+            && p->sp == 0x20000ff0U && p->site() == 0x100000FEU && p->timeUs() == 0x2'8000'0007ULL,
+          "panic record");
+    auto const p0 = decodePanic(persistent(panicId, {1, 0, 0, 0, 0, 0, 0, 0}));
+    CHECK(p0 && p0->detail == 0 && !p0->site() && p0->causeName() == "assertion",
+          "panic record, no site");
+    CHECK(uc_log::test::need(decodePanic(persistent(panicId, {1, 42, 0, 0, 0, 0, 0, 0})),
+                             "a panic record")
+              .causeName()
+            == "cause 42",
+          "unknown cause");
+    auto badPanic = persistent(panicId, {1, 5, 0x10000101, 21, 0, 0, 0, 0});
+    badPanic[12] ^= std::byte{1};
+    CHECK(!decodePanic(badPanic), "panic record with a bad CRC: none");
     CHECK(exceptionName(3) == "HardFault" && exceptionName(16 + 5) == "IRQ 5", "exception names");
 
-    auto const s = stackUse(words({0x55AA55AA, StackPattern, StackPattern, 7, 8}));
+    auto const s = stackUse(words({0x55AA55AA, stackPattern, stackPattern, 7, 8}));
     CHECK(s && s->size == 20 && s->never == 8 && s->used == 8, "stack: sentinel, 2 free, 2 used");
     CHECK(!stackUse(words({1, 2, 3})), "stack not painted");
 
-    auto storage
-      = words({TraceMagic, (4U << 16) | 2U, 6, 0x1000a884, 10, 11, 20, 21, 30, 31, 40, 41});
-    auto const h = decodeRingHeader(storage);
-    CHECK(h && h->fields == 2 && h->capacity == 4 && h->count == 6 && h->storageSize() == 48,
-          "ring header");
+    // today's ring: the descriptor (magic, fields | capacity << 16, layout address) and the storage (count, records)
+    auto const descriptor = words({traceMagic, (4U << 16) | 2U, 0x1000a884});
+    auto       storage    = words({6, 10, 11, 20, 21, 30, 31, 40, 41});
+    auto const h          = decodeRing(descriptor, storage);
+    CHECK(h && h->fields == 2 && h->capacity == 4 && h->count == 6 && h->layout == 0x1000a884U
+            && h->storageSize() == 36,
+          "ring: descriptor + storage");
     // count 6, capacity 4: records 2..5 kept, in slots 2,3,0,1
-    auto rows = decodeRingRows(storage, *h, 6);
+    auto rows = decodeRingRows(storage, uc_log::test::need(h, "the ring"), 6);
     CHECK(rows.size() == 4 && rows.front().index == 2 && rows.front().values[0] == 30
             && rows.back().index == 5 && rows.back().values[1] == 21,
           "ring rows oldest first");
-    rows = decodeRingRows(storage, *h, 8);
+    rows = decodeRingRows(storage, uc_log::test::need(h, "the ring"), 8);
     CHECK(rows.size() == 2 && rows.front().index == 4, "rows overwritten while reading dropped");
+    CHECK(!decodeRing(words({0, (4U << 16) | 2U, 0x1000a884}), storage),
+          "descriptor without magic: none");
+    CHECK(!decodeRing(descriptor, words({6, 10, 11})), "storage shorter than the records: none");
+    CHECK(!decodeRing(words({traceMagic, 4U << 16, 0x1000a884}), storage), "no fields: none");
+    CHECK(!decodeRing({}, storage), "storage without its descriptor: none");
     auto const layout = decodeRingLayout(std::as_bytes(std::span{"button:us,level\0junk"}));
     CHECK(layout.name == "button" && layout.fields.size() == 2 && layout.fields[1] == "level",
           "ring layout");
@@ -158,7 +227,7 @@ struct FakeTarget {
 
     void put(std::uint32_t              address,
              std::span<std::byte const> data) {
-        std::lock_guard<std::mutex> const lock{mutex};
+        std::scoped_lock<std::mutex> const lock{mutex};
         for(auto b : data) { bytes[address++] = b; }
     }
 
@@ -171,7 +240,7 @@ struct FakeTarget {
     }
 
     std::uint32_t read(std::uint32_t address) {
-        std::lock_guard<std::mutex> const lock{mutex};
+        std::scoped_lock<std::mutex> const lock{mutex};
         return word(address);
     }
 
@@ -182,30 +251,43 @@ struct FakeTarget {
         }
     }
 
-    InspectorResult access(std::span<InspectorAccess const> accesses) {
-        std::lock_guard<std::mutex> const lock{mutex};
+    // what the reader's queue does with the inspector's batches: memory ops while the core runs, core ops
+    uc_log::printer::TargetPort::Result access(std::span<TargetOp const> ops) {
+        namespace to = uc_log::printer::target_op;
+        if(!ops.empty() && !std::holds_alternative<to::Read>(ops.front())
+           && !std::holds_alternative<to::WriteWord>(ops.front()))
+        {
+            return core(ops);
+        }
+        std::scoped_lock<std::mutex> const lock{mutex};
         ++calls;
         std::vector<std::vector<std::byte>> out;
-        for(auto const& a : accesses) {
-            if(a.write) {
-                if(a.address == 0xE000EDF0U) {
+        for(auto const& op : ops) {
+            auto const* w = std::get_if<to::WriteWord>(&op);
+            auto const* r = std::get_if<to::Read>(&op);
+            if(w == nullptr && r == nullptr) {
+                return std::unexpected{std::string{"a core op in a memory batch"}};
+            }
+            auto const address = w != nullptr ? w->address : r->address;
+            if(w != nullptr) {
+                if(address == 0xE000EDF0U) {
                     return std::unexpected{std::string{"DHCSR is the probe's"}};
                 }
-                if((a.address >> 28) == 2U) { ++ramWrites; }
-                setWord(a.address, *a.write);
+                if((address >> 28) == 2U) { ++ramWrites; }
+                setWord(address, w->value);
             }
-            if(a.address == 0xE000101CU) { setWord(a.address, halted ? 0xFFFFFFFFU : pcsr); }
+            if(address == 0xE000101CU) { setWord(address, halted ? 0xFFFFFFFFU : pcsr); }
             std::vector<std::byte> d;
-            auto const             n = a.write ? 4U : a.size;
-            for(std::uint32_t i = 0; i != n; ++i) { d.push_back(bytes[a.address + i]); }
+            auto const             n = w != nullptr ? 4U : r->size;
+            for(std::uint32_t i = 0; i != n; ++i) { d.push_back(bytes[address + i]); }
             out.push_back(std::move(d));
         }
         return out;
     }
 
-    InspectorResult core(std::span<TargetOp const> ops) {
-        namespace to = uc_log::detail::target_op;
-        std::lock_guard<std::mutex> const   lock{mutex};
+    uc_log::printer::TargetPort::Result core(std::span<TargetOp const> ops) {
+        namespace to = uc_log::printer::target_op;
+        std::scoped_lock<std::mutex> const  lock{mutex};
         std::vector<std::vector<std::byte>> out;
         for(auto const& op : ops) {
             std::vector<std::byte> d;
@@ -215,10 +297,8 @@ struct FakeTarget {
             } else if(!halted) {
                 return std::unexpected{std::string{"the core runs: halt it first"}};
             } else if(std::holds_alternative<to::ReadRegisters>(op)) {
-                for(std::uint32_t r = 0; r != 19; ++r) {
-                    for(std::uint32_t i = 0; i != 4; ++i) {
-                        d.push_back(static_cast<std::byte>(regs[r] >> (8 * i)));
-                    }
+                for(std::uint32_t r = 0; r != uc_log::printer::cortex_m::coreRegisterCount; ++r) {
+                    uc_log::printer::appendLe32(d, regs[r]);
                 }
             } else if(auto const* w = std::get_if<to::WriteRegister>(&op)) {
                 regs[w->index] = w->value;
@@ -232,15 +312,15 @@ struct FakeTarget {
 };
 
 template<typename F>
-static bool eventually(F&& f) {
+bool eventually(F&& f) {
     for(int i = 0; i != 300; ++i) {
         if(f()) { return true; }
-        uc_log::detail::Clock::sleep_for(std::chrono::milliseconds{10});
+        uc_log::printer::Clock::sleep_for(std::chrono::milliseconds{10});
     }
     return false;
 }
 
-static void symbolMatchTests() {
+void symbolMatchTests() {
     CHECK(symbolLeaf("Kvasir::Fault::lastFault") == "lastFault", "leaf: after the last ::");
     CHECK(symbolLeaf("counter") == "counter", "leaf: a name without scope");
     CHECK(symbolLeaf("f(A::B)::count") == "count", "leaf: a function's static");
@@ -274,40 +354,48 @@ static void symbolMatchTests() {
           "literals: the terms in lower case");
 }
 
-static void inspectorTests() {
+void inspectorTests() {
     auto const dir
       = std::filesystem::temp_directory_path() / ("uc_log_inspector_" + std::to_string(::getpid()));
     std::filesystem::create_directories(dir);
     auto const mapPath = (dir / "fw.map").string();
-    { std::ofstream{mapPath} << LldMap; }
-    FakeTarget target;
+    { std::ofstream{mapPath} << lldMap; }
+    uc_log::printer::MapFacts mapFacts{mapPath};
+    FakeTarget                target;
+    // a probe round trip: the profile samples back to back, and the virtual time moves only while the threads wait
+    uc_log::test::FakeTargetPort port{[&](std::span<TargetOp const> ops) {
+        uc_log::printer::Clock::sleep_for(std::chrono::milliseconds{1});
+        return target.access(ops);
+    }};
     using namespace records;
     target.put(0x20000100U, words({3, 0x100001e9U + 0x20}));   // ubsanReports
     target.put(
-      0x200012d4U,
-      words({FaultMagic, 1, 0x100001c5U + 4, 0x100001e9U, 0x21000003, 0xFFFFFFF9, 0, 0, 0, 0, 0}));
-    target.put(0x200012bcU, words({PanicMagic, 1, 0, 0x100001e9U + 6, 0}));
+      0x200012e0U,
+      persistent(
+        faultId,
+        fullFault(1, Fault::frameValid, 0x100001c5U + 4, 0x100001e9U, 0x21000003, 0xFFFFFFF9, 0)));
+    target.put(0x200012b4U, persistent(panicId, {1, 0, 0x100001e9U + 6, 0, 0, 0, 0, 0}));
     // the stack: 0x20000000..0x20000040, sentinel + 9 painted + 6 used
     target.put(0x20000000U,
                words({0x55AA55AA,
-                      StackPattern,
-                      StackPattern,
-                      StackPattern,
-                      StackPattern,
-                      StackPattern,
-                      StackPattern,
-                      StackPattern,
-                      StackPattern,
-                      StackPattern,
+                      stackPattern,
+                      stackPattern,
+                      stackPattern,
+                      stackPattern,
+                      stackPattern,
+                      stackPattern,
+                      stackPattern,
+                      stackPattern,
+                      stackPattern,
                       1,
                       2,
                       3,
                       4,
                       5,
                       6}));
-    // the ring: 2 fields, capacity 4, 3 records, layout in flash
-    target.put(0x2000010cU,
-               words({TraceMagic, (4U << 16) | 2U, 3, 0x1000a884U, 100, 1, 110, 0, 125, 1, 0, 0}));
+    // the ring: its descriptor (2 fields, capacity 4, the layout in flash) and the storage (3 records)
+    target.put(0x1000a878U, words({traceMagic, (4U << 16) | 2U, 0x1000a884U}));
+    target.put(0x2000010cU, words({3, 100, 1, 110, 0, 125, 1, 0, 0}));
     target.put(0x1000a884U, std::as_bytes(std::span{"button:us,level"}));
     target.put(0x20000108U, words({41}));   // counter
 
@@ -315,22 +403,14 @@ static void inspectorTests() {
     std::mutex               notesMutex;
     std::vector<std::string> notes;
     TargetInspector          inspector{
-      TargetInspector::Hooks{.memory =
-                               [&](std::span<InspectorAccess const> a, std::chrono::milliseconds) {
-                                   // a probe round trip: the profile samples back to back, and the virtual
-                                   // time moves only while the threads wait
-                                   uc_log::detail::Clock::sleep_for(std::chrono::milliseconds{1});
-                                   return target.access(a);
-                               }, .connected = [] { return true; },
-                             .sessions  = [] { return std::uint64_t{1}; },
-                             .mapFile   = [&] { return mapPath; },
-                             .changed   = [&] { ++changes; },
+      TargetInspector::Hooks{.target  = &port,
+                             .map     = [&] { return mapFacts.get()->map; },
+                             .changed = [&] { ++changes; },
                              .note =
                                [&](std::string_view line) {
-                                   std::lock_guard<std::mutex> const lock{notesMutex};
+                                   std::scoped_lock<std::mutex> const lock{notesMutex};
                                    notes.emplace_back(line);
-                               }, .core = [&](std::span<TargetOp const> ops,
-                             std::chrono::milliseconds) { return target.core(ops); }}
+                               }}
     };
 
     CHECK(eventually([&] {
@@ -340,13 +420,18 @@ static void inspectorTests() {
           "ub, records and stack read at start");
     auto s = inspector.snapshot();
     CHECK(s.mapError.empty() && s.lldMap, "map read");
-    CHECK(s.ubsan->count == 3 && s.ubsanWhere == "ResetISR+0x20", "ub count and where");
-    CHECK(s.fault->count == 1 && s.faultPc == "Kvasir::Nvic::DefaultIsrs::onIsr()+0x4"
-            && s.faultLr == "ResetISR",
+    CHECK(uc_log::test::need(s.ubsan, "the ub record").count == 3
+            && s.ubsanWhere == "ResetISR+0x20",
+          "ub count and where");
+    CHECK(uc_log::test::need(s.fault, "the fault record").count == 1
+            && s.faultPc == "Kvasir::Nvic::DefaultIsrs::onIsr()+0x4" && s.faultLr == "ResetISR",
           "fault record symbolised");
-    CHECK(s.panic->causeName() == "assertion" && s.panicSite == "ResetISR+0x4", "panic site");
-    CHECK(s.stacks.size() == 1 && s.stacks[0].use->size == 64 && s.stacks[0].use->used == 24
-            && s.stacks[0].use->never == 36,
+    CHECK(uc_log::test::need(s.panic, "the panic record").causeName() == "assertion"
+            && s.panicSite == "ResetISR+0x4",
+          "panic site");
+    CHECK(s.stacks.size() == 1 && uc_log::test::need(s.stacks[0].use, "the stack use").size == 64
+            && uc_log::test::need(s.stacks[0].use, "the stack use").used == 24
+            && uc_log::test::need(s.stacks[0].use, "the stack use").never == 36,
           "stack use (core 1's empty stack left out)");
     CHECK(s.rings.size() == 1 && s.rings[0].rows.empty(), "rings not read off their page");
 
@@ -374,9 +459,9 @@ static void inspectorTests() {
           "completions: every term has to match, in any order");
     CHECK(names("fault") == Names{"Kvasir::Fault::lastFault"},
           "completions: a word of the last component, without case");
-    CHECK(names("kvasir").size() == 5 && names("kvasir").front() == "Kvasir::Fault::lastFault",
+    CHECK(names("kvasir").size() == 6 && names("kvasir").front() == "Kvasir::Fault::lastFault",
           "completions: all data symbols of a namespace, the shortest name first");
-    CHECK(names("kvasir", 2).size() == 2 && inspector.completions("kvasir", 2).total == 5,
+    CHECK(names("kvasir", 2).size() == 2 && inspector.completions("kvasir", 2).total == 6,
           "completions: cut to the best, the total still told");
     CHECK(names("st").front() == "Kvasir::Trace::Ring<X, 4u, Y>::storage",
           "completions: the name that starts with the text before those that hold it");
@@ -433,24 +518,50 @@ static void inspectorTests() {
           "panic registers written, core resumed");
     CHECK(target.regs[14] == 0x1000'01f3U, "LR = a call from the halted PC: the record's site");
 
-    // a halt message
-    inspector.noteHalt(
-      "core halted: pc=0x100001f0 lr=0x100001c9 sp=0x20000030 xpsr=0x21000003 "
-      "msp=0x20000030 psp=0x00000000 exception=3 stack: 00000001 100001ed ????????");
+    // a captured halt (an Armv6-M core: no fault registers), its text the message scripts read
+    uc_log::printer::HaltCapture const halt{
+      .pc    = 0x1000'01f0U,
+      .lr    = 0x1000'01c9U,
+      .sp    = 0x2000'0030U,
+      .xpsr  = 0x2100'0003U,
+      .msp   = 0x2000'0030U,
+      .psp   = 0,
+      .stack = {0x1U, 0x1000'01edU, std::nullopt}
+    };
+    CHECK(halt.text()
+            == "core halted: pc=0x100001f0 lr=0x100001c9 sp=0x20000030 xpsr=0x21000003 "
+               "msp=0x20000030 psp=0x00000000 exception=3 stack: 00000001 100001ed ????????",
+          "the halt's text, byte for byte the reader's message");
+    inspector.noteHalt(halt);
     s = inspector.snapshot();
-    CHECK(s.halt && s.halt->exception == 3 && s.halt->pcWhere == "ResetISR+0x8"
+    CHECK(s.halt && s.halt->capture.exception() == 3 && s.halt->pcWhere == "ResetISR+0x8"
             && s.halt->codeWords.size() == 1 && s.halt->codeWords[0].offset == 4,
-          "halt parsed and symbolised");
+          "halt noted and symbolised");
+    // a mainline core's fault registers: in the text (an unreadable one as ????????) and the readable ones by name
+    auto mainline  = halt;
+    mainline.fault = uc_log::printer::HaltCapture::FaultRegisters{.cfsr  = 0x0000'0100U,
+                                                                  .hfsr  = 0x4000'0000U,
+                                                                  .mmfar = std::nullopt,
+                                                                  .bfar  = 0xE000'ED38U};
+    CHECK(mainline.text()
+            == "core halted: pc=0x100001f0 lr=0x100001c9 sp=0x20000030 xpsr=0x21000003 "
+               "msp=0x20000030 psp=0x00000000 exception=3 cfsr=0x00000100 hfsr=0x40000000 "
+               "mmfar=???????? bfar=0xe000ed38 stack: 00000001 100001ed ????????",
+          "the fault registers' text");
+    auto const named = mainline.registers();
+    CHECK(named.size() == 9 && named[6].first == "cfsr" && named[7].first == "hfsr"
+            && named[8].first == "bfar" && named[8].second == 0xE000'ED38U,
+          "the readable registers by name, in the text's order");
 
-    // clear: refused while the core is halted; then the two magics go and nothing else, what the
+    // clear: refused while the core is halted; then the two id words go and nothing else, what the
     // records held is said, the halt's capture is forgotten
     auto const cleared = [&](std::string_view outcome) {
         return eventually([&] { return inspector.snapshot().recordsCleared.starts_with(outcome); });
     };
     inspector.clearRecords(true);
     CHECK(cleared("not cleared: halted"), "a halted core's records are not cleared");
-    uc_log::detail::Clock::sleep_for(std::chrono::milliseconds{250});
-    CHECK(target.read(0x200012d4U) == FaultMagic && target.read(0x200012bcU) == PanicMagic
+    uc_log::printer::Clock::sleep_for(std::chrono::milliseconds{250});
+    CHECK(target.read(0x200012e0U) == faultId && target.read(0x200012b4U) == panicId
             && target.ramWrites == 0 && inspector.snapshot().halt.has_value(),
           "refused: nothing written, the halt's capture kept");
     inspector.clearRecords(false);
@@ -460,28 +571,29 @@ static void inspectorTests() {
               return !c.fault && !c.panic;
           }),
           "the snapshot has no record after the clear");
-    CHECK(target.read(0x200012d4U) == 0 && target.read(0x200012bcU) == 0, "both magics are 0");
-    CHECK(target.read(0x200012d8U) == 1 && target.read(0x200012dcU) == 0x100001c5U + 4
-            && target.read(0x200012c8U) == 0x100001e9U + 6 && target.ramWrites == 2,
-          "only the two magic words were written");
+    CHECK(target.read(0x200012e0U) == 0 && target.read(0x200012b4U) == 0, "both id words are 0");
+    // the value words behind the ids: the fault's count (word 1) and pc (word 9), the panic's pc (word 3)
+    CHECK(target.read(0x200012e4U) == 1 && target.read(0x20001304U) == 0x100001c5U + 4
+            && target.read(0x200012c0U) == 0x100001e9U + 6 && target.ramWrites == 2,
+          "only the two id words were written");
     CHECK(!inspector.snapshot().halt, "the halt's capture is forgotten with the records");
     {
-        std::lock_guard<std::mutex> const lock{notesMutex};
+        std::scoped_lock<std::mutex> const lock{notesMutex};
         CHECK(notes.size() == 2
                 && notes[0].starts_with("fault record cleared from the TUI: 1 fault(s), the "
-                                        "first in HardFault, pc=0x100001c9 "
+                                        "first in HardFault on core 0, pc=0x100001c9 "
                                         "Kvasir::Nvic::DefaultIsrs::onIsr()+0x4 lr=0x100001e9 "
                                         "ResetISR")
                 && notes[1].starts_with("panic record cleared from the TUI: 1 panic(s), the "
                                         "first: assertion, site=0x100001ec ResetISR+0x4"),
               notes.empty() ? "no note" : (notes[0] + " / " + notes.back()).c_str());
     }
-    // a word without the magic is not a record (the map of another image): left alone
-    target.put(0x200012d4U, words({0x12345678U}));
-    target.put(0x200012bcU, words({PanicMagic, 3, 1, 0, 0}));
+    // a word that is no record's id is not a record (the map of another image): left alone
+    target.put(0x200012e0U, words({0x12345678U}));
+    target.put(0x200012b4U, persistent(panicId, {3, 1, 0, 0, 0, 0, 0, 0}));
     inspector.clearRecords(false);
     CHECK(cleared("1 record(s) cleared"), "the panic record alone cleared");
-    CHECK(target.read(0x200012d4U) == 0x12345678U && target.read(0x200012bcU) == 0
+    CHECK(target.read(0x200012e0U) == 0x12345678U && target.read(0x200012b4U) == 0
             && target.ramWrites == 3,
           "a word that is no record is not written");
     inspector.clearRecords(false);
@@ -490,12 +602,13 @@ static void inspectorTests() {
 
     // a rebuilt image: the map moves the counter
     {
-        std::string text{LldMap};
+        std::string text{lldMap};
         text.replace(text.find("20000108 20000108"), 17, "20000104 20000104");
-        uc_log::detail::Clock::sleep_for(std::chrono::milliseconds{20});
+        uc_log::printer::Clock::sleep_for(std::chrono::milliseconds{20});
         std::ofstream{mapPath} << text;
+        // a second after the rewrite's own time stamp (not the real clock's now): differs from the first map's
         std::filesystem::last_write_time(mapPath,
-                                         std::filesystem::file_time_type::clock::now()
+                                         std::filesystem::last_write_time(mapPath)
                                            + std::chrono::seconds{1});
     }
     CHECK(eventually([&] { return inspector.snapshot().watches[0].address == 0x20000104U; }),
@@ -503,13 +616,78 @@ static void inspectorTests() {
     std::filesystem::remove_all(dir);
 }
 
-int main() {
+// The ring on the trace page: the constant `descriptor` found next to `storage` by name, the count re-read at the
+// storage's start, the records wrapped around the capacity.
+void ringDescriptorTests() {
+    static constexpr char const* map
+      = "     VMA      LMA     Size Align Out     In      Symbol\n"
+        "10000000 10000000     1a18     4 .text\n"
+        "100001e8 100001e8      424     4         x.lto.o:(.text.ResetISR)\n"
+        "100001e9 100001e9      424     1                 ResetISR\n"
+        "10002000 10002000      100     4 .rodata\n"
+        "10002000 10002000        c     4                 Kvasir::Trace::Ring<X, 4u, "
+        "Y>::descriptor\n"
+        "1000a884 1000a884       10     1                 Kvasir::Trace::Ring<X, 4u, Y>::layout\n"
+        "20000100 20000100      100     4 .bss\n"
+        "2000010c 2000010c       24     4                 Kvasir::Trace::Ring<X, 4u, Y>::storage\n";
+    auto const dir = std::filesystem::temp_directory_path()
+                   / ("uc_log_inspector_ring_" + std::to_string(::getpid()));
+    std::filesystem::create_directories(dir);
+    auto const mapPath = (dir / "fw.map").string();
+    { std::ofstream{mapPath} << map; }
+    uc_log::printer::MapFacts mapFacts{mapPath};
+    FakeTarget                target;
+    // a probe round trip: the profile samples back to back, and the virtual time moves only while the threads wait
+    uc_log::test::FakeTargetPort port{[&](std::span<TargetOp const> ops) {
+        uc_log::printer::Clock::sleep_for(std::chrono::milliseconds{1});
+        return target.access(ops);
+    }};
+    using namespace records;
+    target.put(0x10002000U, words({traceMagic, (4U << 16) | 2U, 0x1000a884U}));
+    target.put(0x1000a884U, std::as_bytes(std::span{"edges:us,level"}));
+    // 6 records written, capacity 4: records 2..5 kept in slots 2,3,0,1; the word at +8 is 50, not the count
+    target.put(0x2000010cU, words({6, 40, 1, 50, 0, 20, 1, 30, 0}));
+
+    TargetInspector inspector{
+      TargetInspector::Hooks{.target  = &port,
+                             .map     = [&] { return mapFacts.get()->map; },
+                             .changed = [] {},
+                             .note    = [](std::string_view) {}}
+    };
+    CHECK(eventually([&] { return inspector.snapshot().rings.size() == 1; }),
+          "ring found by its storage");
+    inspector.setPage(TargetInspector::Page::trace);
+    CHECK(eventually([&] {
+              auto const s = inspector.snapshot();
+              return !s.rings.empty() && (!s.rings[0].rows.empty() || !s.rings[0].error.empty());
+          }),
+          "ring read");
+    auto const s = inspector.snapshot();
+    CHECK(s.rings[0].error.empty(), "descriptor layout: a valid header");
+    CHECK(s.rings[0].name == "edges" && s.rings[0].fields.size() == 2
+            && s.rings[0].fields[1] == "level" && s.rings[0].count == 6 && s.rings[0].capacity == 4,
+          "descriptor layout: name, fields, count, capacity");
+    CHECK(s.rings[0].writtenWhileReading == 0, "count re-read at the storage's start");
+    CHECK(s.rings[0].rows.size() == 4 && s.rings[0].rows[0].index == 2
+            && s.rings[0].rows[0].values[0] == 20 && s.rings[0].rows[3].index == 5
+            && s.rings[0].rows[3].values[0] == 50,
+          "descriptor layout: rows oldest first");
+    std::filesystem::remove_all(dir);
+}
+
+}   // namespace
+
+int main(int    argc,
+         char** argv) {
     // the inspector's polling on the virtual clock: no check depends on how fast the machine runs
-    uc_log::detail::VirtualTime const virtualTime;
-    mapTests();
-    recordTests();
-    symbolMatchTests();
-    inspectorTests();
-    if(failures == 0) { std::printf("all target inspector tests passed\n"); }
-    return failures == 0 ? 0 : 1;
+    uc_log::printer::VirtualTime const virtualTime;
+    return uc_log::test::run(argc,
+                             argv,
+                             {
+                               {           "mapTests",            mapTests},
+                               {        "recordTests",         recordTests},
+                               {   "symbolMatchTests",    symbolMatchTests},
+                               {     "inspectorTests",      inspectorTests},
+                               {"ringDescriptorTests", ringDescriptorTests},
+    });
 }

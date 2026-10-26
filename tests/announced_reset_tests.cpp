@@ -1,29 +1,24 @@
 // The announced-reset block: found in both linkers' maps, decoded, and when it asks for an ack.
-#include "uc_log/detail/AnnouncedReset.hpp"
+#include "support/Check.hpp"
+#include "uc_log/printer/AnnouncedReset.hpp"
+#include "uc_log/printer/MapSymbols.hpp"
 
 #include <array>
 #include <cstdio>
 #include <sstream>
 #include <string>
 
-static int failures = 0;
+using namespace uc_log::printer::announced_reset;
 
-#define CHECK(cond, msg)                                        \
-    do {                                                        \
-        if(!(cond)) {                                           \
-            std::printf("FAIL: %s (line %d)\n", msg, __LINE__); \
-            ++failures;                                         \
-        }                                                       \
-    } while(0)
+namespace {
 
-using namespace uc_log::detail::announced_reset;
-
-static std::expected<std::uint32_t,
-                     std::string>
-fromMap(std::string const& text) {
+// the block's address from a map (MapSymbols::addressOf, what MapFacts asks)
+std::optional<std::uint32_t> fromMap(std::string const& text) {
     std::istringstream in{text};
-    return addressFromMap(in);
+    return uc_log::printer::MapSymbols::parse(in).addressOf(symbol);
 }
+
+}   // namespace
 
 int main() {
     // lld: the input-section line and the symbol line both start with the address
@@ -56,18 +51,18 @@ int main() {
           "a longer name is not the block");
     CHECK(!fromMap("20000000 20000000 10 1 rttControlBlock\n"), "no block: the feature is off");
 
-    std::array<std::byte, BlockSize> raw{};
+    std::array<std::byte, blockSize> raw{};
     auto const                       put = [&](std::size_t word, std::uint32_t v) {
         for(std::size_t i = 0; i != 4; ++i) {
             raw[4 * word + i] = static_cast<std::byte>(v >> (8 * i));
         }
     };
-    put(0, Magic);
-    put(1, HostArmed);
+    put(0, magicValue);
+    put(1, hostArmed);
     put(2, 3);
     put(3, 2);
     auto const b = decode(raw);
-    CHECK(b.valid() && b.armed == HostArmed && b.request == 3 && b.ack == 2, "decoded");
+    CHECK(b.valid() && b.armed == hostArmed && b.request == 3 && b.ack == 2, "decoded");
     CHECK(b.pending(), "request != ack: the firmware waits");
     put(3, 3);
     CHECK(!decode(raw).pending(), "acked: nothing to do");
@@ -78,13 +73,8 @@ int main() {
     put(2, 5);
     CHECK(!decode(raw).pending(), "no magic: not the block");
     // the firmware's bytes: "ATSR", "HARM"
-    CHECK(Magic == 0x5253'5441U && HostArmed == 0x4D52'4148U,
-          "the numbers of Kvasir_SDK Util/AnnouncedReset.hpp");
+    CHECK(magicValue == 0x5253'5441U && hostArmed == 0x4D52'4148U,
+          "the numbers of Kvasir_SDK Runtime/AnnouncedReset.hpp");
 
-    if(failures == 0) {
-        std::printf("ALL OK\n");
-        return 0;
-    }
-    std::printf("%d FAILURES\n", failures);
-    return 1;
+    return uc_log::test::report();
 }

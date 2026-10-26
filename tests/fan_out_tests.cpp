@@ -4,12 +4,12 @@
 // with this binary's own catalog (the post-build step writes it).
 #include "remote_fmt/catalog_helpers.hpp"
 #include "remote_fmt/parser.hpp"
+#include "support/Check.hpp"
 #include "uc_log/AlwaysAttached.hpp"
 #include "uc_log/ChannelRouter.hpp"
-#include "uc_log/DefaultRttComBackend.hpp"
 #include "uc_log/FanOutBackend.hpp"
-#include "uc_log/MultiChannelRttComBackend.hpp"
-#include "uc_log/detail/LogEntry.hpp"
+#include "uc_log/RttLog.hpp"
+#include "uc_log/printer/LogEntry.hpp"
 #include "uc_log/uc_log.hpp"
 
 #include <algorithm>
@@ -27,20 +27,10 @@
 
 namespace {
 
-int failures = 0;
-
-#define CHECK(cond, msg)                                        \
-    do {                                                        \
-        if(!(cond)) {                                           \
-            std::printf("FAIL: %s (line %d)\n", msg, __LINE__); \
-            ++failures;                                         \
-        }                                                       \
-    } while(0)
-
-using uc_log::fanout::Context;
+using uc_log::Context;
 
 struct FakeContexts {
-    static constexpr std::size_t Cores = 2;
+    static constexpr std::size_t cores = 2;
     static inline Context        ctx{Context::thread};
     static inline std::size_t    coreId{0};
 
@@ -49,10 +39,10 @@ struct FakeContexts {
     static std::size_t core() { return coreId; }
 };
 
-constexpr std::size_t Slots = FakeContexts::Cores * uc_log::fanout::ContextsPerCore;
+constexpr std::size_t slots = FakeContexts::cores * uc_log::contextsPerCore;
 
 std::size_t slotNow() {
-    return FakeContexts::coreId * uc_log::fanout::ContextsPerCore
+    return FakeContexts::coreId * uc_log::contextsPerCore
          + static_cast<std::size_t>(FakeContexts::ctx);
 }
 
@@ -61,7 +51,7 @@ std::size_t slotNow() {
 template<int Id>
 struct Capture {
     struct State {
-        std::array<std::vector<std::byte>, Slots> open{};
+        std::array<std::vector<std::byte>, slots> open{};
         std::vector<std::vector<std::byte>>       records{};
         // called after every write(): lets a test preempt the record at that point
         std::function<void()> afterWrite{};
@@ -94,7 +84,7 @@ struct Primary : Capture<0> {
         std::size_t   slot;
     };
 
-    static inline std::array<std::uint32_t, Slots> pending{};
+    static inline std::array<std::uint32_t, slots> pending{};
     static inline std::uint32_t                    settled{};
 
     static Mark lossMark() { return {pending[slotNow()], slotNow()}; }
@@ -114,6 +104,9 @@ struct Epoch {
     [[maybe_unused]] static void preMemoryInit() { ++bumps; }
 
     [[maybe_unused]] static void postMemoryInit() { ++bumps; }
+
+    // and a count of boots that logged
+    [[maybe_unused]] static std::uint16_t bootsThatLogged() { return 42; }
 
     [[maybe_unused]] static void write(std::span<std::byte const>) {}
 };
@@ -138,13 +131,13 @@ std::unordered_map<std::uint16_t,
                    std::string> const&
 catalog() {
     static auto const& strings = *new std::unordered_map<std::uint16_t, std::string>{[] {
-        auto result = remote_fmt::parseStringConstantsFromJsonFile(UC_LOG_TEST_CATALOG_JSON);
+        auto result = remote_fmt::readCatalogFile(UC_LOG_TEST_CATALOG_JSON);
         if(!result) {
             std::printf("FAIL: catalog: %s\n", result.error().c_str());
-            ++failures;
+            ++uc_log::test::failures;
             return std::unordered_map<std::uint16_t, std::string>{};
         }
-        return *result;
+        return std::move(result->strings);
     }()};
     return strings;
 }
@@ -159,18 +152,17 @@ std::string text(std::vector<std::byte> const& record) {
     if(!parsed.message || parsed.discarded != 0 || !parsed.remaining.empty()) {
         return "?" + error;
     }
-    return uc_log::detail::LogEntry{0, *parsed.message}.logMsg;
+    return uc_log::printer::LogEntry{0, *parsed.message}.logMsg;
 }
 
 std::vector<std::string> texts(std::vector<std::vector<std::byte>> const& records) {
     std::vector<std::string> out;
+    out.reserve(records.size());
     for(auto const& r : records) { out.push_back(text(r)); }
     return out;
 }
 
-bool isLostLine(std::string const& t) {
-    return t.find("log records lost on this channel") != std::string::npos;
-}
+bool isLostLine(std::string const& t) { return t.contains("log records lost on this channel"); }
 
 void resetAll() {
     Primary::reset();
@@ -193,7 +185,7 @@ void everyRecordInEverySink() {
 
 // For each core and context: a pending loss is announced in the primary only, and the record after it reaches both.
 void lostLineInThePrimaryOnly() {
-    for(std::size_t core = 0; core != FakeContexts::Cores; ++core) {
+    for(std::size_t core = 0; core != FakeContexts::cores; ++core) {
         for(auto const ctx : {Context::thread, Context::isr, Context::fault}) {
             resetAll();
             FakeContexts::coreId        = core;
@@ -218,7 +210,7 @@ void lostLineInThePrimaryOnly() {
 void lossPendingAcrossAContextSwitch() {
     for(int at = 1; at <= 8; ++at) {
         for(int isrLoss = 0; isrLoss != 2; ++isrLoss) {
-            for(std::size_t core = 0; core != FakeContexts::Cores; ++core) {
+            for(std::size_t core = 0; core != FakeContexts::cores; ++core) {
                 resetAll();
                 FakeContexts::coreId        = core;
                 Primary::pending[slotNow()] = 5;   // the thread's
@@ -254,7 +246,7 @@ void lossPendingAcrossAContextSwitch() {
                       "the interrupt's record reaches the other sink");
                 for(auto const& t : p) { CHECK(t[0] != '?', "every primary record decodes whole"); }
                 for(auto const& t : o) { CHECK(t[0] != '?', "every other record decodes whole"); }
-                for(std::size_t s = 0; s != Slots; ++s) {
+                for(std::size_t s = 0; s != slots; ++s) {
                     CHECK(!Fan::primaryOnly[s], "no flag left set");
                 }
             }
@@ -282,12 +274,30 @@ static_assert(HasPreMemoryInit<uc_log::FanOutBackendWith<FakeContexts,
                                                          Epoch>>,
               "another sink's hook forwarded");
 // the real thing: a fan-out over an RTT backend bumps its ring epoch at boot
-static_assert(
-  HasPreMemoryInit<uc_log::FanOutBackendWith<FakeContexts,
-                                             uc_log::DefaultRttComBackend<uc_log::AlwaysAttached,
-                                                                          64>,
-                                             Other>>,
-  "a fan-out over an RTT backend has its pre-memory hook");
+static_assert(HasPreMemoryInit<uc_log::FanOutBackendWith<FakeContexts,
+                                                         uc_log::RttLog<uc_log::AlwaysAttached,
+                                                                        uc_log::Rings<64>>,
+                                                         Other>>,
+              "a fan-out over an RTT backend has its pre-memory hook");
+
+// uc_log::bootsThatLogged(): the primary's count only - a second counting sink's would be another number
+template<typename B>
+concept HasBootCount = requires { B::bootsThatLogged(); };
+static_assert(!HasBootCount<Fan>,
+              "no sink counts boots: the fan-out has no count");
+static_assert(HasBootCount<uc_log::FanOutBackendWith<FakeContexts,
+                                                     Epoch,
+                                                     Other>>,
+              "the primary's count");
+static_assert(!HasBootCount<uc_log::FanOutBackendWith<FakeContexts,
+                                                      Other,
+                                                      Epoch>>,
+              "another sink's count is not the fan-out's");
+static_assert(HasBootCount<uc_log::FanOutBackendWith<FakeContexts,
+                                                     uc_log::RttLog<uc_log::AlwaysAttached,
+                                                                    uc_log::Rings<64>>,
+                                                     Other>>,
+              "a fan-out over an RTT backend has its boot count");
 
 void preMemoryInitReachesEverySink() {
     Epoch::bumps = 0;
@@ -295,6 +305,8 @@ void preMemoryInitReachesEverySink() {
     CHECK(Epoch::bumps == 2, "every sink with the hook gets it once");
     uc_log::FanOutBackendWith<FakeContexts, Epoch, Other, Epoch>::postMemoryInit();
     CHECK(Epoch::bumps == 4, "and the post-memory hook too");
+    CHECK((uc_log::FanOutBackendWith<FakeContexts, Epoch, Other>::bootsThatLogged() == 42),
+          "the boot count is the primary's");
 }
 
 static_assert(!HasLossMark<uc_log::FanOutBackendWith<FakeContexts,
@@ -337,13 +349,13 @@ void lossPendingWhileTheOtherCoreLogs() {
 // A sink that takes the record's level, as an RTT backend that routes levels to channels does, or a queue that only
 // takes warn and up: what it saw per level, and a pending loss per level (one ring per level).
 using uc_log::LogLevel;
-constexpr std::size_t Levels = static_cast<std::size_t>(LogLevel::crit) + 1;
+constexpr std::size_t levels = static_cast<std::size_t>(LogLevel::crit) + 1;
 
 struct LevelSink {
-    static inline std::array<int, Levels>           inits{};
-    static inline std::array<int, Levels>           writes{};
-    static inline std::array<int, Levels>           finals{};
-    static inline std::array<std::uint32_t, Levels> pending{};
+    static inline std::array<int, levels>           inits{};
+    static inline std::array<int, levels>           writes{};
+    static inline std::array<int, levels>           finals{};
+    static inline std::array<std::uint32_t, levels> pending{};
 
     struct Mark {
         std::uint32_t pending;
@@ -491,11 +503,11 @@ static_assert(uc_log::FanOutBackendWith<FakeContexts,
               "served levels, from the primary");
 
 // the real things: the RTT backends' contracts and levels through a fan-out
-using RouterRtt = uc_log::MultiChannelRttComBackend<
+using RouterRtt = uc_log::RttLog<
   uc_log::AlwaysAttached,
-  uc_log::LevelSplitRouter<LogLevel::warn, LogLevel::error, LogLevel::crit>,
-  rtt::BufferMode::skip,
-  uc_log::ChannelSizes<64, 64, 64, 64>>;
+  uc_log::RingLayout<uc_log::SingleCore,
+                     uc_log::LevelSplitRouter<LogLevel::warn, LogLevel::error, LogLevel::crit>>,
+  uc_log::Rings<64>>;
 static_assert(uc_log::FanOutBackendWith<FakeContexts,
                                         RouterRtt,
                                         Other>::levelAware,
@@ -505,29 +517,92 @@ static_assert(uc_log::FanOutBackendWith<FakeContexts,
                                         Other>::singleIsrPriorityLevel,
               "and hands on its SingleLevel contract");
 static_assert(uc_log::FanOutBackendWith<FakeContexts,
-                                        uc_log::DefaultRttComBackend<uc_log::AlwaysAttached,
-                                                                     64>,
+                                        uc_log::RttLog<uc_log::AlwaysAttached,
+                                                       uc_log::Rings<64>>,
                                         Other>::singleIsrPriorityLevel
                 && !uc_log::FanOutBackendWith<FakeContexts,
-                                              uc_log::DefaultRttComBackend<uc_log::AlwaysAttached,
-                                                                           64>,
+                                              uc_log::RttLog<uc_log::AlwaysAttached,
+                                                             uc_log::Rings<64>>,
                                               Other>::levelAware,
               "a level-blind RTT backend: its contract, no level");
 
+// perCoreIsrContexts: handed on only when the fan-out's own flags are per core (Contexts::cores > 1)
+struct CoreZero {
+    [[maybe_unused]] constexpr std::uint32_t operator()() const { return 0; }
+};
+
+using MulticoreRtt = uc_log::
+  RttLog<uc_log::AlwaysAttached, uc_log::RingLayout<uc_log::TwoCores<CoreZero>>, uc_log::Rings<64>>;
+template<typename B>
+concept HasPerCore = requires { B::perCoreIsrContexts; };
+static_assert(uc_log::FanOutBackendWith<FakeContexts,
+                                        MulticoreRtt,
+                                        Other>::perCoreIsrContexts
+                && uc_log::FanOutBackendWith<FakeContexts,
+                                             MulticoreRtt,
+                                             Other>::singleIsrPriorityLevel,
+              "a multicore RTT primary behind per-core contexts: its contract held per core");
+static_assert(!HasPerCore<uc_log::FanOutBackendWith<FakeContexts,
+                                                    uc_log::RttLog<uc_log::AlwaysAttached,
+                                                                   uc_log::Rings<64>>,
+                                                    Other>>,
+              "a single-core backend declares none, the fan-out hands on none");
+
+// Duplex channels: the primary's
+using DuplexRtt = uc_log::RttLog<uc_log::AlwaysAttached,
+                                 uc_log::Rings<64>,
+                                 uc_log::DuplexChannels<uc_log::DuplexChannelConfig<"shell", 32>>>;
+using DuplexFan = uc_log::FanOutBackendWith<FakeContexts, DuplexRtt, Other>;
+static_assert(DuplexFan::numDuplexChannels == 1 && DuplexFan::DuplexChannel<0>::name == "shell",
+              "the primary's duplex channels, through the fan-out");
+template<typename B>
+concept HasDuplex = requires { B::numDuplexChannels; };
+static_assert(!HasDuplex<Fan>,
+              "a primary without duplex channels: none");
+
+// kLevelFloor: handed on when every level-aware sink declares the same one
+template<LogLevel Floor>
+struct FloorSink {
+    static constexpr LogLevel kLevelFloor = Floor;
+
+    template<LogLevel L>
+    [[maybe_unused]] static void write(std::span<std::byte const>) {}
+};
+
+template<typename B>
+concept HasFloor = requires { B::kLevelFloor; };
+using FloorFan   = uc_log::
+  FanOutBackendWith<FakeContexts, FloorSink<LogLevel::warn>, Other, FloorSink<LogLevel::warn>>;
+static_assert(FloorFan::kLevelFloor == LogLevel::warn
+                && uc_log::detail::canonicalLevel<FloorFan,
+                                                  LogLevel::error>()
+                     == LogLevel::warn,
+              "two equal floors: one, and error resolves to it");
+static_assert(!HasFloor<uc_log::FanOutBackendWith<FakeContexts,
+                                                  FloorSink<LogLevel::warn>,
+                                                  FloorSink<LogLevel::error>>>,
+              "two different floors: none");
+static_assert(!HasFloor<uc_log::FanOutBackendWith<FakeContexts,
+                                                  FloorSink<LogLevel::warn>,
+                                                  RouterRtt>>,
+              "a level-aware sink without one (a router): none");
+static_assert(!HasFloor<Fan>,
+              "level-blind sinks: none");
+
 }   // namespace
 
-int main() {
-    everyRecordInEverySink();
-    lostLineInThePrimaryOnly();
-    lossPendingAcrossAContextSwitch();
-    lossPendingWhileTheOtherCoreLogs();
-    preMemoryInitReachesEverySink();
-    levelReachesTheSinkThatTakesIt();
-    levelLossMarkRoutesThePrimaryOnly();
-    if(failures != 0) {
-        std::printf("%d FAILURE(S)\n", failures);
-        return 1;
-    }
-    std::printf("fan-out tests passed\n");
-    return 0;
+int main(int    argc,
+         char** argv) {
+    return uc_log::test::run(
+      argc,
+      argv,
+      {
+        {           "everyRecordInEverySink",            everyRecordInEverySink},
+        {         "lostLineInThePrimaryOnly",          lostLineInThePrimaryOnly},
+        {  "lossPendingAcrossAContextSwitch",   lossPendingAcrossAContextSwitch},
+        { "lossPendingWhileTheOtherCoreLogs",  lossPendingWhileTheOtherCoreLogs},
+        {    "preMemoryInitReachesEverySink",     preMemoryInitReachesEverySink},
+        {   "levelReachesTheSinkThatTakesIt",    levelReachesTheSinkThatTakesIt},
+        {"levelLossMarkRoutesThePrimaryOnly", levelLossMarkRoutesThePrimaryOnly},
+    });
 }

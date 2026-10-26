@@ -1,0 +1,436 @@
+#pragma once
+
+#include "uc_log/detail/Lifetimebound.hpp"
+#include "uc_log/printer/DuplexChannelInfo.hpp"
+#include "uc_log/printer/RttChannelMap.hpp"
+#include "uc_log/printer/SocketPath.hpp"
+#include "uc_log/printer/SocketPortStatus.hpp"
+#include "uc_log/printer/SocketSession.hpp"
+
+#include <algorithm>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <fmt/format.h>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace uc_log { namespace printer {
+
+    // transparent TCP bridge for one duplex channel, single client, first wins
+    struct DuplexChannelServer {
+        static constexpr std::size_t recvQueueCap = 64 * 1024;
+        static constexpr std::size_t sendQueueCap = 1024 * 1024;
+
+        std::string                           name;
+        std::function<void(std::string_view)> errorMessagef;
+        std::function<void(std::string_view)> messagef;
+        std::function<void()>                 stateChangef;
+        mutable std::mutex                    mutex;
+        std::shared_ptr<SocketSession>        activeSession;     // guarded by mutex
+        std::weak_ptr<SocketSession>          pausedSession;     // guarded by mutex
+        std::vector<std::byte>                recvQueue;         // guarded by mutex
+        std::size_t                           socketOrdinal{};   // names its unix socket
+        std::atomic<bool>                     enabled{true};
+        std::atomic<bool>                     hostToTargetOnly{false};
+        std::atomic<std::uint64_t>            bytesToTarget{0};
+        std::atomic<std::uint64_t>            bytesFromTarget{0};
+        std::atomic<std::uint64_t>            bytesDropped{0};
+        SocketListener                        listener;
+
+        template<typename ErrorMessageF,
+                 typename MessageF,
+                 typename StateChangeF>
+        DuplexChannelServer(boost::asio::io_context& ioc UC_LOG_LIFETIMEBOUND,
+                            boost::asio::ip::address     bindAddress,
+                            std::string                  name_,
+                            std::uint16_t                port,
+                            ErrorMessageF&&              errorMessagef_,
+                            MessageF&&                   messagef_,
+                            StateChangeF&&               stateChangef_,
+                            std::filesystem::path        socketPath = {})
+          : name{std::move(name_)}
+          , errorMessagef{std::forward<ErrorMessageF>(errorMessagef_)}
+          , messagef{std::forward<MessageF>(messagef_)}
+          , stateChangef{std::forward<StateChangeF>(stateChangef_)}
+          , listener{ioc,
+                     std::move(bindAddress),
+                     [this](StreamSocket socket) { onAccept(std::move(socket)); },
+                     [this](std::string_view msg) {
+                         errorMessagef(fmt::format("duplex \"{}\": {}", name, msg));
+                     },
+                     [this]() { notifyStateChange(); },
+                     std::move(socketPath)} {
+            listener.start(port);
+        }
+
+        // reader thread -> socket, silently dropped when no client is connected
+        void sendToClient(std::span<std::byte const> data) {
+            std::shared_ptr<SocketSession> session;
+            {
+                std::scoped_lock<std::mutex> const lock{mutex};
+                session = activeSession;
+            }
+            if(session) {
+                if(session->trySend(data)) {
+                    bytesFromTarget += data.size();
+                } else {
+                    // client too slow, dropped so a stalled client cannot grow host memory
+                    bytesDropped += data.size();
+                }
+            }
+        }
+
+        // socket -> reader thread, non destructive: only consumeFromClient removes bytes
+        std::size_t peekFromClient(std::span<std::byte> out) {
+            std::scoped_lock<std::mutex> const lock{mutex};
+            auto const                         n = std::min(out.size(), recvQueue.size());
+            std::copy_n(recvQueue.begin(), n, out.begin());
+            return n;
+        }
+
+        void consumeFromClient(std::size_t n) {
+            std::shared_ptr<SocketSession> resume;
+            {
+                std::scoped_lock<std::mutex> const lock{mutex};
+                n = std::min(n, recvQueue.size());
+                recvQueue.erase(
+                  recvQueue.begin(),
+                  std::next(recvQueue.begin(), static_cast<std::make_signed_t<std::size_t>>(n)));
+                bytesToTarget += n;
+                if(recvQueue.size() < recvQueueCap) {
+                    resume = pausedSession.lock();
+                    pausedSession.reset();
+                }
+            }
+            if(resume) { resume->resumeRead(); }
+        }
+
+        // on rtt (re)start or target reset: stale bytes must not leak into the new session
+        void clearBuffers() {
+            std::shared_ptr<SocketSession> resume;
+            {
+                std::scoped_lock<std::mutex> const lock{mutex};
+                recvQueue.clear();
+                resume = pausedSession.lock();
+                pausedSession.reset();
+            }
+            if(resume) { resume->resumeRead(); }
+        }
+
+        void restart(std::uint16_t newPort) {
+            enabled = true;
+            listener.restart(newPort);
+        }
+
+        void stop() {
+            enabled = false;
+            listener.stop([this]() { closeSession(); });
+        }
+
+        // no notifyStateChange here: this is called from gui callbacks which already hold the gui
+        // mutex, the triggering event redraws anyway
+        void setPort(std::uint16_t newPort) {
+            if(enabled) {
+                restart(newPort);
+            } else {
+                listener.currentPort = newPort;
+            }
+        }
+
+        void setBindAddress(boost::asio::ip::address address) {
+            listener.setBindAddress(std::move(address));
+            // an enabled server that is not currently listening (e.g. its port was
+            // occupied) retries on the new address; the setBindAddress post above runs
+            // first, so restart binds the updated address
+            if(enabled && listener.status.load() != SocketPortStatus::active) {
+                restart(listener.currentPort.load());
+            }
+        }
+
+        bool hasClient() const {
+            std::scoped_lock<std::mutex> const lock{mutex};
+            return activeSession != nullptr;
+        }
+
+        DuplexChannelInfo info(std::size_t ordinal) const {
+            return DuplexChannelInfo{ordinal,
+                                     name,
+                                     listener.getSocketPath().native(),
+                                     listener.currentPort.load(),
+                                     enabled ? listener.status.load()
+                                             : SocketPortStatus::notStarted,
+                                     enabled.load(),
+                                     hasClient(),
+                                     hostToTargetOnly.load(),
+                                     bytesToTarget.load(),
+                                     bytesFromTarget.load(),
+                                     bytesDropped.load(),
+                                     listener.binds.load()};
+        }
+
+    private:
+        void notifyStateChange() {
+            if(stateChangef) { stateChangef(); }
+        }
+
+        // ioc thread
+        void onAccept(StreamSocket socket) {
+            bool haveClient{};
+            {
+                std::scoped_lock<std::mutex> const lock{mutex};
+                haveClient = activeSession != nullptr;
+            }
+            if(haveClient) {
+                // first client wins
+                boost::system::error_code ec;
+                socket.shutdown(boost::asio::socket_base::shutdown_both, ec);
+                socket.close(ec);
+                messagef(fmt::format("duplex \"{}\": rejected second client", name));
+                return;
+            }
+            auto session = std::make_shared<SocketSession>(
+              std::move(socket),
+              sendQueueCap,
+              [this](std::string_view msg) {
+                  errorMessagef(fmt::format("duplex \"{}\": client {}", name, msg));
+              },
+              [this](std::span<std::byte const>            data,
+                     std::shared_ptr<SocketSession> const& session_) {
+                  return onClientData(data, session_);
+              },
+              [this](std::shared_ptr<SocketSession> const& session_) { onClientGone(session_); });
+            {
+                std::scoped_lock<std::mutex> const lock{mutex};
+                activeSession = session;
+                pausedSession.reset();
+                recvQueue.clear();
+            }
+            session->startRead();
+            messagef(fmt::format("duplex \"{}\": client connected", name));
+            notifyStateChange();
+        }
+
+        // ioc thread, returns false to pause reading until consumeFromClient drains the queue
+        bool onClientData(std::span<std::byte const>            data,
+                          std::shared_ptr<SocketSession> const& session) {
+            std::scoped_lock<std::mutex> const lock{mutex};
+            if(session != activeSession) { return false; }
+            recvQueue.insert(recvQueue.end(), data.begin(), data.end());
+            if(recvQueue.size() < recvQueueCap) { return true; }
+            pausedSession = session;
+            return false;
+        }
+
+        // ioc thread
+        void onClientGone(std::shared_ptr<SocketSession> const& session) {
+            {
+                std::scoped_lock<std::mutex> const lock{mutex};
+                if(session != activeSession) { return; }
+                activeSession.reset();
+                pausedSession.reset();
+                recvQueue.clear();
+            }
+            messagef(fmt::format("duplex \"{}\": client disconnected", name));
+            notifyStateChange();
+        }
+
+        // ioc thread
+        void closeSession() {
+            std::shared_ptr<SocketSession> session;
+            {
+                std::scoped_lock<std::mutex> const lock{mutex};
+                session = std::move(activeSession);
+                activeSession.reset();
+                pausedSession.reset();
+                recvQueue.clear();
+            }
+            if(session) { session->close(); }
+        }
+    };
+
+    // owns all channel servers, servers persist across rtt restarts keyed by channel name so
+    // port overrides survive a reflash. The io_context is shared and owned by the caller.
+    struct DuplexChannelHub {
+    private:
+        std::function<void(std::string_view)>                       errorMessagef;
+        std::function<void(std::string_view)>                       messagef;
+        std::function<void()>                                       stateChangef;
+        boost::asio::io_context&                                    ioc;
+        boost::asio::ip::address                                    bindAddress;
+        mutable std::mutex                                          mutex;
+        std::map<std::string, std::shared_ptr<DuplexChannelServer>> serversByName;
+        std::vector<std::shared_ptr<DuplexChannelServer>>           activeServers;
+        std::uint16_t                                               basePort;
+        // not empty: unix sockets instead of TCP; a server keeps its path across reflashes
+        std::filesystem::path socketDir;
+
+        std::shared_ptr<DuplexChannelServer> serverAt(std::size_t ordinal) const {
+            std::scoped_lock<std::mutex> const lock{mutex};
+            if(ordinal >= activeServers.size()) { return nullptr; }
+            return activeServers[ordinal];
+        }
+
+    public:
+        template<typename ErrorMessageF,
+                 typename MessageF,
+                 typename StateChangeF>
+        DuplexChannelHub(boost::asio::io_context& ioc_ UC_LOG_LIFETIMEBOUND,
+                         boost::asio::ip::address      bindAddress_,
+                         std::uint16_t                 basePort_,
+                         ErrorMessageF&&               errorMessagef_,
+                         MessageF&&                    messagef_,
+                         StateChangeF&&                stateChangef_,
+                         std::filesystem::path         socketDir_ = {})
+          : errorMessagef{std::forward<ErrorMessageF>(errorMessagef_)}
+          , messagef{std::forward<MessageF>(messagef_)}
+          , stateChangef{std::forward<StateChangeF>(stateChangef_)}
+          , ioc{ioc_}
+          , bindAddress{std::move(bindAddress_)}
+          , basePort{basePort_}
+          , socketDir{std::move(socketDir_)} {}
+
+        // called from the reader thread on every rtt (re)start, idempotent
+        void configure(std::vector<DuplexChannelDesc> const& descs) {
+            {
+                std::scoped_lock<std::mutex> const lock{mutex};
+
+                // First the servers of channels that vanished (reflash with a different config):
+                // stopped, kept alive (sessions may still reference them).
+                for(auto const& [name, server] : serversByName) {
+                    bool const stays
+                      = std::ranges::any_of(descs, [&name](DuplexChannelDesc const& d) {
+                            return d.name == name;
+                        });
+                    if(!stays && server->listener.status.load() != SocketPortStatus::notStarted) {
+                        server->stop();
+                    }
+                }
+
+                // then the kept ones, whose socket is named after the ordinal a reflash may move,
+                // and only then the new ones: each step's posts run before the next step's bind
+                for(auto const& desc : descs) {
+                    auto const it = serversByName.find(desc.name);
+                    if(it == serversByName.end()) { continue; }
+                    auto const& server = it->second;
+                    server->clearBuffers();
+                    bool const moves = server->socketOrdinal != desc.ordinal && !socketDir.empty();
+                    server->socketOrdinal = desc.ordinal;
+                    if(moves) {   // rebinds, and retries a portOccupied
+                        server->listener.setSocketPath(
+                          unixSocketPath(socketDir, duplexSocketName(desc.ordinal)));
+                    } else if(server->enabled
+                              && server->listener.status.load() != SocketPortStatus::active)
+                    {
+                        // also retries portOccupied: the port may have been freed since the last try
+                        server->restart(server->listener.currentPort.load());
+                    }
+                }
+
+                std::vector<std::shared_ptr<DuplexChannelServer>> newActive;
+                for(auto const& desc : descs) {
+                    auto it = serversByName.find(desc.name);
+                    if(it == serversByName.end()) {
+                        auto server = std::make_shared<DuplexChannelServer>(
+                          ioc,
+                          bindAddress,
+                          desc.name,
+                          static_cast<std::uint16_t>(basePort + desc.ordinal),
+                          errorMessagef,
+                          messagef,
+                          stateChangef,
+                          socketDir.empty()
+                            ? std::filesystem::path{}
+                            : unixSocketPath(socketDir, duplexSocketName(desc.ordinal)));
+                        server->socketOrdinal = desc.ordinal;
+                        it                    = serversByName.emplace(desc.name, server).first;
+                    }
+                    it->second->hostToTargetOnly = !desc.upIndex.has_value();
+                    newActive.push_back(it->second);
+                }
+
+                activeServers = std::move(newActive);
+            }
+            // outside the lock: the callback may lock the gui mutex, which in turn is held while
+            // info() locks this hub's mutex
+            if(stateChangef) { stateChangef(); }
+        }
+
+        std::vector<DuplexChannelInfo> info() const {
+            std::scoped_lock<std::mutex> const lock{mutex};
+            std::vector<DuplexChannelInfo>     ret;
+            for(std::size_t ordinal{}; ordinal < activeServers.size(); ++ordinal) {
+                ret.push_back(activeServers[ordinal]->info(ordinal));
+            }
+            return ret;
+        }
+
+        // Empty: back to TCP.
+        void setSocketDir(std::filesystem::path const& dir) {
+            std::scoped_lock<std::mutex> const lock{mutex};
+            socketDir = dir;
+            for(auto const& [socketName, server] : serversByName) {
+                server->listener.setSocketPath(
+                  dir.empty() ? std::filesystem::path{}
+                              : unixSocketPath(dir, duplexSocketName(server->socketOrdinal)));
+            }
+        }
+
+        void setPort(std::size_t   ordinal,
+                     std::uint16_t port) {
+            if(auto const server = serverAt(ordinal)) { server->setPort(port); }
+        }
+
+        void setEnabled(std::size_t ordinal,
+                        bool        enable) {
+            if(auto const server = serverAt(ordinal)) {
+                if(enable) {
+                    server->restart(server->listener.currentPort.load());
+                } else {
+                    server->stop();
+                }
+            }
+        }
+
+        // apply to every server (including inactive ones kept alive) and remember the
+        // address for servers created on a later reconfigure
+        void setBindAddress(boost::asio::ip::address const& address) {
+            std::scoped_lock<std::mutex> const lock{mutex};
+            bindAddress = address;
+            for(auto const& [name, server] : serversByName) { server->setBindAddress(address); }
+        }
+
+        void setBasePort(std::uint16_t newBasePort) {
+            std::scoped_lock<std::mutex> const lock{mutex};
+            basePort = newBasePort;
+            for(std::size_t ordinal{}; ordinal < activeServers.size(); ++ordinal) {
+                activeServers[ordinal]->setPort(static_cast<std::uint16_t>(newBasePort + ordinal));
+            }
+        }
+
+        // reader thread pump interface
+        void sendToClient(std::size_t                ordinal,
+                          std::span<std::byte const> data) {
+            if(auto const server = serverAt(ordinal)) { server->sendToClient(data); }
+        }
+
+        std::size_t peekFromClient(std::size_t          ordinal,
+                                   std::span<std::byte> out) {
+            if(auto const server = serverAt(ordinal)) { return server->peekFromClient(out); }
+            return 0;
+        }
+
+        void consumeFromClient(std::size_t ordinal,
+                               std::size_t n) {
+            if(auto const server = serverAt(ordinal)) { server->consumeFromClient(n); }
+        }
+    };
+
+}}   // namespace uc_log::printer

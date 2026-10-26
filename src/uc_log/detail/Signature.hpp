@@ -10,10 +10,10 @@
 
 namespace uc_log { namespace detail {
     // Quoted in the header the printer parses: no quote, comma, brace or anything to unescape.
-    inline constexpr std::size_t MaxModuleName = 63;
+    inline constexpr std::size_t maxModuleName = 63;
 
     constexpr bool validModuleName(std::string_view name) {
-        if(name.empty() || name.size() > MaxModuleName) { return false; }
+        if(name.empty() || name.size() > maxModuleName) { return false; }
         for(char const c : name) {
             // lower case only: derived modules are, and a filter rule must be able to match
             bool const ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.'
@@ -25,10 +25,10 @@ namespace uc_log { namespace detail {
 
     // Chars, not a type: the filter's result must be usable in a constant expression.
     struct DerivedModule {
-        std::array<char, MaxModuleName> chars{};
+        std::array<char, maxModuleName> chars{};
         std::size_t                     size{0};
 
-        constexpr std::string_view view() const { return {chars.data(), size}; }
+        [[nodiscard]] constexpr std::string_view view() const { return {chars.data(), size}; }
     };
 
     constexpr bool isIdentChar(char c) {
@@ -36,16 +36,16 @@ namespace uc_log { namespace detail {
             || c == '_';
     }
 
-    inline constexpr std::string_view ClangAnonymous{"(anonymous namespace)"};
+    inline constexpr std::string_view clangAnonymous{"(anonymous namespace)"};
 
     // Offsets into the first ScanLimit characters; `atTemplate`: stopped at a class template,
     // the function's own name is not seen.
     struct SignatureScan {
-        static constexpr std::size_t MaxComponents = 16;
-        static constexpr std::size_t ScanLimit     = 512;
+        static constexpr std::size_t maxComponents = 16;
+        static constexpr std::size_t scanLimit     = 512;
 
-        std::array<std::size_t, MaxComponents> compBegin{};
-        std::array<std::size_t, MaxComponents> compEnd{};
+        std::array<std::size_t, maxComponents> compBegin{};
+        std::array<std::size_t, maxComponents> compEnd{};
         std::size_t                            comps{0};
         std::size_t                            openBegin{0};
         std::size_t                            openEnd{0};
@@ -59,10 +59,10 @@ namespace uc_log { namespace detail {
     // __PRETTY_FUNCTION__ is what costs compile time: read at most ScanLimit characters and never
     // walk a template argument list, or compiles get many times slower.
     constexpr SignatureScan scanSignature(std::string_view sig) {
-        constexpr std::string_view Operator{"operator"};
-        constexpr std::size_t      MaxComponents = SignatureScan::MaxComponents;
+        constexpr std::string_view operatorWord{"operator"};
+        constexpr std::size_t      maxComponents = SignatureScan::maxComponents;
         constexpr auto             npos          = std::string_view::npos;
-        constexpr auto&            ClangAnon     = ClangAnonymous;
+        constexpr auto&            clangAnon     = clangAnonymous;
         SignatureScan              scan{};
         SignatureScan const        result{};   // does not parse
 
@@ -72,7 +72,7 @@ namespace uc_log { namespace detail {
         std::size_t compStart = 0;
         bool&       found     = scan.found;
 
-        sig           = sig.substr(0, SignatureScan::ScanLimit);
+        sig           = sig.substr(0, SignatureScan::scanLimit);
         auto const  n = sig.size();
         std::size_t i = 0;
         while(i < n) {
@@ -96,7 +96,7 @@ namespace uc_log { namespace detail {
                     found          = true;
                     break;
                 }
-                if(comps < MaxComponents) {   // the class template is the last component kept
+                if(comps < maxComponents) {   // the class template is the last component kept
                     compBegin[comps] = compStart;
                     compEnd[comps]   = i;
                     ++comps;
@@ -106,11 +106,11 @@ namespace uc_log { namespace detail {
                 break;
             }
             if(c == 'o' && (i == 0 || !isIdentChar(sig[i - 1]))
-               && sig.substr(i, Operator.size()) == Operator
-               && (i + Operator.size() >= n || !isIdentChar(sig[i + Operator.size()])))
+               && sig.substr(i, operatorWord.size()) == operatorWord
+               && (i + operatorWord.size() >= n || !isIdentChar(sig[i + operatorWord.size()])))
             {
                 // operator<, operator() ...: the symbol is no bracket
-                i += Operator.size();
+                i += operatorWord.size();
                 if(sig.substr(i, 2) == "()") { i += 2; }
                 auto const open = sig.find('(', i);
                 if(open == npos) { return result; }
@@ -120,8 +120,8 @@ namespace uc_log { namespace detail {
                 break;
             }
             if(c == '(') {
-                if(sig.substr(i, ClangAnon.size()) == ClangAnon) {
-                    i += ClangAnon.size();
+                if(sig.substr(i, clangAnon.size()) == clangAnon) {
+                    i += clangAnon.size();
                     continue;
                 }
                 std::size_t w = i;
@@ -154,7 +154,7 @@ namespace uc_log { namespace detail {
                 comps     = 0;   // what came before was the return type or "static"
                 compStart = i + 1;
             } else if(c == ':' && i + 1 < n && sig[i + 1] == ':') {
-                if(comps < MaxComponents) {
+                if(comps < maxComponents) {
                     compBegin[comps] = compStart;
                     compEnd[comps]   = i;
                     ++comps;
@@ -168,7 +168,7 @@ namespace uc_log { namespace detail {
     }
 
     constexpr bool isAnonymous(std::string_view part) {
-        return part == "{anonymous}" || part == ClangAnonymous;
+        return part == "{anonymous}" || part == clangAnonymous;
     }
 
     constexpr DerivedModule moduleOf(SignatureScan const& scan,
@@ -176,7 +176,7 @@ namespace uc_log { namespace detail {
         constexpr auto npos = std::string_view::npos;
         DerivedModule  result{};
         if(!scan.found) { return result; }
-        sig        = sig.substr(0, SignatureScan::ScanLimit);
+        sig        = sig.substr(0, SignatureScan::scanLimit);
         bool first = true;
         for(std::size_t k = 0; k < scan.comps; ++k) {
             auto part = sig.substr(scan.compBegin[k], scan.compEnd[k] - scan.compBegin[k]);
@@ -194,7 +194,7 @@ namespace uc_log { namespace detail {
             if(!ident) { continue; }
             std::size_t const need = part.size() + (result.size == 0 ? 0 : 1);
             // too long: a shorter path, not a cut-off name
-            if(result.size + need > MaxModuleName) { break; }
+            if(result.size + need > maxModuleName) { break; }
             if(result.size != 0) { result.chars[result.size++] = '.'; }
             for(char const ch : part) {
                 result.chars[result.size++]
@@ -206,12 +206,12 @@ namespace uc_log { namespace detail {
 
     // Tells instantiations apart: Device<FakeBusFor<>, FakeClockT<>, Tca9548a, ...>::finishVerify_
     struct FunctionName {
-        static constexpr std::size_t Capacity = 192;
+        static constexpr std::size_t capacity = 192;
 
-        std::array<char, Capacity> chars{};
+        std::array<char, capacity> chars{};
         std::size_t                size{0};
 
-        constexpr std::string_view view() const { return {chars.data(), size}; }
+        [[nodiscard]] constexpr std::string_view view() const { return {chars.data(), size}; }
     };
 
     // `argRead`: how much of the signature the template arguments are read from.
@@ -219,12 +219,12 @@ namespace uc_log { namespace detail {
                                              std::string_view     sig,
                                              std::string_view     function,
                                              std::size_t          argRead = 1024) {
-        constexpr auto        npos     = std::string_view::npos;
-        std::size_t const     ArgRead  = argRead;
-        constexpr std::size_t ArgChars = 100;
+        constexpr auto        npos      = std::string_view::npos;
+        std::size_t const     readLimit = argRead;
+        constexpr std::size_t argChars  = 100;
         FunctionName          result{};
         auto                  put = [&](char ch) {
-            if(result.size + 1 > FunctionName::Capacity) { return; }
+            if(result.size + 1 > FunctionName::capacity) { return; }
             result.chars[result.size++] = ch;
         };
         auto putAll = [&](std::string_view text) {
@@ -232,13 +232,13 @@ namespace uc_log { namespace detail {
         };
 
         auto putArguments = [&](std::size_t open) {
-            std::size_t const limit      = sig.size() < ArgRead ? sig.size() : ArgRead;
+            std::size_t const limit      = sig.size() < readLimit ? sig.size() : readLimit;
             std::size_t const start      = result.size;
             std::size_t       tokenStart = result.size + 1;
             int               depth      = 0;
             for(std::size_t i = open; i < limit; ++i) {
                 char const c = sig[i];
-                if(result.size - start >= ArgChars) {
+                if(result.size - start >= argChars) {
                     putAll("...>");
                     return;
                 }
@@ -273,12 +273,12 @@ namespace uc_log { namespace detail {
             putAll("...>");
         };
 
-        sig = sig.substr(0, ArgRead);
+        sig = sig.substr(0, readLimit);
         if(!scan.found) {
             putAll(function);
             return result;
         }
-        std::size_t kept  = SignatureScan::MaxComponents;
+        std::size_t kept  = SignatureScan::maxComponents;
         bool        first = true;
         for(std::size_t k = 0; k < scan.comps; ++k) {
             auto part = sig.substr(scan.compBegin[k], scan.compEnd[k] - scan.compBegin[k]);
@@ -293,7 +293,7 @@ namespace uc_log { namespace detail {
             }
             kept = k;
         }
-        if(kept != SignatureScan::MaxComponents) {
+        if(kept != SignatureScan::maxComponents) {
             auto const begin = scan.compBegin[kept];
             auto const end   = scan.compEnd[kept];
             auto const part  = sig.substr(begin, end - begin);
@@ -338,8 +338,8 @@ namespace uc_log { namespace detail {
     // the name before the parameter list, "operator()" inside a lambda.
     constexpr std::string_view functionOfDemangled(std::string_view sig) {
         constexpr auto npos = std::string_view::npos;
-        std::string_view constexpr OperatorChars{"<>=-!+*/%^&|~,"};
-        if(sig.find("'lambda") != npos || sig.find("{lambda(") != npos) { return "operator()"; }
+        std::string_view constexpr operatorChars{"<>=-!+*/%^&|~,"};
+        if(sig.contains("'lambda") || sig.contains("{lambda(")) { return "operator()"; }
         std::size_t open   = sig.size();
         std::size_t opName = npos;   // an operator's name, whose '<' '>' '(' are no brackets
         std::size_t opEnd  = npos;
@@ -354,7 +354,7 @@ namespace uc_log { namespace detail {
                 if(rest.starts_with("()") || rest.starts_with("[]")) {
                     j += 2;
                 } else {
-                    while(j < sig.size() && OperatorChars.find(sig[j]) != npos) { ++j; }
+                    while(j < sig.size() && operatorChars.contains(sig[j])) { ++j; }
                 }
                 if(j != i + 8) {
                     opName = i;
@@ -366,8 +366,8 @@ namespace uc_log { namespace detail {
             if(c == '<') { ++depth; }
             if(c == '>') { --depth; }
             if(c == '(' && depth == 0) {
-                if(sig.substr(i).starts_with(ClangAnonymous)) {
-                    i += ClangAnonymous.size() - 1;
+                if(sig.substr(i).starts_with(clangAnonymous)) {
+                    i += clangAnonymous.size() - 1;
                     continue;
                 }
                 open = i;

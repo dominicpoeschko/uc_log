@@ -1,13 +1,14 @@
 // Any bytes over a real socket, in chunks the input chooses: what comes back is valid JSON lines,
 // and afterwards a fresh connection's ping is still answered.
 //
-// On the server's virtual clock (uc_log/detail/Clock.hpp): its threads and this one move the time, so "nothing more
+// On the server's virtual clock (uc_log/printer/Clock.hpp): its threads and this one move the time, so "nothing more
 // came for 20 ms" means the server had nothing left to do, and an unanswered ping a server that is stuck - not a
 // machine that was slow. The same input does the same on every run.
 
 #include "../ControlProtocolFixture.hpp"
 #include "FuzzChecks.hpp"
-#include "uc_log/detail/Clock.hpp"
+#include "uc_log/printer/Clock.hpp"
+#include "uc_log/printer/ControlServer.hpp"
 
 #include <cerrno>
 #include <chrono>
@@ -24,16 +25,16 @@
 #include <unistd.h>
 
 namespace {
-namespace ctl = uc_log::control;
+namespace ctl = uc_log::printer::control;
 namespace fx  = uc_log::control_fixture;
 
-using uc_log::detail::Clock;
+using uc_log::printer::Clock;
 
 struct Fixture {
-    uc_log::detail::VirtualTime   time;   // first: the server's threads take part in it
-    std::filesystem::path         path;
-    fx::FakeTarget                fake;
-    uc_log::detail::ControlServer server;
+    uc_log::printer::VirtualTime   time;   // first: the server's threads take part in it
+    std::filesystem::path          path;
+    fx::FakeTarget                 fake;
+    uc_log::printer::ControlServer server;
 
     Fixture()
       : path{std::filesystem::temp_directory_path()
@@ -42,19 +43,23 @@ struct Fixture {
                0,
                path} {
         server.setTarget(fake.target());
-        for(int i = 0; i != 500 && server.getStatus() != TcpPortStatus::Active; ++i) {
+        for(int i = 0; i != 500 && server.getStatus() != uc_log::printer::SocketPortStatus::active;
+            ++i)
+        {
             Clock::sleep_for(std::chrono::milliseconds{1});
         }
     }
 };
 
 Fixture& fixture() {
-    static auto* f = new Fixture;   // one server for the whole run; leaked on purpose
-    return *f;
+    // one server for the whole run, never destroyed (it outlives every input, and the fuzzer's exit)
+    static Fixture& f = *std::make_unique<Fixture>().release();
+    return f;
 }
 
 int connectTo(std::filesystem::path const& path) {
-    int const   fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int const fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if(fd < 0) { return -1; }
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     path.native().copy(addr.sun_path, sizeof(addr.sun_path) - 1);
@@ -82,7 +87,7 @@ std::string drain(int  fd,
             continue;
         }
         got.append(buffer, static_cast<std::size_t>(n));
-        if(untilLine && got.find('\n') != std::string::npos) { break; }
+        if(untilLine && got.contains('\n')) { break; }
         quietSince = Clock::now();
     }
     return got;
@@ -135,7 +140,10 @@ extern "C" int LLVMFuzzerTestOneInput(std::uint8_t const* data,
         answer = drain(probe, 2000, true);
         ::close(probe);
     }
-    if(answer != uc_log::control::toLine(uc_log::control::Answer{uc_log::control::PingAnswer{}})) {
+    if(answer
+       != uc_log::printer::control::toLine(
+         uc_log::printer::control::Answer{uc_log::printer::control::PingAnswer{}}))
+    {
         std::fprintf(stderr,
                      "server holds %zu client(s), %zu request(s) in flight\n",
                      f.server.getClientCount(),

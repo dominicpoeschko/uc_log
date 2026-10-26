@@ -12,7 +12,7 @@
 namespace uc_log { namespace detail {
 
     //"uc_log" is reserved as name prefix for the log up buffers
-    static constexpr std::string_view LogBufferNamePrefix{"uc_log"};
+    static constexpr std::string_view logBufferNamePrefix{"uc_log"};
 
     template<std::size_t I>
     consteval auto makeLogChannelNameStorage() {
@@ -26,30 +26,23 @@ namespace uc_log { namespace detail {
             return n;
         }();
 
-        std::array<char, LogBufferNamePrefix.size() + digits + 1> storage{};
-        for(std::size_t i{}; i < LogBufferNamePrefix.size(); ++i) {
-            storage[i] = LogBufferNamePrefix[i];
+        std::array<char, logBufferNamePrefix.size() + digits + 1> storage{};
+        for(std::size_t i{}; i < logBufferNamePrefix.size(); ++i) {
+            storage[i] = logBufferNamePrefix[i];
         }
         std::size_t v{I};
         for(std::size_t i{}; i < digits; ++i) {
-            storage[LogBufferNamePrefix.size() + digits - 1 - i] = static_cast<char>('0' + v % 10);
+            storage[logBufferNamePrefix.size() + digits - 1 - i] = static_cast<char>('0' + v % 10);
             v /= 10;
         }
         return storage;
     }
 
-    template<std::size_t I>
-    struct LogChannelName {
-        static constexpr auto storage = makeLogChannelNameStorage<I>();
-
-        constexpr operator std::string_view() const {
-            return std::string_view{storage.data(), storage.size() - 1};
-        }
-    };
-
-    template<ChannelName Name>
-    struct DuplexBufferName {
-        static constexpr auto storage = Name.value;
+    // An RTT buffer's name as rtt::ChannelConfig takes it: a type whose static storage holds the NUL-terminated name -
+    // a log ring's "uc_log<N>" (makeLogChannelNameStorage), a duplex channel's ChannelName (its value).
+    template<auto Storage>
+    struct BufferName {
+        static constexpr auto storage = Storage;
 
         constexpr operator std::string_view() const {
             return std::string_view{storage.data(), storage.size() - 1};
@@ -63,25 +56,25 @@ namespace uc_log { namespace detail {
     struct RttConfigBuilder<LogMode, DuplexChannels<DuplexConfigs...>, LogBufferSizes...> {
     private:
         template<std::size_t... Is>
-        static auto makeLogUpConfigs(std::index_sequence<Is...>)
-          -> rtt::make_ChannelConfigs_t<rtt::ChannelConfig<LogBufferSizes,
-                                                           LogMode,
-                                                           LogChannelName<Is>>...>;
+        static auto makeLogUpConfigs(std::index_sequence<Is...>) -> rtt::make_ChannelConfigs_t<
+          rtt::ChannelConfig<LogBufferSizes,
+                             LogMode,
+                             BufferName<makeLogChannelNameStorage<Is>()>>...>;
 
         using LogUpConfigs
           = decltype(makeLogUpConfigs(std::make_index_sequence<sizeof...(LogBufferSizes)>{}));
 
         using DuplexUpConfigs = rtt::make_ChannelConfigs_t<
-          rtt::ChannelConfig<DuplexConfigs::UpSize,
-                             DuplexConfigs::UpMode,
-                             DuplexBufferName<DuplexConfigs::Name>>...>;
+          rtt::ChannelConfig<DuplexConfigs::upSize,
+                             DuplexConfigs::upMode,
+                             BufferName<DuplexConfigs::name.value>>...>;
 
         static constexpr bool duplexNamesValid() {
             std::array<std::string_view, sizeof...(DuplexConfigs)> const names{
-              std::string_view{DuplexConfigs::Name}...};
+              std::string_view{DuplexConfigs::name}...};
             for(std::size_t i{}; i < names.size(); ++i) {
                 if(names[i].empty()) { return false; }
-                if(names[i].starts_with(LogBufferNamePrefix)) { return false; }
+                if(names[i].starts_with(logBufferNamePrefix)) { return false; }
                 for(std::size_t j{i + 1}; j < names.size(); ++j) {
                     if(names[i] == names[j]) { return false; }
                 }
@@ -94,8 +87,8 @@ namespace uc_log { namespace detail {
                       "reserved log buffer prefix \"uc_log\"");
 
     public:
-        static constexpr std::size_t NumLogUpBuffers   = sizeof...(LogBufferSizes);
-        static constexpr std::size_t NumDuplexChannels = sizeof...(DuplexConfigs);
+        static constexpr std::size_t numLogUpBuffers   = sizeof...(LogBufferSizes);
+        static constexpr std::size_t numDuplexChannels = sizeof...(DuplexConfigs);
 
         template<std::size_t I>
         using DuplexConfigAt = std::tuple_element_t<I, std::tuple<DuplexConfigs...>>;
@@ -105,11 +98,11 @@ namespace uc_log { namespace detail {
                                                              std::declval<DuplexUpConfigs>()));
 
             using DownChannelConfigs = rtt::make_ChannelConfigs_t<
-              rtt::ChannelConfig<DuplexConfigs::DownSize,
-                                 DuplexConfigs::DownMode,
-                                 DuplexBufferName<DuplexConfigs::Name>>...>;
+              rtt::ChannelConfig<DuplexConfigs::downSize,
+                                 DuplexConfigs::downMode,
+                                 BufferName<DuplexConfigs::name.value>>...>;
 
-            static constexpr auto ControlBlockId{rtt::DefaultControlBlockId};
+            static constexpr auto controlBlockId{rtt::defaultControlBlockId};
         };
     };
 

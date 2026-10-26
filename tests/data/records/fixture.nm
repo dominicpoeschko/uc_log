@@ -1,0 +1,26 @@
+10000101 00000040 T App::Motor::step()
+10000149 00000012 T Kvasir::Panic::raise(Kvasir::Panic::Cause)
+10000201 00000040 T main
+100002f1 00000020 T App::check()
+10000401 00000080 T Kvasir::Fault::HandlerFor<Kvasir::Fault::Options{2048u, true}, Kvasir::Fault::MainStackTop>::onIsr()
+10004000 0000000c r Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"edges"}}, 1024u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"us"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"n"}}, Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"level"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"x"}}>::descriptor
+1000400c 0000000c r Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<4u>{std::__2::array<char, 4u>{"isr"}}, 8u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"at"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"v"}}>::descriptor
+10004020 00000013 r Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"edges"}}, 1024u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"us"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"n"}}, Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"level"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"x"}}>::layout
+10004040 00000009 r Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<4u>{std::__2::array<char, 4u>{"isr"}}, 8u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"at"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"v"}}>::layout
+20000000 A _LINKER_INTERN_stack_start_
+20000000 A _LINKER_stack_start_
+20000800 A _LINKER_INTERN_stack1_start_
+20000800 A _LINKER_INTERN_stack_end_
+20000800 A _LINKER_stack1_start_
+20000800 A _LINKER_stack_end_
+20000c00 A _LINKER_INTERN_stack1_end_
+20000c00 A _LINKER_stack1_end_
+20001000 00000008 b Kvasir::Ubsan::ubsanReports
+20001010 00004004 b Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"edges"}}, 1024u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"us"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"n"}}, Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"level"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"x"}}>::storage
+20005020 00000044 b Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<4u>{std::__2::array<char, 4u>{"isr"}}, 8u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"at"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"v"}}>::storage
+20006000 0000008c b Kvasir::Fault::lastFault
+20006090 00000050 b Kvasir::Fault::lastStack<(unsigned short)64>
+200060e4 00000028 b Kvasir::Panic::lastPanic
+20006110 00000020 b Kvasir::Health::lastStarvation
+20006134 00000020 b Kvasir::Health::lastRecovery
+20006158 00000014 b Kvasir::BootGuard::state

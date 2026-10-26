@@ -1,0 +1,48 @@
+     VMA      LMA     Size Align Out     In      Symbol
+10000000 10000000     4080     4 .text
+10000100 10000100       40     4         fixture.elf.lto.o:(.text.f10000100)
+10000100 10000100        0     1                 $t
+10000101 10000101       40     1                 App::Motor::step()
+10000148 10000148       12     4         fixture.elf.lto.o:(.text.f10000148)
+10000148 10000148        0     1                 $t
+10000149 10000149       12     1                 Kvasir::Panic::raise(Kvasir::Panic::Cause)
+10000200 10000200       40     4         fixture.elf.lto.o:(.text.f10000200)
+10000200 10000200        0     1                 $t
+10000201 10000201       40     1                 main
+100002f0 100002f0       20     4         fixture.elf.lto.o:(.text.f100002f0)
+100002f0 100002f0        0     1                 $t
+100002f1 100002f1       20     1                 App::check()
+10000400 10000400       80     4         fixture.elf.lto.o:(.text.f10000400)
+10000400 10000400        0     1                 $t
+10000401 10000401       80     1                 Kvasir::Fault::HandlerFor<Kvasir::Fault::Options{2048u, true}, Kvasir::Fault::MainStackTop>::onIsr()
+10004000 10004000       80     4         fixture.elf.lto.o:(.rodata)
+10004000 10004000        c     1                 Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"edges"}}, 1024u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"us"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"n"}}, Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"level"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"x"}}>::descriptor
+1000400c 1000400c        c     1                 Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<4u>{std::__2::array<char, 4u>{"isr"}}, 8u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"at"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"v"}}>::descriptor
+10004020 10004020       13     1                 Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"edges"}}, 1024u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"us"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"n"}}, Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"level"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"x"}}>::layout
+10004040 10004040        9     1                 Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<4u>{std::__2::array<char, 4u>{"isr"}}, 8u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"at"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"v"}}>::layout
+20000000 20000000      800     4 .stack
+20000000 20000000        0     1         _LINKER_INTERN_stack_start_ = .
+20000000 20000000      800     1         . = . + cmake_min_stack_size
+20000800 20000800        0     1         _LINKER_INTERN_stack_end_ = .
+20000800 20000800      400     1 .stack1
+20000800 20000800        0     1         _LINKER_INTERN_stack1_start_ = .
+20000800 20000800      400     1         . = . + cmake_core1_stack_size
+20000c00 20000c00        0     1         _LINKER_INTERN_stack1_end_ = .
+20001000 20001000     4064     4 .bss
+20001000 20001000        8     4         fixture.elf.lto.o:(.bss._ZN6Kvasir5Ubsan12ubsanReportsE)
+20001000 20001000        8     1                 Kvasir::Ubsan::ubsanReports
+20001010 20001010     4054     4         fixture.elf.lto.o:(.bss)
+20001010 20001010     4004     1                 Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"edges"}}, 1024u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"us"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"n"}}, Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"level"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"x"}}>::storage
+20005020 20005020       44     1                 Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<4u>{std::__2::array<char, 4u>{"isr"}}, 8u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"at"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"v"}}>::storage
+20006000 20006000      170     4 .noInit
+20006000 20006000      170     4         fixture.elf.lto.o:(.noInit)
+20006000 20006000       8c     1                 Kvasir::Fault::lastFault
+20006090 20006090       50     1                 Kvasir::Fault::lastStack<(unsigned short)64>
+200060e4 200060e4       28     1                 Kvasir::Panic::lastPanic
+20006110 20006110       20     1                 Kvasir::Health::lastStarvation
+20006134 20006134       20     1                 Kvasir::Health::lastRecovery
+20006158 20006158       14     1                 Kvasir::BootGuard::state
+20006170 20006170        0     1 _LINKER_stack_start_ = _LINKER_INTERN_stack_start_
+20006170 20006170        0     1 _LINKER_stack_end_ = _LINKER_INTERN_stack_end_
+20006170 20006170        0     1 _LINKER_stack1_start_ = cmake_core1_stack_in_scratch ? _LINKER_INTERN_stack1_scratch_start_ : _LINKER_INTERN_stack1_start_
+20006170 20006170        0     1 _LINKER_stack1_end_ = cmake_core1_stack_in_scratch ? _LINKER_INTERN_stack1_scratch_end_ : _LINKER_INTERN_stack1_end_

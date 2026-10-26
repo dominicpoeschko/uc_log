@@ -1,53 +1,61 @@
-#pragma once
+// The image's config header comes first: UC_LOG_CONFIG_HEADER (a quoted path, set on the image target by its build)
+// names the one header that specialises ComBackend<Tag::User> and LogClock<Tag::User>, complete. Every TU that logs
+// then sees them before any log line, whatever it included before. Without the macro nothing is read: the TU (or a
+// header before it) specialises them itself.
+//
+// The config header must not reach this header, directly or through another one: the check sits before the include
+// guard, so a re-entry is this error instead of a skipped file and "undeclared identifier UC_LOG_I" later.
+#ifdef UC_LOG_DETAIL_READING_CONFIG
+    #error \
+      "the config header (UC_LOG_CONFIG_HEADER) includes uc_log/uc_log.hpp, directly or through another header: it may only include the backend, clock and LogClock.hpp headers"
+#endif
+#ifndef UC_LOG_UC_LOG_HPP
+    #define UC_LOG_UC_LOG_HPP
 
-#include "ComBackend.hpp"
-#include "LogClock.hpp"
-#include "LogEnv.hpp"
-#include "LogFilter.hpp"
-#include "LogLevel.hpp"
-#include "Tag.hpp"
-#include "detail/LevelBoundBackend.hpp"
-#include "detail/Lifetimebound.hpp"
-#include "metric.hpp"
-#include "remote_fmt/remote_fmt.hpp"
-#include "rtt/rtt.hpp"
+    #ifdef UC_LOG_CONFIG_HEADER
+        #define UC_LOG_DETAIL_READING_CONFIG
+        #include UC_LOG_CONFIG_HEADER
+        #undef UC_LOG_DETAIL_READING_CONFIG
+    #endif
 
-// Formats reflectable structs. Not left to the user: it is a formatter specialization, so including it after a log
-// call site that uses the type would be an ODR violation.
-#include "aglio/remote_fmt.hpp"
+    #include "ComBackend.hpp"
+    #include "LogClock.hpp"
+    #include "LogEnv.hpp"
+    #include "LogFilter.hpp"
+    #include "LogLevel.hpp"
+    #include "Tag.hpp"
+    #include "detail/LevelBoundBackend.hpp"
+    #include "detail/Lifetimebound.hpp"
+    #include "detail/LostRecord.hpp"
+    #include "metric.hpp"
+    #include "string_constant/string_constant.hpp"
 
-#include <cstddef>
-#include <cstdint>
-#include <string_view>
-#include <tuple>
-#include <type_traits>
-#include <utility>
+    // A variant without USE_UC_LOG parses only the macro front end above: levels, environments, the filter, metric() and
+    // string_constant. No remote_fmt, fmt, glaze, enchantum or mp-units reaches it from here.
+    #ifdef USE_UC_LOG
+        #include "remote_fmt/descriptor.hpp"
+        #include "remote_fmt/remote_fmt.hpp"
+
+        // UC_LOG_USE_AGLIO (0/1): whether reflectable structs (aglio/glaze) are formattable. One value per image, set by the
+        // build (kvasir_executable_variants(... LOG_REFLECTED_STRUCTS ON|OFF)), never per TU: the aglio formatter is a
+        // specialization, so TUs that disagree are an ODR violation. Off, logging such a struct is "implicit
+        // instantiation of undefined template remote_fmt::formatter<S>".
+        #ifndef UC_LOG_USE_AGLIO
+            #define UC_LOG_USE_AGLIO 1
+        #endif
+        #if UC_LOG_USE_AGLIO
+            #include "aglio/remote_fmt.hpp"
+        #endif
+    #endif
+
+    #include <cstddef>
+    #include <cstdint>
+    #include <string_view>
+    #include <tuple>
+    #include <type_traits>
+    #include <utility>
 
 namespace uc_log { namespace detail {
-    struct FileName {
-    private:
-        std::string_view sv;
-
-        consteval auto basename(std::string_view f UC_LOG_LIFETIMEBOUND) {
-            auto const pos = f.find('/');
-            if(pos == std::string_view::npos) { return f; }
-            return f.substr(pos + 1);
-        }
-
-    public:
-        template<std::size_t N>
-        consteval FileName(char const (&s UC_LOG_LIFETIMEBOUND)[N])
-          : sv{basename(std::string_view{s})} {}
-
-        // No mark here: for a view (StartUp.hpp passes a std::string_view) the result points where
-        // `s` points, not into `s` - clang 23 reports a mark on it as unverifiable.
-        template<std::convertible_to<std::string_view> S>
-            requires(!std::is_array_v<S>)
-        consteval FileName(S const& s) : sv{basename(std::string_view{s})} {}
-
-        constexpr operator std::string_view() const { return sv; }
-    };
-
     // The no-log build's stand-in for a log call, named in the dead arm of a constant-false
     // conditional: nothing is evaluated or emitted, but the arguments count as used, so no
     // unused warnings. Const references so bit-fields bind; returns int so the arms agree.
@@ -55,6 +63,21 @@ namespace uc_log { namespace detail {
     constexpr int touch(Ts const&...) noexcept {
         return 0;
     }
+}}   // namespace uc_log::detail
+
+    #ifdef USE_UC_LOG
+namespace uc_log { namespace detail {
+    // __FILE_NAME__, the file's name without its directory
+    struct FileName {
+    private:
+        std::string_view sv;
+
+    public:
+        template<std::size_t N>
+        consteval FileName(char const (&s UC_LOG_LIFETIMEBOUND)[N]) : sv{std::string_view{s}} {}
+
+        constexpr operator std::string_view() const { return sv; }
+    };
 
     // Validates every log argument. Arrays pass (char[N] keeps formatter<char[N]>'s N-1
     // semantics, other arrays log as ranges). Of pointers only void* passes, logged as an
@@ -106,7 +129,7 @@ namespace uc_log { namespace detail {
                            T const&,
                            std::conditional_t<std::is_trivially_copyable_v<T>, T, T const&>>;
 
-    // Second phase of UC_LOG_IMPL's two-phase call; logArgumentTypes is the first. The split
+    // Second phase of UC_LOG_AT's two-phase call; logArgumentTypes is the first. The split
     // keeps __VA_ARGS__ inside ordinary call parentheses both times, so braced arguments with
     // commas (Point{1, 2}) survive the preprocessor.
     template<typename>
@@ -137,22 +160,44 @@ namespace uc_log { namespace detail {
         [[gnu::noinline,
           gnu::no_stack_protector]] explicit RecordFrame(remote_fmt::catalog_id site)
           : time{ticks(LogClock<ClockTag>::now())} {
+            open();
+            printer.beginCataloged(remote_fmt::SiteId{site});
+            printer.formatArguments(time);
+        }
+
+        // Without the catalog (host builds) the record starts with its described string instead of the site's id;
+        // the rest of the frame is the same.
+        template<char... Chars>
+        [[gnu::no_stack_protector]] explicit RecordFrame(sc::StringConstant<Chars...> described)
+          : time{ticks(LogClock<ClockTag>::now())} {
+            open();
+            printer.beginInline(described);
+            printer.formatArguments(time);
+        }
+
+        [[gnu::noinline]] ~RecordFrame() {
+            if constexpr(remote_fmt::useCatalog) {
+                printer.endCataloged();
+            } else {
+                printer.endInline();
+            }
+        }
+
+        // What every record does before its start: the boot noted (RttEpoch.hpp), and with LossPolicy::Counted the
+        // records this ring dropped told first, as one line.
+        [[gnu::always_inline,
+          gnu::no_stack_protector]] void
+        open() {
             if constexpr(requires { ComBackend::noteRecord(); }) { ComBackend::noteRecord(); }
-            // LossPolicy::Counted: records this ring dropped come first, as one line
             if constexpr(requires { ComBackend::lossMark(); }) {
                 if(auto const mark = ComBackend::lossMark(); mark.pending != 0) [[unlikely]] {
                     reportLost(mark);
                 }
             }
-            printer.beginCataloged(remote_fmt::SiteId{site});
-            printer.formatArguments(time);
         }
 
-        [[gnu::noinline]] ~RecordFrame() { printer.endCataloged(); }
-
-        // "⚠ N log records lost on this channel", a warn line of module uc_log with this frame's
-        // printer and time (the first moment the target knew the loss had ended: the lines were
-        // lost before it). Its own drop is not counted (lossSettle). Defined below the macros.
+        // The lost-record line (detail/LostRecord.hpp), a warn line of module uc_log with this frame's printer and
+        // time (when the target knew the loss had ended); its own drop is not counted (lossSettle). Defined below.
         template<typename Mark>
         [[gnu::noinline,
           gnu::cold]] void
@@ -166,6 +211,13 @@ namespace uc_log { namespace detail {
     // Args the line's own arguments.
     template<typename Ticks, typename... Args>
     struct Log<std::tuple<Ticks, Args...>> {
+        // The line's string as its call site's tag names it: the format string with the descriptors of the time
+        // stamp and the arguments (remote_fmt::described), so the catalog says how to read the record's values.
+        template<typename Fmt>
+        static consteval auto described(Fmt) {
+            return remote_fmt::described<Ticks, Args...>(Fmt{});
+        }
+
         // The format with the metrics' markers put in.
         template<typename Fmt>
         using Final = decltype(injectMetricFmtString(Fmt{},
@@ -190,37 +242,35 @@ namespace uc_log { namespace detail {
         // instantiation of the caller.
         template<typename ComBackend,
                  typename ClockTag,
-                 char... chars>
+                 char... Chars>
         [[gnu::always_inline]] static constexpr void log(remote_fmt::catalog_id       site,
-                                                         sc::StringConstant<chars...> fmt,
+                                                         sc::StringConstant<Chars...> fmt,
                                                          LogArgument_t<Args>... args) {
-            static_assert(std::is_same_v<Ticks, decltype(ticks(LogClock<ClockTag>::now()))>);
-            if constexpr(remote_fmt::use_catalog) {
-                // the string is needed for this check only, which makes no code
-                remote_fmt::Printer<ComBackend>::
-                  template checkCataloged<Ticks const&, decltype(normalizeLogArgument(args))...>(
-                    fmt);
+            // with the catalog the string is needed for this check only, which makes no code
+            remote_fmt::Printer<ComBackend>::
+              template checkCataloged<Ticks const&, decltype(normalizeLogArgument(args))...>(fmt);
+            if constexpr(remote_fmt::useCatalog) {
                 record<ComBackend, ClockTag>(site, args...);
             } else {
-                Ticks const time = ticks(LogClock<ClockTag>::now());
-                [[maybe_unused]] typename ComBackend::RecordGuard const guard{};
-                remote_fmt::Printer<ComBackend>::staticPrint(fmt,
-                                                             time,
-                                                             normalizeLogArgument(args)...);
+                RecordFrame<ComBackend, ClockTag> frame{
+                  remote_fmt::described<Ticks const&, decltype(normalizeLogArgument(args))...>(
+                    fmt)};
+                frame.printer.formatArguments(normalizeLogArgument(args)...);
             }
         }
     };
 
 }}   // namespace uc_log::detail
+    #endif
 
-// Compile-time level floor: call sites below it expand to nothing at all -- no code,
-// no format string in the catalog. Set by LogLevel enumerator name so the build system
-// needs no copy of the numbering (-DUC_LOG_MIN_LEVEL=warn keeps warn/error/crit); an
-// unknown name fails on the line below. The discarded branch is still semantically
-// checked, so an unloggable argument is an error at every level.
-#ifndef UC_LOG_MIN_LEVEL
-    #define UC_LOG_MIN_LEVEL trace
-#endif
+    // Compile-time level floor: call sites below it expand to nothing at all -- no code,
+    // no format string in the catalog. Set by LogLevel enumerator name so the build system
+    // needs no copy of the numbering (-DUC_LOG_MIN_LEVEL=warn keeps warn/error/crit); an
+    // unknown name fails on the line below. The discarded branch is still semantically
+    // checked, so an unloggable argument is an error at every level.
+    #ifndef UC_LOG_MIN_LEVEL
+        #define UC_LOG_MIN_LEVEL trace
+    #endif
 
 namespace uc_log {
 inline constexpr LogLevel minLevel = LogLevel::UC_LOG_MIN_LEVEL;
@@ -253,7 +303,8 @@ namespace detail {
         return static_cast<std::uint8_t>(Level) >= (floor > global ? floor : global);
     }
 
-    // Time goes out as a tick count, the header says "<count>[num/den]s".
+    #ifdef USE_UC_LOG
+    // Time goes out as a tick count, the header says "<count>[num/den]s" (numbers by desc::number: no fmt parsing).
     template<typename Tag>
     using LogTimePoint = decltype(LogClock<Tag>::now());
 
@@ -261,8 +312,9 @@ namespace detail {
     consteval auto timeSuffix() {
         using namespace ::sc::literals;
         using Period = typename LogTimePoint<Tag>::period;
-        return ::sc::detail::format<static_cast<std::uint64_t>(Period::num),
-                                    static_cast<std::uint64_t>(Period::den)>("[{}/{}]s"_sc);
+        return "["_sc + ::remote_fmt::desc::number<static_cast<std::uint64_t>(Period::num)>()
+             + "/"_sc + ::remote_fmt::desc::number<static_cast<std::uint64_t>(Period::den)>()
+             + "]s"_sc;
     }
 
     // now() is a time_point or a duration
@@ -276,71 +328,68 @@ namespace detail {
             return time.count();
         }
     }
+    #endif
 }   // namespace detail
 }   // namespace uc_log
 
-#ifdef USE_UC_LOG
-    // Shared assembly of the compile-time header string; expects the UC_LOG_DO_NOT_USE_ names of
-    // UC_LOG_IMPL and the sc literal namespaces in scope. Names the macros introduce carry the
-    // UC_LOG_DO_NOT_USE_ prefix: they expand into the caller's scope (-Wshadow).
-    #define UC_LOG_DETAIL_FMT(level, line, filename, fmt)                                        \
-        "(\""_sc + SC_LIFT(::uc_log::detail::FileName{filename}) + "\", "_sc                     \
-          + ::sc::detail::format<static_cast<std::uint32_t>(line),                               \
-                                 static_cast<std::uint8_t>(level)>("{}, {}"_sc)                  \
-          + ", {}"_sc + ::uc_log::detail::timeSuffix<::uc_log::detail::EnvTag_t<uc_log_env_t>>() \
-          + ", "_sc + ::uc_log::detail::headerTail<uc_log_env_t>() + "\"\"\")"_sc + SC_LIFT(fmt)
+    #ifdef USE_UC_LOG
+        // The compile-time header string of a line in a scope with the environment `env` and the backend
+        // tag `tag` (EnvTag_t<env>); expects the sc literal namespaces in scope. Names the macros introduce
+        // carry the UC_LOG_DO_NOT_USE_ prefix: they expand into the caller's scope (-Wshadow).
+        #define UC_LOG_DETAIL_FMT(tag, env, level, line, filename, fmt)                            \
+            ("(\""_sc + SC_LIFT(::uc_log::detail::FileName{filename}) + "\", "_sc                  \
+             + ::remote_fmt::desc::number<static_cast<std::uint32_t>(line)>() + ", "_sc            \
+             + ::remote_fmt::desc::number<static_cast<std::uint8_t>(level)>() + ", {}"_sc          \
+             + ::uc_log::detail::timeSuffix<tag>() + ", "_sc + ::uc_log::detail::headerTail<env>() \
+             + "\"\"\")"_sc + SC_LIFT(fmt))
 
-    // Only the filter file's module rules need the signature.
-    #ifdef UC_LOG_HAS_FILTER_FILE
-        #define UC_LOG_DETAIL_FILTER_SIGNATURE                                     \
-            std::string_view{__PRETTY_FUNCTION__, sizeof(__PRETTY_FUNCTION__) - 1}
-    #else
-        #define UC_LOG_DETAIL_FILTER_SIGNATURE \
-            std::string_view {}
-    #endif
+        // Only the filter file's module rules need the signature.
+        #ifdef UC_LOG_HAS_FILTER_FILE
+            #define UC_LOG_DETAIL_FILTER_SIGNATURE                                     \
+                std::string_view{__PRETTY_FUNCTION__, sizeof(__PRETTY_FUNCTION__) - 1}
+        #else
+            #define UC_LOG_DETAIL_FILTER_SIGNATURE \
+                std::string_view {}
+        #endif
 
-    // The argument list appears twice: unevaluated to harvest the types, then as the real
-    // call; nothing is evaluated twice. uc_log_env_t is unqualified on purpose (LogEnv.hpp).
-    #define UC_LOG_IMPL(level, line, filename, fmt, ...)                                         \
-        do {                                                                                     \
-            if constexpr(::uc_log::detail::lineEnabled<static_cast<::uc_log::LogLevel>(level),   \
-                                                       uc_log_env_t>(                            \
-                           UC_LOG_DETAIL_FILTER_SIGNATURE))                                      \
-            {                                                                                    \
-                if(!std::is_constant_evaluated()) {                                              \
-                    using namespace ::remote_fmt::detail;                                        \
-                    using namespace ::sc::literals;                                              \
-                    using UC_LOG_DO_NOT_USE_LOG                                                  \
-                      = ::uc_log::detail::Log<decltype(::uc_log::detail::logArgumentTypes(       \
-                        ::uc_log::detail::LogArgumentsPreferred{},                               \
-                        ::uc_log::detail::ticks(                                                 \
-                          ::uc_log::LogClock<::uc_log::detail::EnvTag_t<uc_log_env_t>>::now())   \
-                          __VA_OPT__(, ) __VA_ARGS__))>;                                         \
-                    constexpr typename UC_LOG_DO_NOT_USE_LOG::template Final<                    \
-                      decltype(UC_LOG_DETAIL_FMT(level, line, filename, fmt))>                   \
-                      UC_LOG_DO_NOT_USE_FMT{};                                                   \
-                    UC_LOG_DO_NOT_USE_LOG::template log<                                         \
-                      ::uc_log::detail::ResolveBackend<::uc_log::detail::EnvTag_t<uc_log_env_t>, \
-                                                       static_cast<::uc_log::LogLevel>(level)>,  \
-                      ::uc_log::detail::EnvTag_t<uc_log_env_t>>(                                 \
-                      REMOTE_FMT_SITE()(UC_LOG_DO_NOT_USE_FMT),                                  \
-                      UC_LOG_DO_NOT_USE_FMT __VA_OPT__(, ) __VA_ARGS__);                         \
-                }                                                                                \
-            }                                                                                    \
-        } while(false)
-#else
-    // Same arguments and literal scope as the real call, never evaluated (detail::touch).
-    #define UC_LOG_IMPL(level, line, filename, fmt, ...)                                          \
-        do {                                                                                      \
-            using namespace ::sc::literals;                                                       \
-            static_cast<void>(false                                                               \
-                                ? ::uc_log::detail::touch(static_cast<::uc_log::LogLevel>(level), \
-                                                          fmt __VA_OPT__(, ) __VA_ARGS__)         \
-                                : 0);                                                             \
-        } while(false)
-#endif
+        // A log line at a given source position (UC_LOG passes __LINE__, __FILE_NAME__; a wrapper its
+        // caller's). The arguments appear twice: unevaluated to harvest the types, then as the real call;
+        // nothing is evaluated twice. uc_log_env_t is unqualified on purpose (LogEnv.hpp).
+        #define UC_LOG_AT(level, line, filename, fmt, ...)                                         \
+            do {                                                                                   \
+                using UC_LOG_DO_NOT_USE_TAG = ::uc_log::detail::EnvTag_t<uc_log_env_t>;            \
+                if constexpr(::uc_log::detail::lineEnabled<static_cast<::uc_log::LogLevel>(level), \
+                                                           uc_log_env_t>(                          \
+                               UC_LOG_DETAIL_FILTER_SIGNATURE))                                    \
+                {                                                                                  \
+                    if(!std::is_constant_evaluated()) {                                            \
+                        using namespace ::remote_fmt::detail;                                      \
+                        using namespace ::sc::literals;                                            \
+                        using UC_LOG_DO_NOT_USE_LOG                                                \
+                          = ::uc_log::detail::Log<decltype(::uc_log::detail::logArgumentTypes(     \
+                            ::uc_log::detail::LogArgumentsPreferred{},                             \
+                            ::uc_log::detail::ticks(                                               \
+                              ::uc_log::LogClock<UC_LOG_DO_NOT_USE_TAG>::now()) __VA_OPT__(, )     \
+                              __VA_ARGS__))>;                                                      \
+                        constexpr typename UC_LOG_DO_NOT_USE_LOG::template Final<                  \
+                          decltype(UC_LOG_DETAIL_FMT(UC_LOG_DO_NOT_USE_TAG,                        \
+                                                     uc_log_env_t,                                 \
+                                                     level,                                        \
+                                                     line,                                         \
+                                                     filename,                                     \
+                                                     fmt))>                                        \
+                          UC_LOG_DO_NOT_USE_FMT{};                                                 \
+                        UC_LOG_DO_NOT_USE_LOG::template log<                                       \
+                          ::uc_log::ResolveBackend<UC_LOG_DO_NOT_USE_TAG,                          \
+                                                   static_cast<::uc_log::LogLevel>(level)>,        \
+                          UC_LOG_DO_NOT_USE_TAG>(                                                  \
+                          REMOTE_FMT_SITE()(                                                       \
+                            UC_LOG_DO_NOT_USE_LOG::described(UC_LOG_DO_NOT_USE_FMT)),              \
+                          UC_LOG_DO_NOT_USE_FMT __VA_OPT__(, ) __VA_ARGS__);                       \
+                    }                                                                              \
+                }                                                                                  \
+            } while(false)
 
-#ifdef USE_UC_LOG
 template<typename ComBackend,
          typename ClockTag>
 template<typename Mark>
@@ -349,41 +398,54 @@ void uc_log::detail::RecordFrame<ComBackend,
     if constexpr(globalFloor() <= static_cast<std::uint8_t>(LogLevel::warn)) {
         using namespace ::remote_fmt::detail;
         using namespace ::sc::literals;
-        // UC_LOG_DETAIL_FMT reads uc_log_env_t: this scope's, as UC_LOG_ENV declares it
-    #pragma GCC diagnostic push
-    #pragma GCC diagnostic ignored "-Wshadow"
-        using uc_log_env_t
+        using LostEnv
           = ExtendEnv_t<Env<>, setting::Backend<ClockTag>, setting::Module<decltype("uc_log"_sc)>>;
-    #pragma GCC diagnostic pop
-        constexpr auto fmt = UC_LOG_DETAIL_FMT(
-          LogLevel::warn,
-          __LINE__,
-          __FILE_NAME__,
-          "⚠ {} log records lost on this channel (ring full, or no debugger)"_sc);
+        namespace lost = ::uc_log::detail::
+          lost_record;   // the text, shared with the printer: detail/LostRecord.hpp
+        using Text = decltype(::sc::create([] { return lost::sign(remote_fmt::useCatalog); })
+                              + " {} "_sc + ::sc::create([] { return lost::phrase; }) + " "_sc
+                              + ::sc::create([] { return lost::cause; }));
+        constexpr auto fmt
+          = UC_LOG_DETAIL_FMT(ClockTag, LostEnv, LogLevel::warn, __LINE__, __FILE_NAME__, Text{});
         remote_fmt::Printer<ComBackend>::template checkCataloged<Ticks const&,
                                                                  std::uint32_t const&>(fmt);
-        printer.beginCataloged(remote_fmt::SiteId{REMOTE_FMT_SITE()(fmt)});
+        constexpr auto described = remote_fmt::described<Ticks, decltype(mark.pending)>(fmt);
+        if constexpr(remote_fmt::useCatalog) {
+            printer.beginCataloged(remote_fmt::SiteId{REMOTE_FMT_SITE()(described)});
+        } else {
+            printer.beginInline(described);
+        }
         printer.formatArguments(time, mark.pending);
-        printer.endCataloged();
+        if constexpr(remote_fmt::useCatalog) {
+            printer.endCataloged();
+        } else {
+            printer.endInline();
+        }
     }
     ComBackend::lossSettle(mark);
 }
-#else
-template<typename ComBackend,
-         typename ClockTag>
-template<typename Mark>
-void uc_log::detail::RecordFrame<ComBackend,
-                                 ClockTag>::reportLost(Mark const mark) {
-    ComBackend::lossSettle(mark);
-}
-#endif
+    #endif
 
-#define UC_LOG(level, fmt, ...)                                                 \
-    UC_LOG_IMPL(level, __LINE__, __FILE_NAME__, fmt __VA_OPT__(, ) __VA_ARGS__)
+    #ifndef USE_UC_LOG
+        // Same arguments and literal scope as the real call, never evaluated (detail::touch).
+        #define UC_LOG_AT(level, line, filename, fmt, ...)                                \
+            do {                                                                          \
+                using namespace ::sc::literals;                                           \
+                static_cast<void>(                                                        \
+                  false ? ::uc_log::detail::touch(static_cast<::uc_log::LogLevel>(level), \
+                                                  fmt __VA_OPT__(, ) __VA_ARGS__)         \
+                        : 0);                                                             \
+            } while(false)
+    #endif
 
-#define UC_LOG_T(...) UC_LOG(::uc_log::LogLevel::trace, __VA_ARGS__)
-#define UC_LOG_D(...) UC_LOG(::uc_log::LogLevel::debug, __VA_ARGS__)
-#define UC_LOG_I(...) UC_LOG(::uc_log::LogLevel::info, __VA_ARGS__)
-#define UC_LOG_W(...) UC_LOG(::uc_log::LogLevel::warn, __VA_ARGS__)
-#define UC_LOG_E(...) UC_LOG(::uc_log::LogLevel::error, __VA_ARGS__)
-#define UC_LOG_C(...) UC_LOG(::uc_log::LogLevel::crit, __VA_ARGS__)
+    #define UC_LOG(level, fmt, ...)                                               \
+        UC_LOG_AT(level, __LINE__, __FILE_NAME__, fmt __VA_OPT__(, ) __VA_ARGS__)
+
+    #define UC_LOG_T(...) UC_LOG(::uc_log::LogLevel::trace, __VA_ARGS__)
+    #define UC_LOG_D(...) UC_LOG(::uc_log::LogLevel::debug, __VA_ARGS__)
+    #define UC_LOG_I(...) UC_LOG(::uc_log::LogLevel::info, __VA_ARGS__)
+    #define UC_LOG_W(...) UC_LOG(::uc_log::LogLevel::warn, __VA_ARGS__)
+    #define UC_LOG_E(...) UC_LOG(::uc_log::LogLevel::error, __VA_ARGS__)
+    #define UC_LOG_C(...) UC_LOG(::uc_log::LogLevel::crit, __VA_ARGS__)
+
+#endif   // UC_LOG_UC_LOG_HPP

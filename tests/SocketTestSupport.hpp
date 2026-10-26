@@ -1,13 +1,14 @@
 #pragma once
-// What tcp_server_tests and control_server_tests share: the check macro and a line client.
+// What tcp_server_tests and control_server_tests share: a line client (the checks are support/Check.hpp's).
 //
 // Under a VirtualTime (control_server_tests) the client never blocks in a socket call: the server's threads move the
 // virtual time only while every participant waits on the clock, so a test thread stuck in read() would hold the time
 // and wait for a server that waits for the time. It polls and sleeps on the clock instead, and a deadline is virtual
 // time (the same on every machine). Without one (tcp_server_tests) it blocks with no deadline at all: the ctest
 // TIMEOUT is the hang guard, no check depends on how fast an answer comes.
-#include "uc_log/detail/Clock.hpp"
-#include "uc_log/detail/ControlProtocol.hpp"
+#include "support/Check.hpp"
+#include "uc_log/printer/Clock.hpp"
+#include "uc_log/printer/ControlProtocol.hpp"
 
 #include <array>
 #include <atomic>
@@ -18,18 +19,9 @@
 #include <string_view>
 #include <variant>
 
-using uc_log::detail::Clock;
+using uc_log::printer::Clock;
 
-inline std::atomic<int>  failures{0};
 inline std::atomic<bool> quiet{false};
-
-#define CHECK(cond, msg)                                                \
-    do {                                                                \
-        if(!(cond)) {                                                   \
-            std::printf("FAIL: %s (%s:%d)\n", msg, __FILE__, __LINE__); \
-            ++failures;                                                 \
-        }                                                               \
-    } while(0)
 
 inline void note(char const* msg) {
     if(!quiet) { std::printf("-- %s\n", msg); }
@@ -81,7 +73,7 @@ struct LineClient {
             if(ec == boost::asio::error::timed_out) {
                 std::printf("FAIL: no line within %lld ms (virtual time)\n",
                             static_cast<long long>(timeout.count()));
-                ++failures;
+                ++uc_log::test::failures;
                 return {};
             }
             if(ec) {
@@ -97,10 +89,10 @@ struct LineClient {
     }
 };
 
-inline uc_log::control::Answer answerOf(std::string const& line) {
-    auto const parsed = uc_log::control::fromLine<uc_log::control::Answer>(line);
-    if(auto const* a = std::get_if<uc_log::control::Answer>(&parsed)) { return *a; }
-    return uc_log::control::Error{.error = "not an answer: " + line};
+inline uc_log::printer::control::Answer answerOf(std::string const& line) {
+    auto const parsed = uc_log::printer::control::fromLine<uc_log::printer::control::Answer>(line);
+    if(auto const* a = std::get_if<uc_log::printer::control::Answer>(&parsed)) { return *a; }
+    return uc_log::printer::control::Error{.error = "not an answer: " + line};
 }
 
 // Under a VirtualTime: up to 5 s of virtual time. Without one: until it holds (the ctest TIMEOUT is the hang guard).

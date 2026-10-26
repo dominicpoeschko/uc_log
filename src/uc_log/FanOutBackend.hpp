@@ -28,14 +28,21 @@
 //   for every level (LevelBoundBackend.hpp); a level-blind sink in a level-aware fan-out gets every level.
 // - The Startup ISR contract (isrPriorityLevels / singleIsrPriorityLevel with silentIsrPriorityLevels, IsrPolicy.hpp):
 //   the one sink that declares it hands it on, so Startup still checks the enabled interrupts against it. A sink
-//   without one (a queue whose contexts nest) asks nothing of them; two sinks that declare one are an error.
+//   without one (a queue whose contexts nest) asks nothing of them; two sinks that declare one are an error. Its
+//   perCoreIsrContexts is handed on too when Contexts tells the cores apart (Contexts::cores > 1): the fan-out's own
+//   flags are then per core as well.
+// - Duplex channels (numDuplexChannels, DuplexChannel<I>): the primary's, handed on; another sink may have none.
+// - kLevelFloor: handed on when every level-aware sink declares the same one (a router declares none).
 // - Nothing here blocks; whatever a sink does when it is full or nobody reads it stays with that sink.
 //
-// Contexts is how the backend learns where it runs: CortexMContexts (IPSR, one core) by default; a multicore build
-// passes one whose core() tells the cores apart (FanOutBackendWith<Contexts, ...>), and the host tests a fake.
+// Contexts is how the backend learns where it runs (CortexM.hpp), the same type an RTT backend's RingLayout names:
+// SingleCore (IPSR, one core) by default; FanOutBackendMulticore<CoreId, ...> takes TwoCores<CoreId>, and the host tests
+// pass a fake. Every hook a sink may have is listed in Sink.hpp.
 
 #include "ComBackend.hpp"
+#include "CortexM.hpp"
 #include "LogLevel.hpp"
+#include "Sink.hpp"
 #include "detail/LevelBoundBackend.hpp"
 
 #include <array>
@@ -47,39 +54,6 @@
 namespace uc_log {
 
 namespace fanout {
-    enum class Context : std::uint8_t { thread = 0, isr = 1, fault = 2 };
-
-    inline constexpr std::size_t ContextsPerCore = 3;
-
-#if defined(__arm__)
-    // IPSR: 0 thread, 2 NMI, 3 HardFault, anything else an exception or interrupt (ARMv6-M ARM DDI 0419E B1.4.2,
-    // ARMv8-M ARM DDI 0553B.y B3.30).
-    struct CortexMContexts {
-        static constexpr std::size_t Cores = 1;
-
-        static Context context() {
-            std::uint32_t ipsr{};
-            asm volatile("mrs %0, ipsr" : "=r"(ipsr));
-            if(ipsr == 0) { return Context::thread; }
-            if(ipsr == 2 || ipsr == 3) { return Context::fault; }
-            return Context::isr;
-        }
-
-        static std::size_t core() { return 0; }
-    };
-#endif
-
-    template<typename T>
-    struct GuardOf {
-        using type = void;
-    };
-
-    template<typename T>
-        requires requires { typename T::RecordGuard; }
-    struct GuardOf<T> {
-        using type = typename T::RecordGuard;
-    };
-
     // The one guard the sinks name (void if none does); two different ones are an error.
     template<typename Found, typename... Sinks>
     struct CommonGuard {
@@ -88,7 +62,7 @@ namespace fanout {
 
     template<typename Found, typename S, typename... Sinks>
     struct CommonGuard<Found, S, Sinks...> {
-        using Mine = typename GuardOf<S>::type;
+        using Mine = typename RecordGuardOf<S>::type;
         static_assert(std::is_void_v<Found> || std::is_void_v<Mine>
                         || std::is_same_v<Found,
                                           Mine>,
@@ -105,41 +79,49 @@ namespace fanout {
     template<>
     struct GuardMember<void> {};
 
+    // perCoreIsrContexts, when the sink declares it and the fan-out's contexts are per core too
+    template<typename S, typename Contexts>
+    struct PerCoreMember {};
+
+    template<typename S, typename Contexts>
+        requires(requires { S::perCoreIsrContexts; } && Contexts::cores > 1)
+    struct PerCoreMember<S, Contexts> {
+        static constexpr bool perCoreIsrContexts = S::perCoreIsrContexts;
+    };
+
     template<typename S>
     concept HasIsrContract
       = requires { S::isrPriorityLevels; } || requires { S::singleIsrPriorityLevel; };
 
     // A sink's Startup ISR contract, as members of the fan-out
-    template<typename S>
-    struct IsrContractMember {};
+    template<typename S, typename Contexts>
+    struct IsrContractMember : PerCoreMember<S, Contexts> {};
 
-    template<typename S>
+    template<typename S, typename Contexts>
         requires requires { S::isrPriorityLevels; }
-    struct IsrContractMember<S> {
+    struct IsrContractMember<S, Contexts> : PerCoreMember<S, Contexts> {
         static constexpr auto isrPriorityLevels       = S::isrPriorityLevels;
         static constexpr auto silentIsrPriorityLevels = S::silentIsrPriorityLevels;
     };
 
-    template<typename S>
+    template<typename S, typename Contexts>
         requires requires { S::singleIsrPriorityLevel; }
-    struct IsrContractMember<S> {
+    struct IsrContractMember<S, Contexts> : PerCoreMember<S, Contexts> {
         static constexpr bool singleIsrPriorityLevel  = S::singleIsrPriorityLevel;
         static constexpr auto silentIsrPriorityLevels = S::silentIsrPriorityLevels;
     };
 
     struct NoIsrContract {};
 
-    template<typename... Sinks>
+    // the primary: no sink left (the specialisations below take one off the front)
+    template<typename Contexts, typename... Sinks>
     struct IsrContractOf {
-        static_assert((static_cast<int>(HasIsrContract<Sinks>) + ... + 0) <= 1,
-                      "FanOutBackend: more than one sink declares a Startup ISR contract "
-                      "(isrPriorityLevels / singleIsrPriorityLevel); at most one may");
         using type = NoIsrContract;
     };
 
-    template<typename S, typename... Sinks>
+    template<typename Contexts, typename S, typename... Sinks>
         requires HasIsrContract<S>
-    struct IsrContractOf<S, Sinks...> : IsrContractOf<> {
+    struct IsrContractOf<Contexts, S, Sinks...> : IsrContractOf<Contexts> {
         static_assert(
           !(
             requires { S::isrPriorityLevels; } && requires { S::singleIsrPriorityLevel; }),
@@ -147,17 +129,84 @@ namespace fanout {
         static_assert(!(HasIsrContract<Sinks> || ...),
                       "FanOutBackend: more than one sink declares a Startup ISR contract "
                       "(isrPriorityLevels / singleIsrPriorityLevel); at most one may");
-        using type = IsrContractMember<S>;
+        using type = IsrContractMember<S, Contexts>;
     };
 
-    template<typename S, typename... Sinks>
-    struct IsrContractOf<S, Sinks...> : IsrContractOf<Sinks...> {};
+    template<typename Contexts, typename S, typename... Sinks>
+    struct IsrContractOf<Contexts, S, Sinks...> : IsrContractOf<Contexts, Sinks...> {};
+
+    template<typename S>
+    concept HasDuplex = requires { S::numDuplexChannels; };
+
+    template<typename S>
+    concept HasDuplexChannels = HasDuplex<S> && (S::numDuplexChannels > 0);
+
+    // The primary's duplex channels, as members of the fan-out
+    template<typename Primary>
+    struct DuplexMember {};
+
+    template<typename Primary>
+        requires HasDuplex<Primary>
+    struct DuplexMember<Primary> {
+        static constexpr std::size_t numDuplexChannels = Primary::numDuplexChannels;
+
+        template<std::size_t I>
+        using DuplexChannel = typename Primary::template DuplexChannel<I>;
+    };
+
+    template<typename S>
+    concept HasLevelFloor = requires { S::kLevelFloor; };
+
+    struct FloorOf {
+        bool     one{true};   // every level-aware sink so far declares the same floor
+        bool     any{false};
+        LogLevel floor{};
+    };
+
+    template<typename S>
+    consteval FloorOf joinFloor(FloorOf const f) {
+        if constexpr(!detail::LevelAware<S>) {
+            return f;
+        } else if constexpr(!HasLevelFloor<S>) {
+            return {false, f.any, f.floor};
+        } else {
+            return {f.one && (!f.any || f.floor == S::kLevelFloor), true, S::kLevelFloor};
+        }
+    }
+
+    template<typename... Sinks>
+    consteval FloorOf floorOf() {
+        FloorOf f{};
+        ((f = joinFloor<Sinks>(f)), ...);
+        return f;
+    }
+
+    // kLevelFloor: the one every level-aware sink declares; none when one of them declares none or they differ
+    template<typename... Sinks>
+    struct LevelFloorMember {};
+
+    template<typename... Sinks>
+        requires(floorOf<Sinks...>().one && floorOf<Sinks...>().any)
+    struct LevelFloorMember<Sinks...> {
+        static constexpr LogLevel kLevelFloor = floorOf<Sinks...>().floor;
+    };
 }   // namespace fanout
 
 template<typename Contexts, typename Primary, typename... Others>
 struct FanOutBackendWith
   : fanout::GuardMember<typename fanout::CommonGuard<void, Primary, Others...>::type>
-  , fanout::IsrContractOf<Primary, Others...>::type {
+  , fanout::IsrContractOf<Contexts, Primary, Others...>::type
+  , fanout::DuplexMember<Primary>
+  , fanout::LevelFloorMember<Primary, Others...> {
+    static_assert(Contexts::cores > 1 || !(requires {
+                      Primary::perCoreIsrContexts;
+                  } || (requires { Others::perCoreIsrContexts; } || ...)),
+                  "FanOutBackend: a sink's ISR contexts are per core - give FanOutBackendWith a "
+                  "multicore Contexts "
+                  "(FanOutBackendMulticore<CoreId, ...>, TwoCores<CoreId>)");
+    static_assert(!(fanout::HasDuplexChannels<Others> || ...),
+                  "FanOutBackend: duplex channels only on the primary sink");
+
     // Listed in the Startup list like the backends it feeds, with nothing for Startup to run.
     static constexpr bool isStartupEntry = true;
 
@@ -165,20 +214,19 @@ struct FanOutBackendWith
     static constexpr bool levelAware
       = (detail::LevelAware<Primary> || ... || detail::LevelAware<Others>);
 
-    static constexpr std::size_t Slots = Contexts::Cores * fanout::ContextsPerCore;
+    static constexpr std::size_t slots = Contexts::cores * contextsPerCore;
 
     // Per context: the record being written now is the primary's lost-record line.
-    static inline std::array<bool, Slots> primaryOnly{};
+    static inline std::array<bool, slots> primaryOnly{};
 
     static std::size_t slot() {
-        return Contexts::core() * fanout::ContextsPerCore
-             + static_cast<std::size_t>(Contexts::context());
+        return Contexts::core() * contextsPerCore + static_cast<std::size_t>(Contexts::context());
     }
 
     static void initTransfer()
         requires(!levelAware)
     {
-        initAll<>();
+        initAll<LogLevel::info>();
     }
 
     template<LogLevel Level>
@@ -191,7 +239,7 @@ struct FanOutBackendWith
     static void write(std::span<std::byte const> span)
         requires(!levelAware)
     {
-        writeAll<>(span);
+        writeAll<LogLevel::info>(span);
     }
 
     template<LogLevel Level>
@@ -204,7 +252,7 @@ struct FanOutBackendWith
     static void finalizeTransfer()
         requires(!levelAware)
     {
-        finalizeAll<>();
+        finalizeAll<LogLevel::info>();
     }
 
     template<LogLevel Level>
@@ -237,45 +285,37 @@ struct FanOutBackendWith
         primaryOnly[slot()] = false;
     }
 
-    // Startup's hook before .data/.bss are set up (an RTT backend bumps its ring epoch there, RttEpoch.hpp): every
-    // sink that has one gets it - a sink's own state must not depend on whether it sits behind a fan-out.
-    static void preMemoryInit()
-        requires(requires { Primary::preMemoryInit(); }
-                 || (requires { Others::preMemoryInit(); } || ...))
+    // uc_log::bootsThatLogged(): the primary's count (the RTT backend's), as for the lost-record line
+    static auto bootsThatLogged()
+        requires requires { Primary::bootsThatLogged(); }
     {
-        preMemoryInitOf<Primary>();
-        (preMemoryInitOf<Others>(), ...);
+        return Primary::bootsThatLogged();
     }
 
-    static void noteRecord()
-        requires(requires { Primary::noteRecord(); } || (requires { Others::noteRecord(); } || ...))
-    {
-        noteRecordOf<Primary>();
-        (noteRecordOf<Others>(), ...);
+    // Startup's hooks around the .data/.bss setup (an RTT backend bumps its ring epoch there, RttEpoch.hpp), RecordFrame's
+    // noteRecord, the panic wait: every sink that has one gets it - a sink's own state must not depend on whether it
+    // sits behind a fan-out.
+#define UC_LOG_DETAIL_FAN_HOOK(name)                                                     \
+public:                                                                                  \
+    static void name()                                                                   \
+        requires(requires { Primary::name(); } || (requires { Others::name(); } || ...)) \
+    {                                                                                    \
+        name##Of<Primary>();                                                             \
+        (name##Of<Others>(), ...);                                                       \
+    }                                                                                    \
+                                                                                         \
+private:                                                                                 \
+    template<typename S>                                                                 \
+    static void name##Of() {                                                             \
+        if constexpr(requires { S::name(); }) { S::name(); }                             \
     }
 
-    static void postMemoryInit()
-        requires(requires { Primary::postMemoryInit(); }
-                 || (requires { Others::postMemoryInit(); } || ...))
-    {
-        postMemoryInitOf<Primary>();
-        (postMemoryInitOf<Others>(), ...);
-    }
-
-    static void enterPanicMode()
-        requires(requires { Primary::enterPanicMode(); }
-                 || (requires { Others::enterPanicMode(); } || ...))
-    {
-        panicOf<Primary>();
-        (panicOf<Others>(), ...);
-    }
-
-    static void drain()
-        requires(requires { Primary::drain(); } || (requires { Others::drain(); } || ...))
-    {
-        drainOf<Primary>();
-        (drainOf<Others>(), ...);
-    }
+    UC_LOG_DETAIL_FAN_HOOK(preMemoryInit)
+    UC_LOG_DETAIL_FAN_HOOK(noteRecord)
+    UC_LOG_DETAIL_FAN_HOOK(postMemoryInit)
+    UC_LOG_DETAIL_FAN_HOOK(enterPanicMode)
+    UC_LOG_DETAIL_FAN_HOOK(drain)
+#undef UC_LOG_DETAIL_FAN_HOOK
 
 private:
     template<typename Mark>
@@ -284,89 +324,38 @@ private:
         return mark;
     }
 
-    // Level: empty for a level-blind fan-out, else the record's one level. A sink that takes the level gets it.
-    template<LogLevel... Level>
+    // Level: LogLevel::info for a level-blind fan-out (one record path for every level), else the record's level.
+    // LevelBoundBackend hands it to a sink that takes the level, as uc_log does for a sink that is no fan-out.
+    template<LogLevel Level>
     static void initAll() {
-        initOf<Primary, Level...>();
+        detail::LevelBoundBackend<Primary, Level>::initTransfer();
         if(primaryOnly[slot()]) { return; }
-        (initOf<Others, Level...>(), ...);
+        (detail::LevelBoundBackend<Others, Level>::initTransfer(), ...);
     }
 
-    template<LogLevel... Level>
+    template<LogLevel Level>
     static void writeAll(std::span<std::byte const> span) {
-        writeOf<Primary, Level...>(span);
+        detail::LevelBoundBackend<Primary, Level>::write(span);
         if(primaryOnly[slot()]) { return; }
-        (writeOf<Others, Level...>(span), ...);
+        (detail::LevelBoundBackend<Others, Level>::write(span), ...);
     }
 
-    template<LogLevel... Level>
+    template<LogLevel Level>
     static void finalizeAll() {
-        finalizeOf<Primary, Level...>();
+        detail::LevelBoundBackend<Primary, Level>::finalizeTransfer();
         if(primaryOnly[slot()]) { return; }
-        (finalizeOf<Others, Level...>(), ...);
-    }
-
-    template<typename S,
-             LogLevel... Level>
-    static void initOf() {
-        if constexpr(sizeof...(Level) == 1 && requires { S::template initTransfer<Level...>(); }) {
-            S::template initTransfer<Level...>();
-        } else if constexpr(requires { S::initTransfer(); }) {
-            S::initTransfer();
-        }
-    }
-
-    template<typename S,
-             LogLevel... Level>
-    static void writeOf(std::span<std::byte const> span) {
-        if constexpr(sizeof...(Level) == 1 && requires { S::template write<Level...>(span); }) {
-            S::template write<Level...>(span);
-        } else {
-            S::write(span);
-        }
-    }
-
-    template<typename S,
-             LogLevel... Level>
-    static void finalizeOf() {
-        if constexpr(sizeof...(Level) == 1
-                     && requires { S::template finalizeTransfer<Level...>(); })
-        {
-            S::template finalizeTransfer<Level...>();
-        } else if constexpr(requires { S::finalizeTransfer(); }) {
-            S::finalizeTransfer();
-        }
-    }
-
-    template<typename S>
-    static void preMemoryInitOf() {
-        if constexpr(requires { S::preMemoryInit(); }) { S::preMemoryInit(); }
-    }
-
-    template<typename S>
-    static void noteRecordOf() {
-        if constexpr(requires { S::noteRecord(); }) { S::noteRecord(); }
-    }
-
-    template<typename S>
-    static void postMemoryInitOf() {
-        if constexpr(requires { S::postMemoryInit(); }) { S::postMemoryInit(); }
-    }
-
-    template<typename S>
-    static void panicOf() {
-        if constexpr(requires { S::enterPanicMode(); }) { S::enterPanicMode(); }
-    }
-
-    template<typename S>
-    static void drainOf() {
-        if constexpr(requires { S::drain(); }) { S::drain(); }
+        (detail::LevelBoundBackend<Others, Level>::finalizeTransfer(), ...);
     }
 };
 
-#if defined(__arm__)
+#ifdef __arm__
 template<typename Primary, typename... Others>
-using FanOutBackend = FanOutBackendWith<fanout::CortexMContexts, Primary, Others...>;
+using FanOutBackend = FanOutBackendWith<SingleCore, Primary, Others...>;
+
+// Two cores told apart by CoreId (Kvasir::Sio::CpuId on the RP chips): per core and context a "primary only" flag, and
+// a primary's perCoreIsrContexts handed on to Startup.
+template<typename CoreId, typename Primary, typename... Others>
+using FanOutBackendMulticore = FanOutBackendWith<TwoCores<CoreId>, Primary, Others...>;
 #endif
 
 }   // namespace uc_log

@@ -1,0 +1,60 @@
+Memory Configuration
+
+Name             Origin             Length             Attributes
+FLASH            0x10000000         0x00400000         xr
+RAM              0x20000000         0x00080000         xrw
+
+Linker script and memory map
+
+.text           0x10000000     0x4080
+ .text.f10000100
+                0x10000100       0x40 /tmp/ccFixture.ltrans0.ltrans.o
+                0x10000101                App::Motor::step()
+ .text.f10000148
+                0x10000148       0x12 /tmp/ccFixture.ltrans0.ltrans.o
+                0x10000149                Kvasir::Panic::raise(Kvasir::Panic::Cause)
+ .text.f10000200
+                0x10000200       0x40 /tmp/ccFixture.ltrans0.ltrans.o
+                0x10000201                main
+ .text.f100002f0
+                0x100002f0       0x20 /tmp/ccFixture.ltrans0.ltrans.o
+                0x100002f1                App::check()
+ .text.f10000400
+                0x10000400       0x80 /tmp/ccFixture.ltrans0.ltrans.o
+                0x10000401                Kvasir::Fault::HandlerFor<Kvasir::Fault::Options{2048u, true}, Kvasir::Fault::MainStackTop>::onIsr()
+ .rodata        0x10004000       0x80 /tmp/ccFixture.ltrans0.ltrans.o
+                0x10004020                Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"edges"}}, 1024u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"us"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"n"}}, Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"level"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"x"}}>::layout
+                0x10004040                Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<4u>{std::__2::array<char, 4u>{"isr"}}, 8u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"at"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"v"}}>::layout
+
+.stack          0x20000000      0x800
+                0x20000000                        _LINKER_INTERN_stack_start_ = .
+                0x20000800                        _LINKER_INTERN_stack_end_ = .
+.stack1         0x20000800      0x400
+                0x20000800                        _LINKER_INTERN_stack1_start_ = .
+                0x20000c00                        _LINKER_INTERN_stack1_end_ = .
+
+.bss            0x20001000     0x4064
+ .bss._ZN6Kvasir5Ubsan12ubsanReportsE
+                0x20001000        0x8 /tmp/ccFixture.ltrans0.ltrans.o
+                0x20001000                Kvasir::Ubsan::ubsanReports
+ .bss._ZN6Kvasir5Trace4RingILN6Kvasir10Diagnostic11FixedStringILj6EEEtlS3_tlNSt3__25arrayIcLj6EEEtlA6_cLc101ELc100ELc103ELc101ELc115EEEEELj1024EJXtlNS3_ILj3EEEtlNS5_IcLj3EEEtlA3_cLc117ELc115EEEEEEE7storageE
+                0x20001010     0x4004 /tmp/ccFixture.ltrans0.ltrans.o
+                0x20001010                Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"edges"}}, 1024u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"us"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"n"}}, Kvasir::Diagnostic::FixedString<6u>{std::__2::array<char, 6u>{"level"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"x"}}>::storage
+ .bss._ZN6Kvasir5Trace4RingILN6Kvasir10Diagnostic11FixedStringILj4EEEtlS3_tlNSt3__25arrayIcLj4EEEtlA4_cLc105ELc115ELc114EEEEELj8EJEE7storageE
+                0x20005020       0x44 /tmp/ccFixture.ltrans0.ltrans.o
+                0x20005020                Kvasir::Trace::Ring<Kvasir::Diagnostic::FixedString<4u>{std::__2::array<char, 4u>{"isr"}}, 8u, Kvasir::Diagnostic::FixedString<3u>{std::__2::array<char, 3u>{"at"}}, Kvasir::Diagnostic::FixedString<2u>{std::__2::array<char, 2u>{"v"}}>::storage
+
+.noInit         0x20006000     0x170
+ .noInit        0x20006000     0x170 /tmp/ccFixture.ltrans0.ltrans.o
+                0x20006000                Kvasir::Fault::lastFault
+                0x20006090                Kvasir::Fault::lastStack<(unsigned short)64>
+                0x200060e4                Kvasir::Panic::lastPanic
+                0x20006110                Kvasir::Health::lastStarvation
+                0x20006134                Kvasir::Health::lastRecovery
+                0x20006158                Kvasir::BootGuard::state
+                0x20006170                        . = ALIGN (0x4)
+
+                0x20000000                        _LINKER_stack_start_ = _LINKER_INTERN_stack_start_
+                0x20000800                        _LINKER_stack_end_ = _LINKER_INTERN_stack_end_
+                0x20000800                        _LINKER_stack1_start_ = cmake_core1_stack_in_scratch ? _LINKER_INTERN_stack1_scratch_start_ : _LINKER_INTERN_stack1_start_
+                0x20000c00                        _LINKER_stack1_end_ = cmake_core1_stack_in_scratch ? _LINKER_INTERN_stack1_scratch_end_ : _LINKER_INTERN_stack1_end_

@@ -33,7 +33,7 @@ constexpr bool hasGuard = requires { typename T::RecordGuard; };
 
 // ---- PerLevel: one ring per served level, in the order listed ----------------------------
 using Three = IP::PerLevel<FakeActive, Levels<0, 3, 7>, SilentLevels<1, 2>>;
-static_assert(Three::NumIsrRings == 3);
+static_assert(Three::numIsrRings == 3);
 static_assert(Three::isrRing(0) == 0);
 static_assert(Three::isrRing(3) == 1);
 static_assert(Three::isrRing(7) == 2);
@@ -64,14 +64,21 @@ static_assert(!hasGuard<Three>);
 // the order of the listing is the ring order, not the numeric order
 using Reversed = IP::PerLevel<FakeActive, Levels<7, 3>>;
 static_assert(Reversed::isrRing(7) == 0 && Reversed::isrRing(3) == 1);
-static_assert(Reversed::silentIsrPriorityLevels.size() == 0);
+static_assert(Reversed::silentIsrPriorityLevels.empty());
+
+// the levels of an 8-bit priority field (Armv7-M allows up to 256): the table ends at the
+// highest served level
+using Wide = IP::PerLevel<FakeActive, Levels<200, 2>, SilentLevels<255>>;
+static_assert(Wide::isrRing(200) == 0 && Wide::isrRing(2) == 1);
+static_assert(Wide::isrRing(201) == noLogRing && Wide::isrRing(255) == noLogRing);
+static_assert(Wide::isrRing(256) == noLogRing && Wide::isrRing(100000) == noLogRing);
 
 // ---- SingleLevel: one ring, whatever the level -------------------------------------------
 using Single = IP::SingleLevel<>;
-static_assert(Single::NumIsrRings == 1);
+static_assert(Single::numIsrRings == 1);
 static_assert(Single::isrRing(0) == 0 && Single::isrRing(9) == 0 && Single::isrRing(-1) == 0);
 static_assert(Single::singleIsrPriorityLevel);
-static_assert(Single::silentIsrPriorityLevels.size() == 0);
+static_assert(Single::silentIsrPriorityLevels.empty());
 static_assert(!hasLevels<Single>);
 static_assert(!hasActive<Single>,
               "no priority read on the single-level path");
@@ -84,11 +91,11 @@ static_assert(SingleSilent::silentIsrPriorityLevels
 
 // ---- MaskedRecord: one ring, the guard, nothing for Startup -------------------------------
 using Masked = IP::MaskedRecord;
-static_assert(Masked::NumIsrRings == 1);
+static_assert(Masked::numIsrRings == 1);
 static_assert(Masked::isrRing(4) == 0);
 static_assert(hasGuard<Masked>);
 static_assert(std::is_same_v<Masked::RecordGuard,
-                             uc_log::detail::IsrRecordGuard>);
+                             uc_log::IsrRecordGuard>);
 static_assert(!hasSingle<Masked>);
 static_assert(!hasLevels<Masked>);
 static_assert(!hasActive<Masked>);
@@ -105,7 +112,7 @@ struct Without {
 using BoundWith    = uc_log::detail::LevelBoundBackend<WithGuard, uc_log::LogLevel::info>;
 using BoundWithout = uc_log::detail::LevelBoundBackend<Without, uc_log::LogLevel::info>;
 static_assert(std::is_same_v<BoundWith::RecordGuard,
-                             uc_log::detail::IsrRecordGuard>);
+                             uc_log::IsrRecordGuard>);
 static_assert(std::is_empty_v<BoundWithout::RecordGuard>);
 
 }   // namespace

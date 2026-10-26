@@ -1,19 +1,10 @@
-#include "uc_log/detail/HexImage.hpp"
+#include "support/Check.hpp"
+#include "uc_log/printer/HexImage.hpp"
 
 #include <cstdio>
 #include <sstream>
 
-using namespace uc_log::detail;
-
-static int failures = 0;
-
-#define CHECK(cond, msg)                                        \
-    do {                                                        \
-        if(!(cond)) {                                           \
-            std::printf("FAIL: %s (line %d)\n", msg, __LINE__); \
-            ++failures;                                         \
-        }                                                       \
-    } while(0)
+using namespace uc_log::printer;
 
 int main() {
     // zlib's check value: crc32("123456789") = 0xCBF43926
@@ -42,6 +33,9 @@ int main() {
                 && (*image)[0].data[7] == std::byte{8},
               "linear base address and data");
         CHECK((*image)[1].address == 0x20000000 && (*image)[1].data.size() == 2, "second segment");
+        // the id the printer names a build by; Kvasir_SDK tools/test_kvasir_bench.py holds kvasir_bench's
+        // hex_build_id of this same file to the same literal
+        CHECK(imageCrc(*image) == 0x1c6c'3b4bU, "the build id");
 
         auto const flash = [](std::uint32_t address, std::span<std::byte> out) {
             for(std::size_t i = 0; i != out.size(); ++i) {
@@ -64,15 +58,15 @@ int main() {
         CHECK(dead.result == ImageCheck::Result::unreadable, "a target that cannot be read");
 
         // a flash behind a cache, its uncached alias 0x03000000 above: one cache line that is not the flash's
-        static constexpr std::uint32_t Alias     = 0x0300'0000U;
+        static constexpr std::uint32_t alias     = 0x0300'0000U;
         auto const                     staleLine = [&](std::uint32_t a, std::span<std::byte> out) {
-            flash(a >= 0x1300'0000U ? a - Alias : a, out);
-            if(a < 0x1300'0000U && a <= 0x1000'0004U && a + out.size() > 0x1000'0004U) {
+            flash(a >= 0x1300'0000U ? a - alias : a, out);
+            if(a <= 0x1000'0004U && a + out.size() > 0x1000'0004U) {
                 out[0x1000'0004U - a] = std::byte{0xEE};
             }
             return true;
         };
-        auto const stale = checkFlash(*image, staleLine, Alias);
+        auto const stale = checkFlash(*image, staleLine, alias);
         CHECK(
           stale.flash.result == ImageCheck::Result::match && stale.cacheDiffers()
             && stale.cached.firstDifference == 0x10000004,
@@ -80,19 +74,19 @@ int main() {
         auto const clean = checkFlash(
           *image,
           [&](std::uint32_t a, std::span<std::byte> out) {
-              return flash(a >= 0x1300'0000U ? a - Alias : a, out);
+              return flash(a >= 0x1300'0000U ? a - alias : a, out);
           },
-          Alias);
+          alias);
         CHECK(clean.flash.result == ImageCheck::Result::match && !clean.cacheDiffers(),
               "flash and cache agree");
         auto const otherFlash = checkFlash(
           *image,
           [&](std::uint32_t a, std::span<std::byte> out) {
-              flash(a >= 0x1300'0000U ? a - Alias : a, out);
+              flash(a >= 0x1300'0000U ? a - alias : a, out);
               if(a >= 0x1300'0000U) { out[1] = std::byte{0}; }
               return true;
           },
-          Alias);
+          alias);
         CHECK(otherFlash.flash.result == ImageCheck::Result::different
                 && otherFlash.flash.firstDifference == 0x10000001 && !otherFlash.cacheDiffers(),
               "another firmware in the flash is judged by the flash, at the image's own address");
@@ -104,10 +98,5 @@ int main() {
     std::istringstream broken{":0400000001020304F3\n"};
     CHECK(!parseIntelHex(broken).has_value(), "a wrong checksum is an error");
 
-    if(failures == 0) {
-        std::printf("ALL OK\n");
-        return 0;
-    }
-    std::printf("%d FAILURES\n", failures);
-    return 1;
+    return uc_log::test::report();
 }

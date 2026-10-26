@@ -1,24 +1,15 @@
 // Unit tests for LogEntry parsing (parsedOk, uint32 line, integer UcTime) and
 // extractMetrics (from_chars, no exceptions).
-#include "uc_log/detail/LogEntry.hpp"
+#include "uc_log/printer/LogEntry.hpp"
 
-#include "uc_log/metric_utils.hpp"
+#include "support/Check.hpp"
+#include "uc_log/printer/metric_utils.hpp"
 
 #include <cstdio>
 #include <limits>
 #include <string>
 
-using uc_log::detail::LogEntry;
-
-static int failures = 0;
-
-#define CHECK(cond, msg)                                        \
-    do {                                                        \
-        if(!(cond)) {                                           \
-            std::printf("FAIL: %s (line %d)\n", msg, __LINE__); \
-            ++failures;                                         \
-        }                                                       \
-    } while(0)
+using uc_log::printer::LogEntry;
 
 int main() {
     // producer format round trip
@@ -35,10 +26,10 @@ int main() {
     }
 
     {
-        uc_log::detail::SignatureInfo const site{"i2c.bus",
-                                                 "Bus<int>::run",
-                                                 "Kvasir::I2C::Bus<int>::run()"};
-        LogEntry const                      e{0, R"(("bus.cpp", 5, 2, 1ms, """""")up)", &site};
+        uc_log::printer::SignatureInfo const site{"i2c.bus",
+                                                  "Bus<int>::run",
+                                                  "Kvasir::I2C::Bus<int>::run()"};
+        LogEntry const                       e{0, R"(("bus.cpp", 5, 2, 1ms, """""")up)", &site};
         CHECK(e.parsedOk && e.functionName == "Bus<int>::run", "function from the site");
         CHECK(e.module == "i2c.bus" && e.signature == "Kvasir::I2C::Bus<int>::run()",
               "module and signature from the site");
@@ -102,9 +93,9 @@ int main() {
 
     // UcTime integer math: exact beyond double's 53-bit mantissa
     {
-        constexpr std::uint64_t BigNs = (1ULL << 53) + 1;
-        LogEntry::UcTime const  t{BigNs, 1, 1'000'000'000};
-        CHECK(t.time.count() == static_cast<std::int64_t>(BigNs), "ns value exact beyond 2^53");
+        constexpr std::uint64_t bigNs = (1ULL << 53) + 1;
+        LogEntry::UcTime const  t{bigNs, 1, 1'000'000'000};
+        CHECK(t.time.count() == static_cast<std::int64_t>(bigNs), "ns value exact beyond 2^53");
     }
 
     // UcTime saturation instead of overflow
@@ -125,37 +116,32 @@ int main() {
         e.line     = 1;
 
         e.logMsg     = "temp @METRIC(env::temp[C]=23.5) done";
-        auto metrics = uc_log::extractMetrics(now, e);
+        auto metrics = uc_log::printer::extractMetrics(now, e);
         CHECK(metrics.size() == 1, "one metric extracted");
         CHECK(metrics.size() == 1 && metrics[0].second.value == 23.5, "metric value");
         CHECK(metrics.size() == 1 && metrics[0].first.unit == "C", "metric unit");
 
         e.logMsg = "@METRIC(env::bad=notanumber)";
-        metrics  = uc_log::extractMetrics(now, e);
+        metrics  = uc_log::printer::extractMetrics(now, e);
         CHECK(metrics.empty(), "non-numeric value skipped");
 
         e.logMsg = "@METRIC(env::huge=1e99999)";
-        metrics  = uc_log::extractMetrics(now, e);
+        metrics  = uc_log::printer::extractMetrics(now, e);
         CHECK(metrics.empty(), "out-of-range value skipped without throwing");
 
         e.logMsg = "@METRIC(env::x=1) @METRIC(env::y=2)";
-        metrics  = uc_log::extractMetrics(now, e);
+        metrics  = uc_log::printer::extractMetrics(now, e);
         CHECK(metrics.size() == 2, "two metrics in one message");
 
         e.logMsg = "@METRIC(env::a[C) @METRIC(env::b[V]=2)";
-        metrics  = uc_log::extractMetrics(now, e);
+        metrics  = uc_log::printer::extractMetrics(now, e);
         CHECK(metrics.size() == 1 && metrics[0].first.name == "b" && metrics[0].first.unit == "V",
               "an unclosed unit skips only its own marker");
 
         e.logMsg = "@METRIC(noscope=1)";
-        metrics  = uc_log::extractMetrics(now, e);
+        metrics  = uc_log::printer::extractMetrics(now, e);
         CHECK(metrics.empty(), "missing :: skipped");
     }
 
-    if(failures == 0) {
-        std::printf("ALL OK\n");
-        return 0;
-    }
-    std::printf("%d FAILURES\n", failures);
-    return 1;
+    return uc_log::test::report();
 }
