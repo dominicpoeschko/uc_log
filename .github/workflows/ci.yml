@@ -14,6 +14,10 @@ jobs:
         runs-on: ubuntu-latest
         container:
             image: archlinux:latest
+            # TSan: on a runner with vm.mmap_rnd_bits=32 some layouts are incompatible and TSan re-executes itself with
+            # ASLR off; Docker's default seccomp profile refuses that personality(ADDR_NO_RANDOMIZE) ("unable to disable
+            # ASLR (perhaps sandboxing is enabled?)", a flake of every TSan binary, the build's svd_converter included)
+            options: ${{ matrix.compiler.sanitizer == 'thread' && '--security-opt seccomp=unconfined' || '' }}
         strategy:
             fail-fast: false
             matrix:
