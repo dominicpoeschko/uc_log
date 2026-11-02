@@ -80,7 +80,7 @@ find_or_fetch_package(
     GIT_REPOSITORY
     https://github.com/dominicpoeschko/aglio.git
     GIT_TAG
-    v0.3.1
+    v0.3.2
     GIT_BRANCH
     master)
 
