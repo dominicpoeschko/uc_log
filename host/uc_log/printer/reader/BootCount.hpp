@@ -87,7 +87,7 @@ private:
         auto const value = uc_log::printer::tryReadWord(jlink, *address);
         auto const check = uc_log::printer::tryReadWord(jlink, *address + 4);
         if(!value || !check) { return std::nullopt; }
-        bool const restarted = *check == (~*value ^ uc_log::detail::restartMark);
+        bool const restarted = *check == (~*value ^ uc_log::Detail::restartMark);
         if(*check != ~*value && !restarted) {
             return std::nullopt;
         }   // being written, or junk the next boot restarts

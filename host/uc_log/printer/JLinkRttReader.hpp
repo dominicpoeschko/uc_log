@@ -35,6 +35,7 @@ class RttSource;
 
 namespace uc_log::printer {
 class MessageLog;
+struct LandedReadOffset;
 
 namespace reader {
     // the reader's protocols with state of their own (JLinkRttReaderImpl.hpp: the flash gate, the boot count, the
@@ -287,6 +288,10 @@ private:
                     std::string_view what,
                     std::string_view cut,
                     bool             haltedRecently);
+
+    // The pass that saw the boot had written a read offset into the new boot's block (DirectRtt::landed): said with
+    // its numbers, as an error where the new boot's first bytes may have been overwritten unread.
+    void sayLanded(uc_log::printer::LandedReadOffset const& landed) const;
 
     static std::string unfinishedText(std::size_t      bytes,
                                       std::string_view what);

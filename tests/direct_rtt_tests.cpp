@@ -393,7 +393,7 @@ void logsInTheWindow() {
             }
         };
         bus.rebootAtStep
-          = 1;   // after the pass read the old bytes, before it writes their end back
+          = 2;   // after the epoch read before the write-back: the old boot's end lands in the new block
         bus.reboot = [&] {
             target.reinit();
             log(c.freshBefore);
@@ -402,6 +402,8 @@ void logsInTheWindow() {
         static_cast<void>(uc_log::test::need(rtt, "the session opens").readAll(bus, outs));
         CHECK(uc_log::test::need(rtt, "the session opens").reinitSeen(),
               "window: the re-init is seen");
+        CHECK(uc_log::test::need(rtt, "the session opens").landed().has_value(),
+              "window: the landed read offset is seen");
         auto                      next = Rtt::open(bus, Target::base, 2, epochAt);
         std::vector<std::uint8_t> seen;
         for(int pass = 0; pass != 6; ++pass) {
@@ -444,6 +446,80 @@ void logsInTheWindow() {
               torn ? 1 : 0);
         }
         CHECK(!lost, "window, no wrap: every record the target took arrives once, intact");
+    }
+}
+
+// Where a boot during a pass's access to a ring leaves the read offset the pass writes. Before the epoch read that
+// precedes the write (step 1): the write is skipped, nothing lands. Between that read and the write (step 2): it lands
+// in the new block, is found there and goes back to 0 - landed() says it, with the new boot's write offset. After
+// the write (step 3): it went into the old block, which the boot's init reset - nothing landed.
+void landedReadOffset() {
+    struct Case {
+        int           step;
+        std::uint32_t fresh;   // bytes the new boot logs at once
+        bool          lands;
+    };
+
+    for(Case const c :
+        {
+          Case{1, 10, false},
+          Case{2, 10,  true},
+          Case{2, 50,  true},
+          Case{3, 10, false}
+    })
+    {
+        Target       target;
+        SimTransport bus{target};
+        target.put(Target::epoch, 6);
+        std::vector<std::uint8_t> old(40, 0x11);
+        target.produce(old);
+        auto const                epochAt        = std::optional<std::uint32_t>{Target::epoch};
+        auto                      rtt            = Rtt::open(bus, Target::base, 2, epochAt);
+        std::uint32_t             readOffsetSeen = 0;
+        std::array<std::byte, 96> chunk{};
+        std::array<std::span<std::byte>, 1> const outs{std::span{chunk}};
+        bus.rebootAtStep = c.step;
+        bus.reboot       = [&] {
+            target.reinit();
+            std::vector<std::uint8_t> fresh(c.fresh, 0x22);
+            target.produce(fresh);
+        };
+        bus.afterReadOffset = [&] { readOffsetSeen = target.get(Target::upRead); };
+        auto const  got     = uc_log::test::need(rtt, "the session opens").readAll(bus, outs)[0];
+        auto const& r       = uc_log::test::need(rtt, "the session opens");
+        CHECK(r.reinitSeen(), "landed: the boot is seen");
+        CHECK(got.empty(), "landed: nothing of the pass is handed out");
+        CHECK(r.landed().has_value() == c.lands,
+              "landed: said exactly when the offset landed in the new block");
+        CHECKF(target.get(Target::upRead) == 0,
+               "landed: the new block's read offset is 0 afterwards (%u)",
+               target.get(Target::upRead));
+        if(c.step == 1) {
+            CHECK(readOffsetSeen == 0,
+                  "landed: a boot before the epoch read: the offset is not written");
+        }
+        if(auto const l = r.landed()) {
+            CHECK(l->staleOffset == 40, "landed: the stale offset is the old boot's end");
+            CHECK(l->writeOffset == c.fresh, "landed: the new boot's write offset");
+            CHECK(l->bytesForALoss() == Target::upSize, "landed: a loss would need the whole ring");
+        }
+        // the next session reads the new boot whole
+        auto        next  = Rtt::open(bus, Target::base, 2, epochAt);
+        std::size_t fresh = 0;
+        for(int pass = 0; pass != 3; ++pass) {
+            for(auto const b :
+                uc_log::test::need(next, "the next session opens").readAll(bus, outs)[0])
+            {
+                fresh += std::to_integer<std::uint8_t>(b) == 0x22 ? 1U : 0U;
+            }
+        }
+        CHECKF(fresh == c.fresh,
+               "landed: every byte of the new boot read once (%zu of %u)",
+               fresh,
+               c.fresh);
+        if(fresh != c.fresh || r.landed().has_value() != c.lands) {
+            std::printf("  (case step %d fresh %u)\n", c.step, c.fresh);
+        }
     }
 }
 
@@ -729,6 +805,7 @@ int main(int    argc,
                                {"reinitInsideAnAccess", reinitInsideAnAccess},
                                { "reinitBetweenPasses",  reinitBetweenPasses},
                                {     "logsInTheWindow",      logsInTheWindow},
+                               {    "landedReadOffset",     landedReadOffset},
                                {            "oddEpoch",             oddEpoch},
                                {              "stream",               stream},
                                {        "namesAndDown",         namesAndDown},

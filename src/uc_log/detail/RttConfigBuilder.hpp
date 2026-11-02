@@ -9,7 +9,7 @@
 #include <tuple>
 #include <utility>
 
-namespace uc_log { namespace detail {
+namespace uc_log { namespace Detail {
 
     //"uc_log" is reserved as name prefix for the log up buffers
     static constexpr std::string_view logBufferNamePrefix{"uc_log"};
@@ -106,4 +106,4 @@ namespace uc_log { namespace detail {
         };
     };
 
-}}   // namespace uc_log::detail
+}}   // namespace uc_log::Detail

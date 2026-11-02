@@ -195,7 +195,8 @@ uc_log_add_test(
     flashWindowGate
     # boots
     unreadBoots
-    tornTailAcrossReboot)
+    tornTailAcrossReboot
+    landedReadOffsetSaid)
 # wrapSweep is CPU-bound and slow under TSan: 133 s on a loaded machine, hence its own TIMEOUT
 uc_log_add_test(
     uc_log_test_direct_rtt
@@ -210,6 +211,7 @@ uc_log_add_test(
     reinitInsideAnAccess
     reinitBetweenPasses
     logsInTheWindow
+    landedReadOffset
     oddEpoch
     stream
     namesAndDown
@@ -267,7 +269,8 @@ uc_log_add_test(
     CASES
     matchAndDifferent
     ramImage
-    gate)
+    gate
+    buildId)
 uc_log_add_test(
     uc_log_test_printer_services
     printer_services_tests.cpp

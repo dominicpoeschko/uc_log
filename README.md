@@ -130,7 +130,7 @@ The printer derives the rest once per site (`printer/SignatureTable.hpp`, `detai
 
   | function | module |
   |---|---|
-  | `Kvasir::Engine::detail::logUp(...)` | `engine` |
+  | `Kvasir::Engine::Detail::logUp(...)` | `engine` |
   | `Kvasir::I2C::Bus<...>::run()` | `i2c.bus` |
   | `Kvasir::USB::CDC::Mixin<...>::handleSetup(...)` | `usb.cdc.mixin` |
   | `MyApp::Regulator::step(...)` | `myapp.regulator` |

@@ -1,0 +1,10 @@
+--device
+ATSAMD21G18A
+--speed
+100000
+--map_file
+no_log.map
+--hex_file
+no_log_flash.hex
+--string_constants_file
+no_log_string_constants.json

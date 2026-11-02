@@ -365,7 +365,7 @@ private:
     // remote_fmt's call-site tags (catalog.hpp): one per log line, named after the whole format
     // string, in an INFO section at address 0 - symbols of the map that are not in the target
     static bool isSiteTag(std::string_view name) {
-        return name.ends_with("::REMOTE_FMT_SITE_TAG") || name == "remote_fmt::detail::siteAnchor";
+        return name.ends_with("::REMOTE_FMT_SITE_TAG") || name == "remote_fmt::Detail::siteAnchor";
     }
 
     std::string describeLocked(std::uint32_t address) const { return symbols_->describe(address); }

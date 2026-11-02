@@ -8,7 +8,7 @@
 // Module and short function name from a signature. The firmware's filter and the printer run the
 // same scan, so a line is filtered by the module the printer shows.
 
-namespace uc_log { namespace detail {
+namespace uc_log { namespace Detail {
     // Quoted in the header the printer parses: no quote, comma, brace or anything to unescape.
     inline constexpr std::size_t maxModuleName = 63;
 
@@ -396,4 +396,4 @@ namespace uc_log { namespace detail {
     constexpr SignatureNames namesOfDemangled(std::string_view signature) {
         return namesOf(signature, functionOfDemangled(signature), signature.size());
     }
-}}   // namespace uc_log::detail
+}}   // namespace uc_log::Detail

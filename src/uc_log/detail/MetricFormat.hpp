@@ -13,7 +13,7 @@
 #include <utility>
 
 namespace uc_log {
-namespace detail {
+namespace Detail {
 
     template<typename T>
     inline constexpr bool isMetricQuantity = false;
@@ -79,9 +79,9 @@ namespace detail {
         });
     }
 #endif
-}   // namespace detail
+}   // namespace Detail
 
-namespace detail {
+namespace Detail {
 
     // "@METRIC(" scope "::" name "[" unit "]=": one array per Metric type, built once per type.
     template<typename M>
@@ -188,10 +188,10 @@ namespace detail {
             }(std::make_index_sequence<result.second>{});
         }
     }
-}   // namespace detail
+}   // namespace Detail
 }   // namespace uc_log
 
-namespace remote_fmt { namespace detail {
+namespace remote_fmt { namespace Detail {
 
 // A Metric is transparent on the wire, so its spec is checked against ValueType. Without this fmt
 // finds no formatter for Metric and the argument is silently left unchecked.
@@ -205,7 +205,7 @@ namespace remote_fmt { namespace detail {
     };
 #endif
 
-}}   // namespace remote_fmt::detail
+}}   // namespace remote_fmt::Detail
 
 namespace remote_fmt {
 
@@ -216,9 +216,9 @@ template<sc::StringConstant Name,
 struct formatter<uc_log::Metric<ValueType, Name, Unit, Scope>> {
     // transparent: the value's own descriptor (a quantity's number - the unit is in the marker already)
     static consteval auto descriptor() {
-        if constexpr(uc_log::detail::isMetricQuantity<ValueType>) {
+        if constexpr(uc_log::Detail::isMetricQuantity<ValueType>) {
 #if REMOTE_FMT_USE_MP_UNITS
-            using Rep = typename std::remove_cvref_t<decltype(uc_log::detail::metricQuantity(
+            using Rep = typename std::remove_cvref_t<decltype(uc_log::Detail::metricQuantity(
               std::declval<ValueType const&>()))>::rep;
             return descriptorOf<Rep>();
 #endif
@@ -233,10 +233,10 @@ struct formatter<uc_log::Metric<ValueType, Name, Unit, Scope>> {
                                          Unit,
                                          Scope> const& val,
                           Printer&                     printer) const {
-        if constexpr(uc_log::detail::isMetricQuantity<ValueType>) {
+        if constexpr(uc_log::Detail::isMetricQuantity<ValueType>) {
 #if REMOTE_FMT_USE_MP_UNITS
             // the unit is in the marker already
-            auto const q = uc_log::detail::metricQuantity(val.value);
+            auto const q = uc_log::Detail::metricQuantity(val.value);
             using Rep    = typename std::remove_cvref_t<decltype(q)>::rep;
             return formatter<Rep>{}.format(q.numerical_value_in(q.unit), printer);
 #endif

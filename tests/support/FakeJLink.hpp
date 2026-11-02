@@ -87,8 +87,11 @@ struct FakeTransport {
         std::vector<std::pair<std::uint32_t, std::uint32_t>> writes;   // guarded by mutex
         // after every word the printer writes into RAM, with mutex held (a target that refills its ring at once:
         // a flood that does not depend on a thread getting the CPU)
-        std::function<void()> afterRamWrite;            // guarded by mutex
-        std::atomic<bool>     stackUnreadable{false};   // reads near sp throw
+        std::function<void()> afterRamWrite;   // guarded by mutex
+        // before every word the printer writes into RAM (address, value), with mutex held: a boot that lands between
+        // a read the printer made and its next write
+        std::function<void(std::uint32_t, std::uint32_t)> beforeRamWrite;   // guarded by mutex
+        std::atomic<bool> stackUnreadable{false};                           // reads near sp throw
 
         // ---- flash: flash() calls, the flash window's reads, a wedged flash interface
         std::atomic<int>     flashFailures{0};   // the next so many flash() calls throw
@@ -386,6 +389,7 @@ struct FakeTransport {
         }
         std::scoped_lock<std::mutex> const lock{shared->mutex};
         if(shared->inRam(address, 4)) {
+            if(shared->beforeRamWrite) { shared->beforeRamWrite(address, value); }
             shared->putRam(address, value);
             if(shared->afterRamWrite) { shared->afterRamWrite(); }
             return;

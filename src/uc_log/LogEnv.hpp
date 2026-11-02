@@ -45,7 +45,7 @@ namespace setting {
     };
 }   // namespace setting
 
-namespace detail {
+namespace Detail {
     template<typename>
     inline constexpr bool isEnvSetting = false;
     template<LogLevel Level>
@@ -58,14 +58,14 @@ namespace detail {
                       "a log module name is 1-63 characters of a-z 0-9 _ . : / -");
         return true;
     }();
-}   // namespace detail
+}   // namespace Detail
 
 template<typename E, typename... Settings>
 struct ExtendEnv;
 
 template<typename... Current, typename... Settings>
 struct ExtendEnv<Env<Current...>, Settings...> {
-    static_assert((detail::isEnvSetting<Settings> && ...),
+    static_assert((Detail::isEnvSetting<Settings> && ...),
                   "UC_LOG_ENV takes uc_log::setting::MinLevel<...>, uc_log::setting::Backend<...> "
                   "and uc_log::setting::Module<...>");
     using type = Env<Current..., Settings...>;
@@ -74,7 +74,7 @@ struct ExtendEnv<Env<Current...>, Settings...> {
 template<typename E, typename... Settings>
 using ExtendEnv_t = typename ExtendEnv<E, Settings...>::type;
 
-namespace detail {
+namespace Detail {
     // the kinds of setting; the last of a kind wins (detail/LastOf.hpp): an inner UC_LOG_ENV extends the outer Env
     template<typename T>
     struct IsMinLevel : std::false_type {};
@@ -142,7 +142,7 @@ namespace detail {
         return moduleFieldFor<E>() + sc::StringConstant<'"', '"', '"'>{};
     }
 
-}   // namespace detail
+}   // namespace Detail
 }   // namespace uc_log
 
 using uc_log_env_t = ::uc_log::Env<>;

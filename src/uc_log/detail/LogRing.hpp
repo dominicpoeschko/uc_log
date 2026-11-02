@@ -14,7 +14,7 @@
 #include <type_traits>
 #include <utility>
 
-namespace uc_log::detail {
+namespace uc_log::Detail {
 
 // The ring for this write: the group's thread ring, or 1 + the policy's ISR ring;
 // noLogRing when the policy has no ring for the running exception's level. Contexts says whether the write runs in
@@ -57,4 +57,4 @@ inline void writeLogRing(Rtt&                       rtt,
     }));
 }
 
-}   // namespace uc_log::detail
+}   // namespace uc_log::Detail

@@ -320,6 +320,26 @@ auto BasicJLinkRttReader<TransportT>::sayToolError(std::string_view text) const 
 }
 
 template<typename TransportT>
+auto BasicJLinkRttReader<TransportT>::sayLanded(
+  uc_log::printer::LandedReadOffset const& landed) const -> void {
+    // A loss needs the whole ring logged inside the window (LandedReadOffset::bytesForALoss): said as the rate that
+    // takes, to be held against what the target logs.
+    auto const us = std::max<std::int64_t>(landed.window.count(), 1);
+    sayTool(fmt::format(
+      "channel {}: a read offset written as the target booted landed in its new block (offset {}, "
+      "the new boot's write offset {}, ring {} bytes); put back to 0 after {} us - lost only if "
+      "the "
+      "target logged {} bytes in that time ({:.1f} MB/s)",
+      landed.ring,
+      landed.staleOffset,
+      landed.writeOffset,
+      landed.size,
+      us,
+      landed.bytesForALoss(),
+      static_cast<double>(landed.bytesForALoss()) / static_cast<double>(us)));
+}
+
+template<typename TransportT>
 auto BasicJLinkRttReader<TransportT>::controlBlockPresent(TransportT&   jlink,
                                                           std::uint32_t address) -> bool {
     std::array<std::byte, uc_log::printer::rtt_block::id.size()> raw{};
@@ -855,6 +875,7 @@ auto BasicJLinkRttReader<TransportT>::readPass(Session&               s,
     if(s.rtt->reinitSeen()) {
         // A boot re-initialised the RTT block (a reset nobody announced: the RTT epoch moved). What was read
         // across it is dropped; the next session starts at the new block's first byte.
+        if(auto const l = s.rtt->landed()) { sayLanded(*l); }
         sayNewBoot(s,
                    "the target booted again (its RTT block was re-initialised)",
                    "of a line cut off by the reset",

@@ -145,7 +145,7 @@ public:
 };
 
 // Deduction guide helper to extract Entry type from function signature
-namespace detail {
+namespace Detail {
     template<typename F>
     struct FunctionTraits;
 
@@ -174,7 +174,7 @@ namespace detail {
 
     template<typename F>
     using entry_type_t = typename FunctionTraits<F>::entry_type;
-}   // namespace detail
+}   // namespace Detail
 
 // Deduction guide: deduce Entry from Function's second parameter type
 template<typename T,
@@ -184,7 +184,7 @@ template<typename T,
 TimeDelayedQueue(T&&,
                  C&&,
                  F&&,
-                 Durations...) -> TimeDelayedQueue<detail::entry_type_t<std::remove_cvref_t<F>>,
+                 Durations...) -> TimeDelayedQueue<Detail::entry_type_t<std::remove_cvref_t<F>>,
                                                    std::remove_cvref_t<T>,
                                                    std::remove_cvref_t<C>,
                                                    std::remove_cvref_t<F>>;

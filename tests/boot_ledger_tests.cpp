@@ -134,7 +134,7 @@ void cases() {
 
 // The image's side (detail/RttEpoch.hpp) on the host: its two words, a boot (the epoch bump, .bss zeroed), a record.
 namespace image {
-    namespace d = uc_log::detail;
+    namespace d = uc_log::Detail;
 
     void boot() {
         d::epochBlockStale();
@@ -148,7 +148,7 @@ namespace image {
 }   // namespace image
 
 void imageSide() {
-    namespace d          = uc_log::detail;
+    namespace d          = uc_log::Detail;
     uc_log_boot_words[0] = 0x1234'5678U;   // what a power-on left
     uc_log_boot_words[1] = 0x9abc'def0U;
     {   // an image whose main never calls logBoot: its first record counts the boot, one lost boot is 1

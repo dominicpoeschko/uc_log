@@ -36,7 +36,7 @@ std::uint32_t ipsr();
 inline constexpr std::size_t contextsPerCore = 3;
 
 // A record written from an exception is written with PRIMASK set, for the whole record: nested ISRs share one ring,
-// and a preempting handler's record would otherwise land inside the preempted one's. uc_log::detail::Log holds this
+// and a preempting handler's record would otherwise land inside the preempted one's. uc_log::Detail::Log holds this
 // around a record when the backend names it as RecordGuard (IsrPolicy::MaskedRecord). NMI and HardFault are not
 // masked by PRIMASK. The cost is interrupt latency: every other interrupt waits for one ISR log record.
 // Not under __arm__: host tests name it (never instantiated there).

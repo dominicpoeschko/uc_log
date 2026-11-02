@@ -48,7 +48,7 @@ struct RingLayout {
     using Router                          = RouterT;
 };
 
-namespace detail {
+namespace Detail {
     template<typename Self,
              typename DebuggerPresentFunction,
              rtt::BufferMode Mode,
@@ -124,7 +124,7 @@ namespace detail {
     struct PerCoreRings<2> {
         static constexpr bool perCoreIsrContexts = true;
     };
-}   // namespace detail
+}   // namespace Detail
 
 // Loss: what a dropped record leaves behind (LossPolicy.hpp). Every parameter is spelled: the defaults are RttLog's
 // (RttLog.hpp), which names this type.
@@ -137,8 +137,8 @@ template<typename DebuggerPresentFunction,
          LossPolicy::Policy Loss>
 struct RttComBackend
   : Policy
-  , detail::LevelRings<
-      typename detail::RttCoreOf<
+  , Detail::LevelRings<
+      typename Detail::RttCoreOf<
         RttComBackend<DebuggerPresentFunction, Layout, Sizes, Mode, Duplex, Policy, Loss>,
         DebuggerPresentFunction,
         Mode,
@@ -147,10 +147,10 @@ struct RttComBackend
         Sizes>::type,
       RttComBackend<DebuggerPresentFunction, Layout, Sizes, Mode, Duplex, Policy, Loss>,
       (Layout::channels > 1)>
-  , detail::PerCoreRings<Layout::cores> {
+  , Detail::PerCoreRings<Layout::cores> {
     static constexpr std::size_t ringsPerGroup = 1 + Policy::numIsrRings;
     static_assert(
-      detail::RttCoreOf<RttComBackend,
+      Detail::RttCoreOf<RttComBackend,
                         DebuggerPresentFunction,
                         Mode,
                         Duplex,
@@ -166,13 +166,13 @@ struct RttComBackend
     [[gnu::always_inline]] static std::size_t ring()
         requires(Layout::cores == 1 && Layout::channels == 1)
     {
-        return detail::logRing<Policy, Ctx>(groupOf<0>());
+        return Detail::logRing<Policy, Ctx>(groupOf<0>());
     }
 
     static std::size_t ring()
         requires(Layout::cores == 2 && Layout::channels == 1)
     {
-        return detail::logRing<Policy, Ctx>(groupOf<0>());
+        return Detail::logRing<Policy, Ctx>(groupOf<0>());
     }
 
     // A channel per level group (Router): the policy's ring in the level's logical channel of the calling core's
@@ -181,7 +181,7 @@ struct RttComBackend
     static std::size_t ringFor()
         requires(Layout::channels > 1)
     {
-        return detail::logRing<Policy, Ctx>(
+        return Detail::logRing<Policy, Ctx>(
           groupOf<Layout::Router::template logicalChannel<Level>>());
     }
 

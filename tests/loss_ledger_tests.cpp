@@ -38,8 +38,8 @@ struct Name {
 };
 
 constexpr std::size_t ringSize = 64;
-using Buffer                   = rtt::detail::Buffer<rtt::BufferMode::skip, ringSize, Name>;
-using Ledger                   = uc_log::detail::LossLedger<1>;
+using Buffer                   = rtt::Detail::Buffer<rtt::BufferMode::skip, ringSize, Name>;
+using Ledger                   = uc_log::Detail::LossLedger<1>;
 // the CPU clock ceiling the policies below are given (LossPolicy::Counted has no default)
 constexpr std::uint64_t cpuHz = 200'000'000;
 
@@ -51,7 +51,7 @@ constexpr std::byte lostKind{'L'};
 
 struct Ring {
     std::unique_ptr<std::byte[]>    storage = std::make_unique<std::byte[]>(ringSize);
-    rtt::detail::BufferControlBlock block   = Buffer::make(storage.get());
+    rtt::Detail::BufferControlBlock block   = Buffer::make(storage.get());
 };
 
 std::vector<std::byte> frame(std::byte     kind,
@@ -265,7 +265,7 @@ void debuggerAbsent() {
 }
 
 void noRingSlot() {
-    uc_log::detail::LossLedger<2> ledger{};
+    uc_log::Detail::LossLedger<2> ledger{};
     constexpr auto                noLogRing = ~std::size_t{0};
     ledger.dropped(noLogRing);
     ledger.recordEnd(noLogRing);
@@ -385,7 +385,7 @@ void wrapSweep() {
 // may not get the CPU: every outcome below is the same on every run.
 void panicWait() {
     Ring                         ring;
-    uc_log::detail::PanicWait<1> wait{};
+    uc_log::Detail::PanicWait<1> wait{};
     constexpr std::uint32_t      polls = 200'000;
     constexpr std::uint32_t      hostEvery
       = 50;   // well inside `polls`: a reading host never stalls the writer
@@ -397,7 +397,7 @@ void panicWait() {
 
     // the waiter as the writer asks it, with the host's reads between its polls
     struct HostPaced {
-        uc_log::detail::StallWaiter& waiter;
+        uc_log::Detail::StallWaiter& waiter;
         decltype(hostRead) const&    read;
         bool                         reading;
         std::uint32_t                asked{};
@@ -419,7 +419,7 @@ void panicWait() {
         return ok;
     };
     {
-        uc_log::detail::StallWaiter waiter{polls, wait.goneAtPlus1[0]};
+        uc_log::Detail::StallWaiter waiter{polls, wait.goneAtPlus1[0]};
         HostPaced                   paced{waiter, hostRead, true};
         CHECK(writeWaiting(paced), "waits while the host reads, then lands whole");
         CHECK(wait.goneAtPlus1[0] == 0, "no latch");
@@ -428,20 +428,20 @@ void panicWait() {
         static_cast<void>(Buffer::write(ring.block, std::array<std::byte, 1>{std::byte{0}}));
     }
     {
-        uc_log::detail::StallWaiter waiter{polls, wait.goneAtPlus1[0]};
+        uc_log::Detail::StallWaiter waiter{polls, wait.goneAtPlus1[0]};
         HostPaced                   paced{waiter, hostRead, false};
         CHECK(!writeWaiting(paced), "gives up when the host stops reading");
         CHECK(paced.asked > polls, "after the stall's polls");
         CHECK(wait.goneAtPlus1[0] != 0, "and latches");
     }
     {
-        uc_log::detail::StallWaiter waiter{polls, wait.goneAtPlus1[0]};
+        uc_log::Detail::StallWaiter waiter{polls, wait.goneAtPlus1[0]};
         HostPaced                   paced{waiter, hostRead, false};
         CHECK(!writeWaiting(paced) && paced.asked == 1, "the latch ends the next wait at once");
     }
     hostRead();   // the host reads again
     {
-        uc_log::detail::StallWaiter waiter{polls, wait.goneAtPlus1[0]};
+        uc_log::Detail::StallWaiter waiter{polls, wait.goneAtPlus1[0]};
         HostPaced                   paced{waiter, hostRead, true};
         CHECK(writeWaiting(paced),
               "the host read again: the latch is gone, the write waits and lands");
@@ -463,7 +463,7 @@ std::uint32_t pollsUntilGiveUp(std::uint32_t polls,
                                std::uint32_t stallUs,
                                std::uint32_t (*now)()) {
     std::uint32_t               gone = 0;
-    uc_log::detail::StallWaiter waiter{polls, gone, stallUs, now};
+    uc_log::Detail::StallWaiter waiter{polls, gone, stallUs, now};
     std::uint32_t               count = 0;
     while(waiter(7) && count != 100'000'000) { ++count; }   // the host's read offset never moves
     return count;
@@ -573,10 +573,10 @@ static_assert(sizeof(Split2) > 0 && Split2::perCoreIsrContexts);
 template<typename B>
 concept ForwardsLossMark = requires { B::lossMark(); };
 static_assert(
-  !ForwardsLossMark<uc_log::detail::LevelBoundBackend<Default<uc_log::LossPolicy::Silent>,
+  !ForwardsLossMark<uc_log::Detail::LevelBoundBackend<Default<uc_log::LossPolicy::Silent>,
                                                       uc_log::LogLevel::info>>);
 static_assert(
-  ForwardsLossMark<uc_log::detail::LevelBoundBackend<Default<uc_log::LossPolicy::Counted<cpuHz>>,
+  ForwardsLossMark<uc_log::Detail::LevelBoundBackend<Default<uc_log::LossPolicy::Counted<cpuHz>>,
                                                      uc_log::LogLevel::info>>);
 
 static_assert(uc_log::LossPolicy::Policy<uc_log::LossPolicy::Silent>);

@@ -5,7 +5,7 @@
 
 #include <type_traits>
 
-namespace uc_log::detail {
+namespace uc_log::Detail {
 
 template<template<typename> class Is, typename Default, typename... Ts>
 struct LastOf {
@@ -19,4 +19,4 @@ struct LastOf<Is, Default, T, Ts...>
 template<template<typename> class Is, typename Default, typename... Ts>
 using LastOfT = typename LastOf<Is, Default, Ts...>::type;
 
-}   // namespace uc_log::detail
+}   // namespace uc_log::Detail

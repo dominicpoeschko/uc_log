@@ -36,6 +36,23 @@
 
 namespace uc_log::printer {
 
+// A read offset that landed in a new boot's block: what the repair found there.
+struct LandedReadOffset {
+    std::size_t   ring;
+    std::uint32_t staleOffset;   // the old boot's read offset the pass wrote
+    std::uint32_t writeOffset;   // the new boot's write offset at the repair
+    std::uint32_t size;
+    // From the epoch read before the write to the repair. The block was re-initialised inside it: at that read the
+    // epoch was still the session's, and a boot makes it odd before its .data copy re-initialises the block.
+    std::chrono::microseconds window;
+
+    // What could have been lost: nothing, unless the new boot wrapped over its own first bytes while the stale offset
+    // stood. Below its write offset the target takes [0, staleOffset) for free space only once it has passed the end
+    // of the ring - it must have written at least a whole ring since its init, inside `window`. Above it, the target
+    // only has less room (records dropped and counted).
+    [[nodiscard]] std::uint32_t bytesForALoss() const { return size; }
+};
+
 template<typename Transport>
 class DirectRtt {
 public:
@@ -82,7 +99,7 @@ public:
               .push_back(
                 Ring{address + rtt_block::descriptorAt(b), d.buffer, d.size, d.name, d.flags});
         }
-        if(rtt.epochAddress_ && !uc_log::detail::epochBlockIsReady(rtt.sessionEpoch_)) {
+        if(rtt.epochAddress_ && !uc_log::Detail::epochBlockIsReady(rtt.sessionEpoch_)) {
             try {
                 rtt.staleSkipped_ = rtt.skipUnread(jlink);
             } catch(...) { return std::nullopt; }
@@ -110,9 +127,11 @@ public:
     // that reads nothing reads no epoch (the reader sees such a boot through DHCSR.S_RESET_ST). `outs[i]` receives
     // ring i's bytes; also refreshes status().
     //
-    // The epoch after each offset write, not once a pass: a boot before an offset write leaves the old boot's offset
-    // in the new block until the epoch is read, and a target logging then may wrap over its own unread first bytes.
-    // Per ring that window is one probe round trip; a target that wraps inside it loses its first bytes unnoticed.
+    // The epoch before and after each offset write: a boot before the write would leave the old boot's offset in the
+    // new block, and a target logging then may wrap over its own unread first bytes. A boot seen before the write
+    // skips it (nothing stale lands); one between that read and the write lets it land - the read after the write
+    // sees it, the ring's read offset tells whether it landed in the new block (the boot's init had reset it to 0),
+    // and it goes back to 0 (landed()). That window is one write round trip.
 
     std::vector<std::span<std::byte>> readAll(Transport&                            jlink,
                                               std::span<std::span<std::byte> const> outs,
@@ -152,10 +171,23 @@ public:
               = std::min({avail, most, static_cast<std::uint32_t>(outs[i].size())});
             if(n == 0) { continue; }
             std::uint32_t const first = std::min(n, ring.size - rd);
+            std::uint32_t const next  = (rd + n) % ring.size;
+            Clock::time_point   before{};
             try {
                 jlink.readMemory(ring.buffer + rd, outs[i].first(first));
                 if(first < n) { jlink.readMemory(ring.buffer, outs[i].subspan(first, n - first)); }
-                jlink.writeWord(ring.descriptor + rtt_block::readOffsetField, (rd + n) % ring.size);
+                if(epochAddress_) {
+                    before = Clock::now();
+                    if(epoch(jlink, *epochAddress_) != sessionEpoch_) {
+                        // Booted while the bytes were read: they are dropped with the pass, the offset is not
+                        // written. The offsets written before went into the old block (the epoch after each was the
+                        // session's): the boot's init reset them.
+                        reinitSeen_ = true;
+                        for(auto& g : got) { g = g.first(0); }
+                        return got;
+                    }
+                }
+                jlink.writeWord(ring.descriptor + rtt_block::readOffsetField, next);
             } catch(...) {
                 // The probe failed after earlier rings were read and their read offsets moved in the target: those
                 // bytes exist only here now. They are returned; the failure waits in failure_ for the caller, which
@@ -171,7 +203,7 @@ public:
             written.push_back(i);
             transferred_ += n;
             got[i] = outs[i].first(n);
-            if(dropIfReinit(jlink, written, got, outs)) { return got; }
+            if(dropIfReinit(jlink, written, got, outs, LastWrite{i, next, before})) { return got; }
         }
         return got;
     }
@@ -205,17 +237,44 @@ public:
 
     [[nodiscard]] bool epochKnown() const { return epochAddress_.has_value(); }
 
+    /// The pass that saw the boot found its last read offset in the new block, and put it back to 0; nullopt: none.
+    [[nodiscard]] std::optional<LandedReadOffset> landed() const { return landed_; }
+
 private:
+    // the offset write the epoch check follows: its ring, the offset written, when the epoch was read before it
+    struct LastWrite {
+        std::size_t       ring;
+        std::uint32_t     offset;
+        Clock::time_point before;
+    };
+
     // The epoch check after an offset write: a boot since the session began drops the pass's bytes and puts
-    // its read offsets to 0; true then.
+    // its read offsets to 0; true then. Only the last write can have landed in the new block (the epoch read after
+    // each earlier one was the session's): its ring's read offset still the written one says it did - landed_.
     bool dropIfReinit(Transport&                            jlink,
                       std::span<std::size_t const>          written,
                       std::span<std::span<std::byte>>       got,
-                      std::span<std::span<std::byte> const> outs) {
+                      std::span<std::span<std::byte> const> outs,
+                      std::optional<LastWrite>              last = std::nullopt) {
         if(!epochAddress_ || written.empty() || epoch(jlink, *epochAddress_) == sessionEpoch_) {
             return false;
         }
         reinitSeen_ = true;
+        if(last && last->offset != 0) {
+            auto const&              ring = up_[last->ring];
+            std::array<std::byte, 8> offsets{};
+            jlink.readMemory(ring.descriptor + rtt_block::writeOffsetField, offsets);
+            auto const after = Clock::now();
+            if(le32(offsets, 4) == last->offset) {
+                landed_ = LandedReadOffset{
+                  .ring        = last->ring,
+                  .staleOffset = last->offset,
+                  .writeOffset = le32(offsets, 0),
+                  .size        = ring.size,
+                  .window
+                  = std::chrono::duration_cast<std::chrono::microseconds>(after - last->before)};
+            }
+        }
         for(auto const i : written) { got[i] = outs[i].first(0); }
         for(auto const i : written) {
             jlink.writeWord(up_[i].descriptor + rtt_block::readOffsetField, 0);
@@ -230,7 +289,7 @@ private:
                                std::uint32_t address) {
         auto const deadline = Clock::now() + epochSettle;
         auto       e        = epoch(jlink, address);
-        while(!uc_log::detail::epochBlockIsReady(e) && Clock::now() < deadline) {
+        while(!uc_log::Detail::epochBlockIsReady(e) && Clock::now() < deadline) {
             Clock::sleep_for(std::chrono::milliseconds{1});
             e = epoch(jlink, address);
         }
@@ -323,17 +382,18 @@ private:
 
     explicit DirectRtt(std::uint32_t address) : address_{address} {}
 
-    std::uint32_t                address_;
-    std::vector<Ring>            up_;
-    std::vector<Ring>            down_;
-    std::uint32_t                transferred_{};
-    static constexpr auto        epochSettle = std::chrono::milliseconds{200};
-    std::optional<std::uint32_t> epochAddress_;
-    std::uint32_t                sessionEpoch_{};
-    std::optional<std::uint32_t> staleSkipped_;
-    bool                         reinitSeen_{};
-    std::exception_ptr           failure_{};
-    Status                       status_{};
+    std::uint32_t                   address_;
+    std::vector<Ring>               up_;
+    std::vector<Ring>               down_;
+    std::uint32_t                   transferred_{};
+    static constexpr auto           epochSettle = std::chrono::milliseconds{200};
+    std::optional<std::uint32_t>    epochAddress_;
+    std::uint32_t                   sessionEpoch_{};
+    std::optional<LandedReadOffset> landed_;
+    std::optional<std::uint32_t>    staleSkipped_;
+    bool                            reinitSeen_{};
+    std::exception_ptr              failure_{};
+    Status                          status_{};
 };
 
 }   // namespace uc_log::printer

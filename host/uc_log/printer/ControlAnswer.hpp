@@ -51,7 +51,7 @@ struct ControlTarget {
     std::atomic<bool> const*      stop{};   // when set, running waits, resets and flashes return
 };
 
-namespace detail {
+namespace Detail {
     inline printer::TargetPort::Result run(ControlTarget const&         t,
                                            std::vector<TargetOp> const& ops) {
         return t.target->accessTarget(ops, printer::TargetPort::defaultTimeout);
@@ -390,7 +390,7 @@ namespace detail {
                                   ControlTarget const&) {
         return error("subscribe: only on a connection to the server");
     }
-}   // namespace detail
+}   // namespace Detail
 
 /// `cancelled`: true once the client is gone, so a wait, reset or flash stops early.
 inline control::Answer controlAnswer(control::Request const&      request,
@@ -398,10 +398,10 @@ inline control::Answer controlAnswer(control::Request const&      request,
                                      std::function<bool()> const& cancelled = {}) {
     return std::visit(
       [&](auto const& r) -> control::Answer {
-          if constexpr(requires { detail::answer(r, target, cancelled); }) {
-              return detail::answer(r, target, cancelled);
+          if constexpr(requires { Detail::answer(r, target, cancelled); }) {
+              return Detail::answer(r, target, cancelled);
           } else {
-              return detail::answer(r, target);
+              return Detail::answer(r, target);
           }
       },
       request);

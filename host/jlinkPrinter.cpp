@@ -72,12 +72,12 @@ struct OnScopeExit {
 };
 
 // The compile-time log filter the firmware was built with (LogFilter.hpp), for the Filter tab.
-std::optional<uc_log::detail::FilterTable> loadLogFilter(uc_log::printer::MessageLog& messages,
+std::optional<uc_log::Detail::FilterTable> loadLogFilter(uc_log::printer::MessageLog& messages,
                                                          std::string const&           file) {
     if(file.empty()) { return std::nullopt; }
     std::ifstream     stream{file};
     std::string const text{std::istreambuf_iterator<char>{stream}, {}};
-    auto const        parsed = uc_log::detail::parseFilter(text);
+    auto const        parsed = uc_log::Detail::parseFilter(text);
     if(!stream.is_open()) {
         messages.error(fmt::format("log filter {}: cannot open it", file));
         return std::nullopt;
@@ -89,7 +89,7 @@ std::optional<uc_log::detail::FilterTable> loadLogFilter(uc_log::printer::Messag
     messages.status(fmt::format("log filter {}: {} module rule(s), every line >= {}",
                                 file,
                                 parsed.table.count,
-                                uc_log::detail::filterLevelName(parsed.table.global)));
+                                uc_log::Detail::filterLevelName(parsed.table.global)));
     return parsed.table;
 }
 
@@ -439,14 +439,22 @@ int main(int    argc,
       // decode only with the strings of the image the target runs (FirmwareCheck::gate)
       .decodeGate =
         [&](uc_log::printer::DirectMemoryRead const& read) {
-            return firmwareCheck.gate(o.hexFile, o.ramImage, read, sayFirmwareCheck);
+            return firmwareCheck.gate(o.hexFile,
+                                      o.ramImage,
+                                      read,
+                                      sayFirmwareCheck,
+                                      mapFacts.get()->buildId);
         },
       .onSessionStart =
         [&](uc_log::printer::DirectMemoryRead const& read) {
             // the last session's lines out before this one's: after a reset the target's times start again at 0 and
             // would sort in front of the old boot's last lines in the merge
             queue.flush();
-            firmwareCheck.check(o.hexFile, o.ramImage, read, sayFirmwareCheck);
+            firmwareCheck.check(o.hexFile,
+                                o.ramImage,
+                                read,
+                                sayFirmwareCheck,
+                                mapFacts.get()->buildId);
         }};
     if(o.ramImage) {
         // asked before each flash and reset: a rebuild may have moved the table

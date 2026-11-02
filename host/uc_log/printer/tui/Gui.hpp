@@ -35,7 +35,7 @@ public:
              printer::LogEntry const&              entry);
 
     /// Before run(): the firmware's compile-time filter for the Filter tab, the map the inspector reads.
-    void setCompiledFilter(uc_log::detail::FilterTable const& table);
+    void setCompiledFilter(uc_log::Detail::FilterTable const& table);
     void setMapSource(MapSource source);
 
     void triggerRedraw();

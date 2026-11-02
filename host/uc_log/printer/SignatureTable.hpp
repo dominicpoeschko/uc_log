@@ -34,7 +34,7 @@ namespace uc_log { namespace printer {
     public:
         void add(remote_fmt::catalog_id id,
                  std::string_view       signature) {
-            auto const names = uc_log::detail::namesOfDemangled(signature);
+            auto const names = uc_log::Detail::namesOfDemangled(signature);
             entries.insert_or_assign(id,
                                      SignatureInfo{std::string{names.module.view()},
                                                    std::string{names.function.view()},

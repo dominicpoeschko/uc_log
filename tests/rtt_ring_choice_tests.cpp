@@ -14,7 +14,7 @@
 namespace {
 
 using uc_log::LogLevel;
-using uc_log::detail::noLogRing;
+using uc_log::Detail::noLogRing;
 
 struct Where {
     static inline bool thread{true};
@@ -133,8 +133,8 @@ void twoCoresSplit() {
 template<typename B>
 concept PerCore = requires { B::perCoreIsrContexts; };
 static_assert(!PerCore<One> && Two::perCoreIsrContexts && TwoSplit::perCoreIsrContexts);
-static_assert(uc_log::detail::LevelAware<OneSplit> && uc_log::detail::LevelAware<TwoSplit>
-              && !uc_log::detail::LevelAware<Two>);
+static_assert(uc_log::Detail::LevelAware<OneSplit> && uc_log::Detail::LevelAware<TwoSplit>
+              && !uc_log::Detail::LevelAware<Two>);
 
 }   // namespace
 

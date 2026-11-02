@@ -7,9 +7,9 @@
 #include <cstddef>
 #include <span>
 
-namespace uc_log::detail {
+namespace uc_log::Detail {
 
-// The backend's record guard, forwarded for uc_log::detail::Log, which sees the backend only
+// The backend's record guard, forwarded for uc_log::Detail::Log, which sees the backend only
 // through LevelBoundBackend; a backend without one gets an empty guard.
 template<typename Guard>
 struct LevelBoundGuard {
@@ -79,15 +79,15 @@ struct LevelBoundBackend : LevelBoundGuard<typename RecordGuardOf<Backend>::type
     }
 };
 
-}   // namespace uc_log::detail
+}   // namespace uc_log::Detail
 
 namespace uc_log {
 /// The backend a line of `Level` on `Tag` writes through: ComBackend<Tag> bound to its canonical level. What the log
 /// macros use, and what a backend that wraps another one (a fan-out to a ring and RTT) names for the inner one.
 template<typename Tag, LogLevel Level>
 using ResolveBackend
-  = detail::LevelBoundBackend<ComBackend<Tag>,
-                              detail::LevelAware<ComBackend<Tag>>
-                                ? detail::canonicalLevel<ComBackend<Tag>, Level>()
+  = Detail::LevelBoundBackend<ComBackend<Tag>,
+                              Detail::LevelAware<ComBackend<Tag>>
+                                ? Detail::canonicalLevel<ComBackend<Tag>, Level>()
                                 : LogLevel::info>;
 }   // namespace uc_log

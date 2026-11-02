@@ -74,6 +74,9 @@ public:
 
     /// The RTT epoch stayed odd at open: the bytes skipped unread then (DirectRtt::skipUnread); nullopt: it settled.
     [[nodiscard]] virtual std::optional<std::uint32_t> staleSkipped() const { return std::nullopt; }
+
+    /// The pass that saw a boot wrote its last read offset into the new boot's block (DirectRtt::landed).
+    [[nodiscard]] virtual std::optional<LandedReadOffset> landed() const { return std::nullopt; }
 };
 
 template<typename Transport>
@@ -127,6 +130,8 @@ public:
     [[nodiscard]] std::optional<std::uint32_t> staleSkipped() const override {
         return rtt_.staleSkipped();
     }
+
+    [[nodiscard]] std::optional<LandedReadOffset> landed() const override { return rtt_.landed(); }
 
 private:
     Transport&                                               jlink_;

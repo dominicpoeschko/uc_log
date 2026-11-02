@@ -115,7 +115,7 @@ struct LogClock<::test::Other> {
 
 }   // namespace uc_log
 
-namespace Kvasir::I2C::detail {
+namespace Kvasir::I2C::Detail {
 template<typename T>
 struct Probe {
     static constexpr std::string_view member() { return __PRETTY_FUNCTION__; }
@@ -124,7 +124,7 @@ struct Probe {
         return [] { return std::string_view{__PRETTY_FUNCTION__}; }();
     }
 };
-}   // namespace Kvasir::I2C::detail
+}   // namespace Kvasir::I2C::Detail
 
 namespace MyApp::Reg {
 constexpr char const* name() { return __PRETTY_FUNCTION__; }
@@ -149,10 +149,10 @@ struct AnonProbe {
 }   // namespace
 
 using uc_log::LogLevel;
-using uc_log::detail::EnvModule_t;
-using uc_log::detail::EnvTag_t;
-using uc_log::detail::lineEnabled;
-using uc_log::detail::NoModule;
+using uc_log::Detail::EnvModule_t;
+using uc_log::Detail::EnvTag_t;
+using uc_log::Detail::lineEnabled;
+using uc_log::Detail::NoModule;
 
 template<char... Chars>
 using Name = sc::StringConstant<Chars...>;
@@ -299,7 +299,7 @@ namespace counted_scope {
         CHECK(contains(counted().bytes,
                        "! {} log records lost on this channel (ring full, or no debugger)"),
               "the lost-record line's inline text, sign '!'");
-        namespace text = uc_log::detail::lost_record;
+        namespace text = uc_log::Detail::lost_record;
         CHECK(contains(counted().bytes,
                        std::string{text::inlineSign} + " {} " + std::string{text::phrase} + " "
                          + std::string{text::cause}),
@@ -368,7 +368,7 @@ namespace modules {
 
     template<typename E>
     consteval bool tailIs(std::string_view expected) {
-        return uc_log::detail::headerTail<E>().stringView == expected;
+        return uc_log::Detail::headerTail<E>().stringView == expected;
     }
 
     static_assert(tailIs<uc_log_env_t>(R"(""")"));
@@ -377,7 +377,7 @@ namespace modules {
     consteval bool namesAre(std::string_view signature,
                             std::string_view module,
                             std::string_view function) {
-        auto const names = uc_log::detail::namesOf(signature, "f");
+        auto const names = uc_log::Detail::namesOf(signature, "f");
         return names.module.view() == module && names.function.view() == function;
     }
 
@@ -391,16 +391,16 @@ namespace modules {
                            "myapp.reg",
                            "Reg::f"));
 
-    static_assert(uc_log::detail::validModuleName("kvasir::i2c/bus-0.x_y"));
-    static_assert(!uc_log::detail::validModuleName(""));
-    static_assert(!uc_log::detail::validModuleName("a\"b"));
-    static_assert(!uc_log::detail::validModuleName("a,b"));
-    static_assert(!uc_log::detail::validModuleName("a{b"));
-    static_assert(!uc_log::detail::validModuleName("a b"));
-    static_assert(!uc_log::detail::validModuleName("I2C"));
-    static_assert(uc_log::detail::validModuleName(
+    static_assert(uc_log::Detail::validModuleName("kvasir::i2c/bus-0.x_y"));
+    static_assert(!uc_log::Detail::validModuleName(""));
+    static_assert(!uc_log::Detail::validModuleName("a\"b"));
+    static_assert(!uc_log::Detail::validModuleName("a,b"));
+    static_assert(!uc_log::Detail::validModuleName("a{b"));
+    static_assert(!uc_log::Detail::validModuleName("a b"));
+    static_assert(!uc_log::Detail::validModuleName("I2C"));
+    static_assert(uc_log::Detail::validModuleName(
       "012345678901234567890123456789012345678901234567890123456789012"));   // 63
-    static_assert(!uc_log::detail::validModuleName(
+    static_assert(!uc_log::Detail::validModuleName(
       "0123456789012345678901234567890123456789012345678901234567890123"));
 }   // namespace modules
 
@@ -408,17 +408,17 @@ namespace modules {
 namespace derived {
     consteval bool derivesTo(std::string_view signature,
                              std::string_view module) {
-        return uc_log::detail::moduleOf(uc_log::detail::scanSignature(signature), signature).view()
+        return uc_log::Detail::moduleOf(uc_log::Detail::scanSignature(signature), signature).view()
             == module;
     }
 
     // gcc
     static_assert(
-      derivesTo("static std::array<int, N> Kvasir::I2C::detail::Q<T>::f(T) [with int N = 2; T = "
+      derivesTo("static std::array<int, N> Kvasir::I2C::Detail::Q<T>::f(T) [with int N = 2; T = "
                 "std::array<char, 3>]",
                 "i2c.q"));
     static_assert(derivesTo(
-      "Kvasir::I2C::detail::Q<std::array<char, 3> >::f<2>(std::array<char, 3>)::<lambda()>",
+      "Kvasir::I2C::Detail::Q<std::array<char, 3> >::f<2>(std::array<char, 3>)::<lambda()>",
       "i2c.q"));
     static_assert(derivesTo("static void Kvasir::Nvic::onIsr()",
                             "nvic"));
@@ -426,11 +426,11 @@ namespace derived {
                             "a"));
     // clang
     static_assert(
-      derivesTo("static std::array<int, N> Kvasir::I2C::detail::Q<std::array<char, 3>>::f(T) [T = "
+      derivesTo("static std::array<int, N> Kvasir::I2C::Detail::Q<std::array<char, 3>>::f(T) [T = "
                 "std::array<char, 3>, N = 2]",
                 "i2c.q"));
     static_assert(derivesTo(
-      "auto Kvasir::I2C::detail::Q<std::array<char, 3>>::f(std::array<char, 3>)::(lambda)::"
+      "auto Kvasir::I2C::Detail::Q<std::array<char, 3>>::f(std::array<char, 3>)::(lambda)::"
       "operator()() const [T = std::array<char, 3>]",
       "i2c.q"));
     static_assert(derivesTo("void (anonymous namespace)::A::g()",
@@ -441,7 +441,7 @@ namespace derived {
     static_assert(derivesTo("void MyApp::Regulator::step(Kvasir::Units::Celsius)",
                             "myapp.regulator"));
     static_assert(
-      derivesTo("std::optional<Kvasir::StaticString<30>> Kvasir::Bootrom::detail::read(int)",
+      derivesTo("std::optional<Kvasir::StaticString<30>> Kvasir::Bootrom::Detail::read(int)",
                 "bootrom"));
     static_assert(derivesTo("void Kvasir::logBoot(ResetCause) [with ResetCause = Reset]",
                             ""));
@@ -471,7 +471,7 @@ namespace derived {
                             "i2c.bus"));
     static_assert(derivesTo("void Kvasir::Ubsan::ubsanReport(std::string_view)",
                             "ubsan"));
-    static_assert(derivesTo("void kvasir::detail::ubsanReport(std::string_view)",
+    static_assert(derivesTo("void kvasir::Detail::ubsanReport(std::string_view)",
                             "kvasir"));   // lowercase: not stripped
     static_assert(derivesTo("not a signature",
                             ""));
@@ -526,8 +526,8 @@ namespace derived {
     consteval bool namesFunction(std::string_view signature,
                                  std::string_view function,
                                  std::string_view expected) {
-        auto const scan = uc_log::detail::scanSignature(signature);
-        return uc_log::detail::qualifiedFunction(scan, signature, function).view() == expected;
+        auto const scan = uc_log::Detail::scanSignature(signature);
+        return uc_log::Detail::qualifiedFunction(scan, signature, function).view() == expected;
     }
 
     static_assert(namesFunction(
@@ -536,11 +536,11 @@ namespace derived {
       "finishVerify_",
       "Device<FakeBusFor<>, FakeClockT<>, Tca9548a, DefaultConfig>::finishVerify_"));
     static_assert(namesFunction(
-      "static void Kvasir::I2C::detail::Q<T>::f(T) [with int N = 2; T = int]",   // gcc
+      "static void Kvasir::I2C::Detail::Q<T>::f(T) [with int N = 2; T = int]",   // gcc
       "f",
       "Q<T>::f"));
     static_assert(
-      namesFunction("void Kvasir::I2C::detail::logUp(std::string_view, std::uint8_t, bool)",
+      namesFunction("void Kvasir::I2C::Detail::logUp(std::string_view, std::uint8_t, bool)",
                     "logUp",
                     "I2C::logUp"));
     static_assert(namesFunction("static void Kvasir::Nvic::DefaultIsrs::onIsr()",
@@ -596,7 +596,7 @@ namespace derived {
         for(char const c : tail) { buffer[n++] = c; }
         auto const sig = std::string_view{buffer.data(), n};
         auto const fn
-          = uc_log::detail::qualifiedFunction(uc_log::detail::scanSignature(sig), sig, "run");
+          = uc_log::Detail::qualifiedFunction(uc_log::Detail::scanSignature(sig), sig, "run");
         return derivesTo(sig, "i2c.bus") && fn.view().starts_with("Bus<,xxxxxx,")
             && fn.view().ends_with("...>::run") && fn.size < 120;
     }
@@ -604,10 +604,10 @@ namespace derived {
     static_assert(longSignature());
 
     // real signatures, as this compiler prints them
-    static_assert(derivesTo(Kvasir::I2C::detail::Probe<std::array<char,
+    static_assert(derivesTo(Kvasir::I2C::Detail::Probe<std::array<char,
                                                                   3>>::member(),
                             "i2c.probe"));
-    static_assert(derivesTo(Kvasir::I2C::detail::Probe<int>::inLambda(),
+    static_assert(derivesTo(Kvasir::I2C::Detail::Probe<int>::inLambda(),
                             "i2c.probe"));
     static_assert(derivesTo(AnonProbe::member(),
                             "anonprobe"));
@@ -638,24 +638,24 @@ int main() {
     counted_scope::run();
 
     // operator names: their '<' '>' '(' are no brackets
-    static_assert(uc_log::detail::functionOfDemangled("ns::operator<<(std::ostream&, X const&)")
+    static_assert(uc_log::Detail::functionOfDemangled("ns::operator<<(std::ostream&, X const&)")
                   == "operator<<");
-    static_assert(uc_log::detail::functionOfDemangled("ns::X::operator->() const") == "operator->");
-    static_assert(uc_log::detail::functionOfDemangled("bool ns::operator< <int>(A<int>, A<int>)")
+    static_assert(uc_log::Detail::functionOfDemangled("ns::X::operator->() const") == "operator->");
+    static_assert(uc_log::Detail::functionOfDemangled("bool ns::operator< <int>(A<int>, A<int>)")
                   == "operator<");
-    static_assert(uc_log::detail::functionOfDemangled("ns::X::operator()(int)") == "operator()");
-    static_assert(uc_log::detail::functionOfDemangled("ns::X::operator[](int)") == "operator[]");
-    static_assert(uc_log::detail::functionOfDemangled("ns::X::operator bool() const")
+    static_assert(uc_log::Detail::functionOfDemangled("ns::X::operator()(int)") == "operator()");
+    static_assert(uc_log::Detail::functionOfDemangled("ns::X::operator[](int)") == "operator[]");
+    static_assert(uc_log::Detail::functionOfDemangled("ns::X::operator bool() const")
                   == "operator bool");
-    static_assert(uc_log::detail::functionOfDemangled("ns::f<int>(int)") == "f");
-    static_assert(uc_log::detail::functionOfDemangled("no_parameter_list") == "no_parameter_list");
+    static_assert(uc_log::Detail::functionOfDemangled("ns::f<int>(int)") == "f");
+    static_assert(uc_log::Detail::functionOfDemangled("no_parameter_list") == "no_parameter_list");
 
     // an argument longer than 1024 characters still closes
     {
         std::string signature = "(anonymous namespace)::BenchApp<Kvasir::I2C::Bus<";
         for(int i = 0; i < 300; ++i) { signature += "Arg, "; }
         signature += "Last>, HW::Config>::run()";
-        auto const names = uc_log::detail::namesOfDemangled(signature);
+        auto const names = uc_log::Detail::namesOfDemangled(signature);
         CHECK(names.function.view() == "BenchApp<Bus<>, Config>::run",
               "a long template argument is abbreviated, not cut");
         CHECK(names.module.view() == "benchapp", "its module");

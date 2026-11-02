@@ -47,7 +47,7 @@ struct MapSymbol {
 };
 
 /// One named line of the map: a symbol (lld, GNU ld; size 0 when the map shows none) or a GNU ld input section
-/// (`fromSection`, its name as printed: ".bss._ZN6uc_log6detail11LossMembers...10lossLedgerE").
+/// (`fromSection`, its name as printed: ".bss._ZN6uc_log6Detail11LossMembers...10lossLedgerE").
 struct MapEntry {
     std::string   name;
     std::uint32_t address{};

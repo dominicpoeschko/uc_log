@@ -16,7 +16,7 @@
 namespace uc_log::printer {
 
 inline std::optional<std::uint64_t> lostRecordNumber(std::string_view message) {
-    namespace lost = uc_log::detail::lost_record;
+    namespace lost = uc_log::Detail::lost_record;
     for(std::string_view const sign : {lost::catalogSign, lost::inlineSign}) {
         if(!message.starts_with(sign) || !message.substr(sign.size()).starts_with(' ')) {
             continue;

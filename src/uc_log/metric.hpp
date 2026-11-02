@@ -23,13 +23,13 @@ template<sc::StringConstant Name,
 constexpr auto metric(auto const& value UC_LOG_LIFETIMEBOUND) {
     using ValueType = std::remove_cvref_t<decltype(value)>;
 #ifdef USE_UC_LOG
-    if constexpr(detail::isMetricQuantity<ValueType>) {
+    if constexpr(Detail::isMetricQuantity<ValueType>) {
     #if REMOTE_FMT_USE_MP_UNITS
         static_assert(std::is_same_v<std::remove_cvref_t<decltype(Scope)>, sc::StringConstant<>>,
                       "a quantity brings its unit: metric<\"name\", \"scope\">(quantity)");
         return Metric<ValueType,
                       Name,
-                      detail::metricUnitConstant<detail::metricUnitOf<ValueType>>(),
+                      Detail::metricUnitConstant<Detail::metricUnitOf<ValueType>>(),
                       UnitOrScope>{value};
     #endif
     } else {

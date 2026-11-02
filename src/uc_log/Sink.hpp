@@ -47,7 +47,7 @@ struct RecordGuardOf<Sink> {
     using type = typename Sink::RecordGuard;
 };
 
-namespace detail {
+namespace Detail {
     template<typename Backend, LogLevel Level>
     concept TakesLevel
       = requires(std::span<std::byte const> span) { Backend::template write<Level>(span); }
@@ -80,6 +80,6 @@ namespace detail {
             return Level;
         }
     }
-}   // namespace detail
+}   // namespace Detail
 
 }   // namespace uc_log

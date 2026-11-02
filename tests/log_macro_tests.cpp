@@ -71,8 +71,8 @@ struct WarnAndUp {
     static void write(std::span<std::byte const>) {}
 };
 
-static_assert(!uc_log::detail::LevelAware<Plain>);
-static_assert(uc_log::detail::LevelAware<WarnAndUp>);
+static_assert(!uc_log::Detail::LevelAware<Plain>);
+static_assert(uc_log::Detail::LevelAware<WarnAndUp>);
 }   // namespace level_aware
 
 // injectMetricFmtString: a line without a metric keeps its exact string (the same type, so the
@@ -84,39 +84,39 @@ using Plain       = int;
 using Temperature = decltype(uc_log::metric<"temp"_sc, "C"_sc, "board"_sc>(1));
 
 static_assert(
-  std::is_same_v<decltype(uc_log::detail::injectMetricFmtString("a {} {{b}} {:#x} }} {"_sc,
+  std::is_same_v<decltype(uc_log::Detail::injectMetricFmtString("a {} {{b}} {:#x} }} {"_sc,
                                                                 std::declval<Plain>(),
                                                                 std::declval<Plain>())),
                  decltype("a {} {{b}} {:#x} }} {"_sc)>);
-static_assert(std::is_same_v<decltype(uc_log::detail::injectMetricFmtString("no fields"_sc,
+static_assert(std::is_same_v<decltype(uc_log::Detail::injectMetricFmtString("no fields"_sc,
                                                                             std::declval<Plain>())),
                              decltype("no fields"_sc)>);
 static_assert(
-  std::is_same_v<decltype(uc_log::detail::injectMetricFmtString("{} t {}"_sc,
+  std::is_same_v<decltype(uc_log::Detail::injectMetricFmtString("{} t {}"_sc,
                                                                 std::declval<Plain>(),
                                                                 std::declval<Temperature>())),
                  decltype("{} t @METRIC(board::temp[C]={})"_sc)>);
 // two metrics around a plain argument, a spec and escaped braces
 static_assert(
-  std::is_same_v<decltype(uc_log::detail::injectMetricFmtString("{:#x} {{ {} {} }}"_sc,
+  std::is_same_v<decltype(uc_log::Detail::injectMetricFmtString("{:#x} {{ {} {} }}"_sc,
                                                                 std::declval<Temperature>(),
                                                                 std::declval<Plain>(),
                                                                 std::declval<Temperature>())),
                  decltype("@METRIC(board::temp[C]={:#x}) {{ {} @METRIC(board::temp[C]={}) }}"_sc)>);
 // empty scope and unit
 using Bare = decltype(uc_log::metric<"n"_sc>(1));
-static_assert(std::is_same_v<decltype(uc_log::detail::injectMetricFmtString("{}"_sc,
+static_assert(std::is_same_v<decltype(uc_log::Detail::injectMetricFmtString("{}"_sc,
                                                                             std::declval<Bare>())),
                              decltype("@METRIC(::n[]={})"_sc)>);
 // more arguments than fields: the extra metric is not placed anywhere
 static_assert(
-  std::is_same_v<decltype(uc_log::detail::injectMetricFmtString("x {}"_sc,
+  std::is_same_v<decltype(uc_log::Detail::injectMetricFmtString("x {}"_sc,
                                                                 std::declval<Plain>(),
                                                                 std::declval<Temperature>())),
                  decltype("x {}"_sc)>);
 // more fields than arguments, and an unclosed '{' at the end
 static_assert(
-  std::is_same_v<decltype(uc_log::detail::injectMetricFmtString("{} {} {"_sc,
+  std::is_same_v<decltype(uc_log::Detail::injectMetricFmtString("{} {} {"_sc,
                                                                 std::declval<Temperature>())),
                  decltype("@METRIC(board::temp[C]={}) {} {"_sc)>);
 #if REMOTE_FMT_USE_MP_UNITS
@@ -124,20 +124,20 @@ static_assert(
 using Kelvin = decltype(uc_log::metric<"t"_sc, "board"_sc>(
   mp_units::delta<mp_units::si::milli<mp_units::si::kelvin>>(1)));
 static_assert(
-  std::is_same_v<decltype(uc_log::detail::injectMetricFmtString("{}"_sc,
+  std::is_same_v<decltype(uc_log::Detail::injectMetricFmtString("{}"_sc,
                                                                 std::declval<Kelvin>())),
                  decltype("@METRIC(board::t[mK]={})"_sc)>);
 #endif
 }   // namespace metric_injection
 
 // The header's numbers (line, level, the time suffix's ratio) are built by remote_fmt's descriptor builder, not by
-// fmt: the StringConstant types must be the ones sc::detail::format gave, so catalog strings and ids stay the same.
+// fmt: the StringConstant types must be the ones sc::Detail::format gave, so catalog strings and ids stay the same.
 namespace header_numbers {
 using namespace sc::literals;
 
 template<std::uint64_t N>
 constexpr bool sameAsFmt = std::is_same_v<decltype(remote_fmt::desc::number<N>()),
-                                          decltype(sc::detail::format<N>("{}"_sc))>;
+                                          decltype(sc::Detail::format<N>("{}"_sc))>;
 static_assert(sameAsFmt<0U> && sameAsFmt<1U> && sameAsFmt<9U> && sameAsFmt<10U> && sameAsFmt<255U>);
 static_assert(sameAsFmt<65'535U> && sameAsFmt<4'294'967'295U>
               && sameAsFmt<18'446'744'073'709'551'615U>);
@@ -172,14 +172,14 @@ struct LogClock<header_numbers::Seconds> {
 }   // namespace uc_log
 
 namespace header_numbers {
-static_assert(std::is_same_v<decltype(uc_log::detail::timeSuffix<Millis>()),
+static_assert(std::is_same_v<decltype(uc_log::Detail::timeSuffix<Millis>()),
                              decltype("[1/1000]s"_sc)>);
-static_assert(std::is_same_v<decltype(uc_log::detail::timeSuffix<Cycles150M>()),
+static_assert(std::is_same_v<decltype(uc_log::Detail::timeSuffix<Cycles150M>()),
                              decltype("[1/150000000]s"_sc)>);
-static_assert(std::is_same_v<decltype(uc_log::detail::timeSuffix<Seconds>()),
+static_assert(std::is_same_v<decltype(uc_log::Detail::timeSuffix<Seconds>()),
                              decltype("[1/1]s"_sc)>);
-static_assert(std::is_same_v<decltype(uc_log::detail::timeSuffix<Millis>()),
-                             decltype(sc::detail::format<1U,
+static_assert(std::is_same_v<decltype(uc_log::Detail::timeSuffix<Millis>()),
+                             decltype(sc::Detail::format<1U,
                                                          1'000U>("[{}/{}]s"_sc))>);
 }   // namespace header_numbers
 
@@ -482,7 +482,7 @@ void checkLevel(char const* what) {
 // demangled tag: the two must agree.
 std::string targetModule(std::string_view signature) {
     return std::string{
-      uc_log::detail::moduleOf(uc_log::detail::scanSignature(signature), signature).view()};
+      uc_log::Detail::moduleOf(uc_log::Detail::scanSignature(signature), signature).view()};
 }
 
 namespace mixer::control {

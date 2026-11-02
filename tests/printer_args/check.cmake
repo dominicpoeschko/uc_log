@@ -14,7 +14,7 @@ file(
     GLOB goldens
     RELATIVE "${FIXTURE}/golden"
     "${FIXTURE}/golden/*.printer_args")
-set(targets every_keyword required_only empty_values)
+set(targets every_keyword required_only empty_values no_log)
 set(failed "")
 foreach(target IN LISTS targets)
     set(made "${WORK}/${target}.printer_args")

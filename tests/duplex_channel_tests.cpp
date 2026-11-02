@@ -79,8 +79,8 @@ struct Header {
     std::uint32_t        numDown;
 };
 
-rtt::detail::BufferControlBlock* blocksOf(Header* h) {
-    return reinterpret_cast<rtt::detail::BufferControlBlock*>(reinterpret_cast<std::byte*>(h)
+rtt::Detail::BufferControlBlock* blocksOf(Header* h) {
+    return reinterpret_cast<rtt::Detail::BufferControlBlock*>(reinterpret_cast<std::byte*>(h)
                                                               + sizeof(Header));
 }
 
@@ -141,23 +141,23 @@ Header* block(std::string_view name) {
 }
 
 // up buffer i of the duplex channels (0: the first channel), and log ring i
-rtt::detail::BufferControlBlock& up(Header*     h,
+rtt::Detail::BufferControlBlock& up(Header*     h,
                                     std::size_t i) {
     return blocksOf(h)[firstDuplexUp(h) + i];
 }
 
-rtt::detail::BufferControlBlock& logRing(Header*     h,
+rtt::Detail::BufferControlBlock& logRing(Header*     h,
                                          std::size_t i) {
     return blocksOf(h)[i];
 }
 
-rtt::detail::BufferControlBlock& down(Header*     h,
+rtt::Detail::BufferControlBlock& down(Header*     h,
                                       std::size_t i) {
     return blocksOf(h)[h->numUp + i];
 }
 
 // the probe writes into a down buffer: what fits (one slot stays free), the write offset published after the bytes
-std::size_t hostWrite(rtt::detail::BufferControlBlock& b,
+std::size_t hostWrite(rtt::Detail::BufferControlBlock& b,
                       std::string_view                 text) {
     std::uint32_t const rd
       = std::atomic_ref<std::uint32_t>{b.readPosition}.load(std::memory_order_acquire);
@@ -173,7 +173,7 @@ std::size_t hostWrite(rtt::detail::BufferControlBlock& b,
 }
 
 // the probe reads an up buffer: everything published, the read offset given back
-std::string hostRead(rtt::detail::BufferControlBlock& b) {
+std::string hostRead(rtt::Detail::BufferControlBlock& b) {
     std::uint32_t const wr
       = std::atomic_ref<std::uint32_t>{b.writePosition}.load(std::memory_order_acquire);
     std::uint32_t rd = b.readPosition;

@@ -19,6 +19,23 @@ using State = uc_log::printer::control::FirmwareState;
 using std::chrono_literals::operator""ms;
 using std::chrono_literals::operator""s;
 
+// 4 bytes 01 02 03 04 at 0x10000000, then a build-id note (detail/BuildId.hpp) with the hash A0 A1 ... B3
+constexpr char const* hexWithNote
+  = ":020000041000EA\n"
+    ":1000000001020304040000001400000003000000CB\n"
+    ":10001000474E5500A0A1A2A3A4A5A6A7A8A9AAAB34\n"
+    ":08002000ACADAEAFB0B1B2B35C\n"
+    ":00000001FF\n";
+// the same with a note of another type (1, not NT_GNU_BUILD_ID 3): no build id
+constexpr char const* hexWithOtherNote
+  = ":020000041000EA\n"
+    ":1000000001020304040000001400000001000000CD\n"
+    ":10001000474E5500A0A1A2A3A4A5A6A7A8A9AAAB34\n"
+    ":08002000ACADAEAFB0B1B2B35C\n"
+    ":00000001FF\n";
+constexpr std::uint32_t                 ramBase = 0x2000'0000;
+constexpr uc_log::printer::BuildIdPlace place{.bootWords = ramBase, .note = 0x1000'0004};
+
 // 4 bytes 01 02 03 04 at 0x10000000
 constexpr char const* hexImage
   = ":020000041000EA\n"
@@ -32,21 +49,26 @@ struct Said {
 };
 
 struct Fixture {
-    std::filesystem::path          hex;
-    std::array<std::byte, 4>       flash{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
-    int                            reads{};
-    Said                           said;
-    uc_log::printer::FirmwareCheck check;
+    std::filesystem::path hex;
+    // the target's flash from 0x10000000: the image's 4 bytes, then erased-looking zeros (a note-sized hex file reads
+    // them in the flash compare)
+    std::array<std::byte, 64> flash{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    std::array<std::byte, 20>
+         ram{};     // uc_log's boot words at ramBase: [0] epoch, [3] [4] the id ^ epoch
+    int  reads{};   // of the flash
+    int  ramReads{};
+    Said said;
+    uc_log::printer::FirmwareCheck        check;
     uc_log::printer::FirmwareCheck::EmitF emit = [this](State s, std::string const& t, bool e) {
         said.states.push_back(s);
         said.texts.push_back(t);
         said.errors.push_back(e);
     };
 
-    Fixture()
+    explicit Fixture(char const* image = hexImage)
       : hex{std::filesystem::temp_directory_path()
             / ("uc_log_firmware_check_" + std::to_string(::getpid()) + ".hex")} {
-        std::ofstream{hex} << hexImage;
+        std::ofstream{hex} << image;
     }
 
     ~Fixture() { std::filesystem::remove(hex); }
@@ -54,10 +76,29 @@ struct Fixture {
     Fixture(Fixture const&)            = delete;
     Fixture& operator=(Fixture const&) = delete;
 
+    // the boot words a boot of `epoch` leaves: the hash A0 A1 ... A7 (`last`: its last byte), each word XOR the epoch
+    void bootWords(std::uint32_t epoch,
+                   std::byte     last = std::byte{0xA7}) {
+        std::array<std::byte, 8> id{};
+        for(std::size_t i = 0; i != id.size(); ++i) { id[i] = static_cast<std::byte>(0xA0 + i); }
+        id[7] = last;
+        for(std::size_t i = 0; i != 4; ++i) {
+            ram[i] = static_cast<std::byte>((epoch >> (8 * i)) & 0xFFU);
+        }
+        for(std::size_t i = 0; i != id.size(); ++i) { ram[12 + i] = id[i] ^ ram[i % 4]; }
+    }
+
     // a probe round trip (a zero-time fake would hang a loop on the virtual clock)
     auto reader() UC_LOG_LIFETIMEBOUND {
         return [this](std::uint32_t address, std::span<std::byte> out) {
             uc_log::printer::Clock::sleep_for(1ms);
+            if(address >= ramBase) {
+                ++ramReads;
+                for(std::size_t i = 0; i != out.size(); ++i) {
+                    out[i] = ram[address - ramBase + i];
+                }
+                return true;
+            }
             ++reads;
             for(std::size_t i = 0; i != out.size(); ++i) {
                 out[i] = flash[address - 0x1000'0000U + i];
@@ -113,6 +154,70 @@ void gate() {
             && f.said.states[2] == State::match,
           "a changed hex file is checked again");
 }
+
+// The RAM copy of the build id, XOR the epoch it was written for, equal to the hex file's note: a match without a
+// flash read. Another id, one an earlier boot left (written for another epoch: the stale RAM of another image), an odd
+// epoch (a boot in its init), none (zeros), a hex file without a note or no place in the map: the flash is compared.
+void buildId() {
+    {
+        Fixture f{hexWithNote};
+        f.bootWords(0x1234'5678U);
+        f.check.check(f.hex.string(), false, f.reader(), f.emit, place);
+        CHECK(f.said.states.size() == 1 && f.said.states[0] == State::match && f.reads == 0
+                && f.ramReads == 1
+                && f.said.texts[0].contains("(build 9b6805e9, build id a0a1a2a3a4a5a6a7 in RAM"),
+              "build id: the RAM copy matches - no flash read");
+        f.bootWords(0x1234'5678U, std::byte{0});
+        f.check.check(f.hex.string(), false, f.reader(), f.emit, place);
+        CHECKF(f.said.states.size() == 2 && f.said.states[1] == State::different && f.reads != 0,
+               "build id: another id in RAM - the flash is compared (%d reads)",
+               f.reads);
+    }
+    {
+        Fixture f{hexWithNote};
+        f.bootWords(0x1234'5678U);
+        f.ram[0] = std::byte{
+          0x7a};   // a later boot moved the epoch on and wrote no id: the copy is an older boot's
+        f.check.check(f.hex.string(), false, f.reader(), f.emit, place);
+        CHECK(f.said.states.size() == 1 && f.said.states[0] == State::different && f.reads != 0,
+              "build id: a copy written for another epoch (stale RAM) - the flash is compared");
+    }
+    {
+        Fixture f{hexWithNote};
+        f.bootWords(0x1234'5679U);   // odd: a boot in its init
+        f.check.check(f.hex.string(), false, f.reader(), f.emit, place);
+        CHECK(f.said.states.size() == 1 && f.reads != 0,
+              "build id: an odd epoch - the flash is compared");
+    }
+    {
+        Fixture f{hexWithNote};
+        f.check.check(f.hex.string(), false, f.reader(), f.emit, place);
+        CHECK(f.said.states.size() == 1 && f.reads != 0,
+              "build id: none in RAM (zeros) - the flash is compared");
+    }
+    {
+        Fixture f;   // no note at 0x10000004: the hex file ends there
+        f.bootWords(0x1234'5678U);
+        f.check.check(f.hex.string(), false, f.reader(), f.emit, place);
+        CHECK(f.said.states.size() == 1 && f.said.states[0] == State::match && f.reads != 0
+                && f.ramReads == 0,
+              "build id: no note in the hex file - the flash is compared, RAM not read");
+    }
+    {
+        Fixture f{hexWithOtherNote};
+        f.bootWords(0x1234'5678U);
+        f.check.check(f.hex.string(), false, f.reader(), f.emit, place);
+        CHECK(f.reads != 0 && f.ramReads == 0,
+              "build id: a note of another type - the flash is compared");
+    }
+    {
+        Fixture f{hexWithNote};
+        f.bootWords(0x1234'5678U);
+        f.check.check(f.hex.string(), false, f.reader(), f.emit);
+        CHECK(f.reads != 0 && f.ramReads == 0,
+              "build id: no place in the map - the flash is compared");
+    }
+}
 }   // namespace
 
 int main(int    argc,
@@ -124,5 +229,6 @@ int main(int    argc,
                                {"matchAndDifferent", matchAndDifferent},
                                {         "ramImage",          ramImage},
                                {             "gate",              gate},
+                               {          "buildId",           buildId},
     });
 }

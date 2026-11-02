@@ -1,6 +1,8 @@
-# target_add_uc_log_rtt_jlink(<target> TARGET_MPU <device> ...): a firmware target's printer - its options in
+# target_add_uc_log_rtt_jlink(<target> TARGET_MPU <device> [NO_LOG] ...): a firmware target's printer - its options in
 # <target>.printer_args (one argument per line, what kvasir_bench and every other printer start read) and, with
-# UC_LOG_BUILD_PRINTER, the log_<target> custom target that runs it. Included by uc_log's CMakeLists; the ctest
+# UC_LOG_BUILD_PRINTER, the log_<target> custom target that runs it. NO_LOG: the image logs nothing (Kvasir's `release`
+# variant) - no log_<target>, so nobody starts one and waits for lines that never come; the .printer_args stay (a
+# printer still flashes, resets and reads such an image: kvasir_bench). Included by uc_log's CMakeLists; the ctest
 # uc_log_test_printer_args includes it alone into a small project (tests/printer_args) and compares the file with a
 # golden.
 
@@ -50,7 +52,7 @@ function(target_add_uc_log_rtt_jlink targetname)
         # the compile-time log filter the firmware was built with (LogFilter.hpp), for the printer to show
         "LOG_FILTER --log_filter value")
 
-    set(options VERBOSE)
+    set(options VERBOSE NO_LOG)
     set(oneValueArgs
         TARGET_MPU
         SWD_SPEED
@@ -169,7 +171,7 @@ function(target_add_uc_log_rtt_jlink targetname)
         OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${targetname}.printer_args"
         CONTENT "${printer_args_text}\n")
 
-    if(NOT UC_LOG_BUILD_PRINTER)
+    if(NOT UC_LOG_BUILD_PRINTER OR PARSED_ARGS_NO_LOG)
         return()
     endif()
 

@@ -132,7 +132,7 @@ namespace uc_log::printer { namespace tui {
 
         bool showSysTime{true};
         // the firmware's compile-time log filter (--log_filter), shown in the module tree
-        uc_log::detail::FilterTable compiledFilter{};
+        uc_log::Detail::FilterTable compiledFilter{};
         std::size_t                 compiledFilterVersion{0};
 
         bool showFunctionName{false};
@@ -824,7 +824,7 @@ namespace uc_log::printer { namespace tui {
                     content = ftxui::vbox(
                       {ftxui::text(
                          "compiled: every line ≥ "
-                         + std::string{uc_log::detail::filterLevelName(gui.compiledFilter.global)})
+                         + std::string{uc_log::Detail::filterLevelName(gui.compiledFilter.global)})
                          | ftxui::color(Theme::Text::metadata()),
                        content});
                 }
@@ -863,10 +863,10 @@ namespace uc_log::printer { namespace tui {
                     for(std::size_t i = 0; i < gui.compiledFilter.count; ++i) {
                         auto const& rule = gui.compiledFilter.rules[i];
                         if(rule.name() != node) { continue; }
-                        label += rule.level == uc_log::detail::levelOff
+                        label += rule.level == uc_log::Detail::levelOff
                                  ? std::string{"  ⛔ compiled out"}
                                  : "  compiled ≥ "
-                                     + std::string{uc_log::detail::filterLevelName(rule.level)};
+                                     + std::string{uc_log::Detail::filterLevelName(rule.level)};
                     }
                     list->Add(functionCheckbox(
                       std::move(label),
@@ -1103,7 +1103,7 @@ namespace uc_log::printer { namespace tui {
         }
 
         // Before the ui runs.
-        void setCompiledFilter(uc_log::detail::FilterTable const& table) {
+        void setCompiledFilter(uc_log::Detail::FilterTable const& table) {
             compiledFilter = table;
             ++compiledFilterVersion;
         }

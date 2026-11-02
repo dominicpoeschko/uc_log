@@ -77,6 +77,13 @@ public:
         return [this, &jlink, first = true, stopped = false](std::uint32_t        address,
                                                              std::span<std::byte> out) mutable {
             if(stopped) { return false; }
+            if(window_ && !inWindow(address, static_cast<std::uint32_t>(out.size()))) {
+                // RAM (the build id): no boot ROM drives it, nothing to wait for
+                try {
+                    jlink.readMemory(address, out);
+                } catch(std::exception const&) { return false; }
+                return true;
+            }
             auto const wait
               = std::exchange(first, false) ? readyWait : std::chrono::milliseconds{0};
             if(!mapped(jlink, wait) || resetDuringRead(jlink)) {

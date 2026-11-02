@@ -30,13 +30,14 @@ extern "C" {
 // gnu::used: nothing in the image reads it but this; .noInitLowRam: a reset keeps it, so each boot moves it on
 // [0] the epoch, [1] the logged count with its mark, [2] the complement of [1]: RAM a reset keeps is not always kept -
 // on the RP2350 a watchdog reboot that resets the SRAM stages (PSM.WDSEL) flips bits all over it, and J-Link's flash
-// loader runs from the start of RAM - a count that does not match its complement starts again at 0, never read as one
+// loader runs from the start of RAM - a count that does not match its complement starts again at 0, never read as one;
+// [3], [4] this boot's build id, each word XOR the epoch it made even (BuildId.hpp)
 [[gnu::used,
   gnu::section(
-    ".noInitLowRam.uc_log_boot_words")]] inline std::uint32_t volatile uc_log_boot_words[3];
+    ".noInitLowRam.uc_log_boot_words")]] inline std::uint32_t volatile uc_log_boot_words[5];
 }
 
-namespace uc_log::detail {
+namespace uc_log::Detail {
 inline constexpr std::string_view rttEpochSymbol{"uc_log_boot_words"};
 inline constexpr std::uint32_t    loggedBootsOffset{
   4};   // the logged count's word, after the epoch, then its complement
@@ -107,4 +108,4 @@ inline void noteRecord() {
 inline std::uint16_t loggedBootCount() {
     return static_cast<std::uint16_t>(uc_log_boot_words[1] >> 16U);
 }
-}   // namespace uc_log::detail
+}   // namespace uc_log::Detail

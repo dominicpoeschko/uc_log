@@ -165,7 +165,7 @@ namespace fanout {
 
     template<typename S>
     consteval FloorOf joinFloor(FloorOf const f) {
-        if constexpr(!detail::LevelAware<S>) {
+        if constexpr(!Detail::LevelAware<S>) {
             return f;
         } else if constexpr(!HasLevelFloor<S>) {
             return {false, f.any, f.floor};
@@ -212,7 +212,7 @@ struct FanOutBackendWith
 
     // Takes the record's level (see the top of the file): only when a sink does.
     static constexpr bool levelAware
-      = (detail::LevelAware<Primary> || ... || detail::LevelAware<Others>);
+      = (Detail::LevelAware<Primary> || ... || Detail::LevelAware<Others>);
 
     static constexpr std::size_t slots = Contexts::cores * contextsPerCore;
 
@@ -328,23 +328,23 @@ private:
     // LevelBoundBackend hands it to a sink that takes the level, as uc_log does for a sink that is no fan-out.
     template<LogLevel Level>
     static void initAll() {
-        detail::LevelBoundBackend<Primary, Level>::initTransfer();
+        Detail::LevelBoundBackend<Primary, Level>::initTransfer();
         if(primaryOnly[slot()]) { return; }
-        (detail::LevelBoundBackend<Others, Level>::initTransfer(), ...);
+        (Detail::LevelBoundBackend<Others, Level>::initTransfer(), ...);
     }
 
     template<LogLevel Level>
     static void writeAll(std::span<std::byte const> span) {
-        detail::LevelBoundBackend<Primary, Level>::write(span);
+        Detail::LevelBoundBackend<Primary, Level>::write(span);
         if(primaryOnly[slot()]) { return; }
-        (detail::LevelBoundBackend<Others, Level>::write(span), ...);
+        (Detail::LevelBoundBackend<Others, Level>::write(span), ...);
     }
 
     template<LogLevel Level>
     static void finalizeAll() {
-        detail::LevelBoundBackend<Primary, Level>::finalizeTransfer();
+        Detail::LevelBoundBackend<Primary, Level>::finalizeTransfer();
         if(primaryOnly[slot()]) { return; }
-        (detail::LevelBoundBackend<Others, Level>::finalizeTransfer(), ...);
+        (Detail::LevelBoundBackend<Others, Level>::finalizeTransfer(), ...);
     }
 };
 

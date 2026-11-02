@@ -5,8 +5,10 @@
 // parse, which `Facts::map` hands on (TargetInspector, the RAM image start). Three map shapes: lld, GNU ld, and GNU
 // ld with LTO (the symbol localised, only its input-section line left).
 
+#include "uc_log/detail/BuildId.hpp"
 #include "uc_log/detail/RttEpoch.hpp"
 #include "uc_log/printer/AnnouncedReset.hpp"
+#include "uc_log/printer/FirmwareCheck.hpp"
 #include "uc_log/printer/MapSymbols.hpp"
 #include "uc_log/printer/RttBlockInfo.hpp"
 #include "uc_log/printer/TargetLoss.hpp"
@@ -67,6 +69,7 @@ public:
         std::optional<std::uint32_t>
                                    loggedBoots;   // the count of boots that logged, after the epoch
         std::optional<LedgerPlace> ledger;
+        std::optional<BuildIdPlace> buildId;   // detail/BuildId.hpp: the RAM copy and the note
         std::size_t ledgers{};   // ::lossLedger symbols found (more than one: none used)
         // the parse the facts came from, never null: the inspector's symbols, the RAM image's vector table
         std::shared_ptr<MapSnapshot const> map{std::make_shared<MapSnapshot const>()};
@@ -97,10 +100,13 @@ private:
             auto const& map = snapshot->symbols;
             f.block         = rttBlockOf(map, file_);
             f.announce      = map.addressOf(announced_reset::symbol);
-            f.epoch         = map.addressOf(uc_log::detail::rttEpochSymbol);
+            f.epoch         = map.addressOf(uc_log::Detail::rttEpochSymbol);
             f.loggedBoots   = f.epoch.transform(
-              [](std::uint32_t epoch) { return epoch + uc_log::detail::loggedBootsOffset; });
+              [](std::uint32_t epoch) { return epoch + uc_log::Detail::loggedBootsOffset; });
             f.ledger = findLossLedger(map, f.ledgers);
+            auto const note
+              = map.value(uc_log::Detail::buildIdNoteSymbol);   // a linker-script name
+            if(f.epoch && note) { f.buildId = BuildIdPlace{.bootWords = *f.epoch, .note = *note}; }
         }
         f.map = std::move(snapshot);
         return f;

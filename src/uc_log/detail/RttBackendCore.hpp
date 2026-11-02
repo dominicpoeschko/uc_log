@@ -10,6 +10,7 @@
 // changed the images.
 
 #include "../LossPolicy.hpp"
+#include "BuildId.hpp"
 #include "CountedRings.hpp"
 #include "LogRing.hpp"
 #include "RttConfigBuilder.hpp"
@@ -21,7 +22,7 @@
 #include <span>
 #include <string_view>
 
-namespace uc_log::detail {
+namespace uc_log::Detail {
 
 // ConfigBuilder: the RttConfigBuilder of the backend's rings (the log rings first, one ledger slot each)
 template<typename Backend,
@@ -105,17 +106,21 @@ public:
     static constexpr bool isStartupEntry = true;
 
     // Startup, before and after .data (and with it the control block) is initialised: the epoch odd, then even - a
-    // printer that wrote a read offset across the re-init knows it, and none opens the old block meanwhile (RttEpoch.hpp)
+    // printer that wrote a read offset across the re-init knows it, and none opens the old block meanwhile (RttEpoch.hpp).
+    // The build id goes into RAM before the epoch turns even (BuildId.hpp).
     static void preMemoryInit() { epochBlockStale(); }
 
-    static void postMemoryInit() { epochBlockReady(); }
+    static void postMemoryInit() {
+        copyBuildId();
+        epochBlockReady();
+    }
 
     // RecordFrame, before a record's first byte: the boot's first record counts it as a boot that logged
     // (RttEpoch.hpp), so the printer can say how many such boots nobody read
-    static void noteRecord() { detail::noteRecord(); }
+    static void noteRecord() { Detail::noteRecord(); }
 
     // uc_log::bootsThatLogged() (Runtime.hpp): the count noteRecord() moves, as the printer reads it
-    static std::uint16_t bootsThatLogged() { return detail::loggedBootCount(); }
+    static std::uint16_t bootsThatLogged() { return Detail::loggedBootCount(); }
 
     static constexpr std::size_t numDuplexChannels = ConfigBuilder::numDuplexChannels;
 
@@ -185,4 +190,4 @@ public:
     };
 };
 
-}   // namespace uc_log::detail
+}   // namespace uc_log::Detail

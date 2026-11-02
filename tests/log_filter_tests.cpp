@@ -60,8 +60,8 @@ struct LogClock<Tag::User> {
     } while(false)
 
 namespace parser {
-using uc_log::detail::levelOff;
-using uc_log::detail::parseFilter;
+using uc_log::Detail::levelOff;
+using uc_log::Detail::parseFilter;
 
 constexpr auto table = parseFilter(R"(
 # comment
@@ -145,8 +145,8 @@ int main() {
     CHECK((take() == Levels{4, 5}), "without a rule the scope's floor stays");
 
     // what the printer does with the same file
-    auto const runtime = uc_log::detail::parseFilter("* = info\nquiet = off\n");
-    CHECK(runtime.error.empty() && runtime.table.levelFor("quiet.x") == uc_log::detail::levelOff,
+    auto const runtime = uc_log::Detail::parseFilter("* = info\nquiet = off\n");
+    CHECK(runtime.error.empty() && runtime.table.levelFor("quiet.x") == uc_log::Detail::levelOff,
           "the parser at run time");
 
     return uc_log::test::report();

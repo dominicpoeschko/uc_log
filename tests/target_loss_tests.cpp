@@ -28,10 +28,10 @@ SignatureInfo const& lostSite() {
       "uc_log.record_frame",
       "RecordFrame<…>::reportLost<…>",
       "void "
-      "uc_log::detail::RecordFrame<uc_log::detail::LevelBoundBackend<uc_log::ComBackend<uc_log::"
+      "uc_log::Detail::RecordFrame<uc_log::Detail::LevelBoundBackend<uc_log::ComBackend<uc_log::"
       "Tag::User>, "
       "(uc_log::LogLevel)2>, "
-      "uc_log::Tag::User>::reportLost<uc_log::detail::LossLedger<2u>::Mark>(uc_log::detail::"
+      "uc_log::Tag::User>::reportLost<uc_log::Detail::LossLedger<2u>::Mark>(uc_log::Detail::"
       "LossLedger<2u>::Mark)"};
     return site;
 }
@@ -142,8 +142,8 @@ void maps() {
     // lld: the input section, then the demangled symbol with vma, lma, size (shortened)
     std::istringstream lld{
       "20079780 20079780       30     4         "
-      "x.elf.lto.o:(.bss._ZN6uc_log6detail11LossMembersIS2_Lj2EE10lossLedgerE)\n"
-      "20079780 20079780       30     1                 uc_log::detail::LossMembers<B, L, "
+      "x.elf.lto.o:(.bss._ZN6uc_log6Detail11LossMembersIS2_Lj2EE10lossLedgerE)\n"
+      "20079780 20079780       30     1                 uc_log::Detail::LossMembers<B, L, "
       "2u>::lossLedger\n"};
     std::size_t count = 0;
     auto const  a = uc_log::printer::findLossLedger(uc_log::printer::MapSymbols::parse(lld), count);
@@ -151,17 +151,17 @@ void maps() {
 
     // GNU ld: the input section with its numbers on the next line, then the demangled symbol (spaces in it)
     std::istringstream gnu{
-      " .bss._ZN6uc_log6detail11LossMembersINS_20DefaultRttComBackendIS2_Lj2EE10lossLedgerE\n"
+      " .bss._ZN6uc_log6Detail11LossMembersINS_20DefaultRttComBackendIS2_Lj2EE10lossLedgerE\n"
       "                0x20079780       0x30 /tmp/ccuMybFE.ltrans0.ltrans.o\n"
-      "                0x20079780                uc_log::detail::LossMembers<B, L, "
+      "                0x20079780                uc_log::Detail::LossMembers<B, L, "
       "2u>::lossLedger\n"};
     auto const b = uc_log::printer::findLossLedger(uc_log::printer::MapSymbols::parse(gnu), count);
     CHECK(b && b->address == 0x2007'9780U && b->size == 0x30 && count == 1, "GNU ld map");
 
     std::istringstream two{
-      "20079780 20079780       30     1                 uc_log::detail::LossMembers<A, L, "
+      "20079780 20079780       30     1                 uc_log::Detail::LossMembers<A, L, "
       "2u>::lossLedger\n"
-      "200797b0 200797b0       30     1                 uc_log::detail::LossMembers<B, L, "
+      "200797b0 200797b0       30     1                 uc_log::Detail::LossMembers<B, L, "
       "2u>::lossLedger\n"};
     CHECK(!uc_log::printer::findLossLedger(uc_log::printer::MapSymbols::parse(two), count)
             && count == 2,
@@ -170,7 +170,7 @@ void maps() {
     // GNU ld: the copy --gc-sections dropped is listed at 0 under "Discarded input sections" - no ledger
     std::istringstream discarded{
       "Discarded input sections\n"
-      " .bss._ZN6uc_log6detail11LossMembersINS_1BELj2EE10lossLedgerE\n"
+      " .bss._ZN6uc_log6Detail11LossMembersINS_1BELj2EE10lossLedgerE\n"
       "                0x00000000       0x30 /tmp/cc.ltrans0.ltrans.o\n"
       "Memory Configuration\n"
       "Linker script and memory map\n"};

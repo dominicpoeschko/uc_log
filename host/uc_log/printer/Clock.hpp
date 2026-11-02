@@ -32,10 +32,10 @@ namespace uc_log::printer {
 
 class VirtualTime;
 
-namespace detail {
+namespace Detail {
     inline std::atomic<VirtualTime*> installed{nullptr};
     inline thread_local bool         participant{false};
-}   // namespace detail
+}   // namespace Detail
 
 class VirtualTime {
 public:
@@ -45,11 +45,11 @@ public:
     // installs it; the constructing thread takes part
     VirtualTime() : now_{std::chrono::steady_clock::now()} {
         VirtualTime* expected = nullptr;
-        if(!detail::installed.compare_exchange_strong(expected, this)) {
+        if(!Detail::installed.compare_exchange_strong(expected, this)) {
             std::fputs("uc_log VirtualTime: a second one while one is installed\n", stderr);
             std::abort();
         }
-        detail::participant = true;
+        Detail::participant = true;
     }
 
     VirtualTime(VirtualTime const&)            = delete;
@@ -57,8 +57,8 @@ public:
 
     // every Clock::Thread started under it has ended
     ~VirtualTime() {
-        detail::participant = false;
-        detail::installed   = nullptr;
+        Detail::participant = false;
+        Detail::installed   = nullptr;
     }
 
     time_point now() {
@@ -75,7 +75,7 @@ public:
                Unlock&&    unlock,
                Relock&&    relock) {
         std::unique_lock<std::mutex> lock{mutex_};
-        Waiter                       w{deadline, channel, detail::participant};
+        Waiter                       w{deadline, channel, Detail::participant};
         if(deadline <= now_) {
             unlock();
             lock.unlock();
@@ -167,15 +167,15 @@ struct Clock {
     static constexpr bool is_steady = true;
 
     // a test's VirtualTime is installed
-    static bool isVirtual() { return detail::installed.load(std::memory_order_acquire) != nullptr; }
+    static bool isVirtual() { return Detail::installed.load(std::memory_order_acquire) != nullptr; }
 
     static time_point now() {
-        if(auto* const v = detail::installed.load(std::memory_order_acquire)) { return v->now(); }
+        if(auto* const v = Detail::installed.load(std::memory_order_acquire)) { return v->now(); }
         return std::chrono::steady_clock::now();
     }
 
     static void sleep_until(time_point t) {
-        if(auto* const v = detail::installed.load(std::memory_order_acquire)) {
+        if(auto* const v = Detail::installed.load(std::memory_order_acquire)) {
             v->block(t, nullptr, []() {}, []() {});
             return;
         }
@@ -186,7 +186,7 @@ struct Clock {
              typename Period>
     static void sleep_for(std::chrono::duration<Rep,
                                                 Period> d) {
-        if(auto* const v = detail::installed.load(std::memory_order_acquire)) {
+        if(auto* const v = Detail::installed.load(std::memory_order_acquire)) {
             v->block(v->now() + std::chrono::ceil<duration>(d), nullptr, []() {}, []() {});
             return;
         }
@@ -197,14 +197,14 @@ struct Clock {
     class ConditionVariable {
     public:
         void notify_one() {
-            if(auto* const v = detail::installed.load(std::memory_order_acquire)) {
+            if(auto* const v = Detail::installed.load(std::memory_order_acquire)) {
                 v->notify(this, false);
             }
             cv_.notify_one();
         }
 
         void notify_all() {
-            if(auto* const v = detail::installed.load(std::memory_order_acquire)) {
+            if(auto* const v = Detail::installed.load(std::memory_order_acquire)) {
                 v->notify(this, true);
             }
             cv_.notify_all();
@@ -215,7 +215,7 @@ struct Clock {
         void wait(Lock&     lock,
                   Predicate pred) {
             while(!pred()) {
-                if(auto* const v = detail::installed.load(std::memory_order_acquire)) {
+                if(auto* const v = Detail::installed.load(std::memory_order_acquire)) {
                     v->block(
                       time_point::max(),
                       this,
@@ -233,7 +233,7 @@ struct Clock {
                         time_point t,
                         Predicate  pred) {
             while(!pred()) {
-                if(auto* const v = detail::installed.load(std::memory_order_acquire)) {
+                if(auto* const v = Detail::installed.load(std::memory_order_acquire)) {
                     if(v->now() >= t) { return pred(); }
                     v->block(t, this, [&]() { lock.unlock(); }, [&]() { lock.lock(); });
                 } else if(cv_.wait_until(lock, t) == std::cv_status::timeout) {
@@ -284,13 +284,13 @@ struct Clock {
             requires(!std::is_same_v<std::remove_cvref_t<F>,
                                      Thread>)
         explicit Thread(F&& body) : exit_{std::make_shared<Exit>()} {
-            auto* const v = detail::installed.load(std::memory_order_acquire);
+            auto* const v = Detail::installed.load(std::memory_order_acquire);
             if(v != nullptr) {
                 v->addParticipant();
             }   // before it runs: the time waits for its first step
             thread_ = std::jthread{[v, exit = exit_, f = std::forward<F>(body)](
                                      std::stop_token const& stoken) mutable {
-                detail::participant = v != nullptr;
+                Detail::participant = v != nullptr;
                 struct Leave {
                     VirtualTime*          v;
                     std::shared_ptr<Exit> exit;

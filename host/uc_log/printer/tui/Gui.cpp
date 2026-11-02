@@ -195,7 +195,7 @@ void Gui::add(std::chrono::system_clock::time_point recvTime,
     window_->add(recvTime, entry);
 }
 
-void Gui::setCompiledFilter(uc_log::detail::FilterTable const& table) {
+void Gui::setCompiledFilter(uc_log::Detail::FilterTable const& table) {
     window_->setCompiledFilter(table);
 }
 

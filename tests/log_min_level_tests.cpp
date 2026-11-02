@@ -125,7 +125,7 @@ int main() {
 
     // Plain (non-templated) hooks are forwarded.
     events().clear();
-    using Plain = uc_log::detail::LevelBoundBackend<PlainHooks, LogLevel::info>;
+    using Plain = uc_log::Detail::LevelBoundBackend<PlainHooks, LogLevel::info>;
     Plain::initTransfer();
     Plain::write({});
     Plain::finalizeTransfer();
@@ -134,7 +134,7 @@ int main() {
 
     // No hooks at all: the forwarders exist and are no-ops.
     events().clear();
-    using None = uc_log::detail::LevelBoundBackend<NoHooks, LogLevel::info>;
+    using None = uc_log::Detail::LevelBoundBackend<NoHooks, LogLevel::info>;
     None::initTransfer();
     None::write({});
     None::finalizeTransfer();

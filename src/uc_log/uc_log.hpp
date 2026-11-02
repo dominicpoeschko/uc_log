@@ -55,7 +55,7 @@
     #include <type_traits>
     #include <utility>
 
-namespace uc_log { namespace detail {
+namespace uc_log { namespace Detail {
     // The no-log build's stand-in for a log call, named in the dead arm of a constant-false
     // conditional: nothing is evaluated or emitted, but the arguments count as used, so no
     // unused warnings. Const references so bit-fields bind; returns int so the arms agree.
@@ -63,10 +63,10 @@ namespace uc_log { namespace detail {
     constexpr int touch(Ts const&...) noexcept {
         return 0;
     }
-}}   // namespace uc_log::detail
+}}   // namespace uc_log::Detail
 
     #ifdef USE_UC_LOG
-namespace uc_log { namespace detail {
+namespace uc_log { namespace Detail {
     // __FILE_NAME__, the file's name without its directory
     struct FileName {
     private:
@@ -260,7 +260,7 @@ namespace uc_log { namespace detail {
         }
     };
 
-}}   // namespace uc_log::detail
+}}   // namespace uc_log::Detail
     #endif
 
     // Compile-time level floor: call sites below it expand to nothing at all -- no code,
@@ -275,7 +275,7 @@ namespace uc_log { namespace detail {
 namespace uc_log {
 inline constexpr LogLevel minLevel = LogLevel::UC_LOG_MIN_LEVEL;
 
-namespace detail {
+namespace Detail {
     // UC_LOG_MIN_LEVEL or the filter file's `*`, whichever is higher (LogFilter.hpp).
     consteval std::uint8_t globalFloor() {
         auto const level = static_cast<std::uint8_t>(minLevel);
@@ -329,7 +329,7 @@ namespace detail {
         }
     }
     #endif
-}   // namespace detail
+}   // namespace Detail
 }   // namespace uc_log
 
     #ifdef USE_UC_LOG
@@ -337,10 +337,10 @@ namespace detail {
         // tag `tag` (EnvTag_t<env>); expects the sc literal namespaces in scope. Names the macros introduce
         // carry the UC_LOG_DO_NOT_USE_ prefix: they expand into the caller's scope (-Wshadow).
         #define UC_LOG_DETAIL_FMT(tag, env, level, line, filename, fmt)                            \
-            ("(\""_sc + SC_LIFT(::uc_log::detail::FileName{filename}) + "\", "_sc                  \
+            ("(\""_sc + SC_LIFT(::uc_log::Detail::FileName{filename}) + "\", "_sc                  \
              + ::remote_fmt::desc::number<static_cast<std::uint32_t>(line)>() + ", "_sc            \
              + ::remote_fmt::desc::number<static_cast<std::uint8_t>(level)>() + ", {}"_sc          \
-             + ::uc_log::detail::timeSuffix<tag>() + ", "_sc + ::uc_log::detail::headerTail<env>() \
+             + ::uc_log::Detail::timeSuffix<tag>() + ", "_sc + ::uc_log::Detail::headerTail<env>() \
              + "\"\"\")"_sc + SC_LIFT(fmt))
 
         // Only the filter file's module rules need the signature.
@@ -357,18 +357,18 @@ namespace detail {
         // nothing is evaluated twice. uc_log_env_t is unqualified on purpose (LogEnv.hpp).
         #define UC_LOG_AT(level, line, filename, fmt, ...)                                         \
             do {                                                                                   \
-                using UC_LOG_DO_NOT_USE_TAG = ::uc_log::detail::EnvTag_t<uc_log_env_t>;            \
-                if constexpr(::uc_log::detail::lineEnabled<static_cast<::uc_log::LogLevel>(level), \
+                using UC_LOG_DO_NOT_USE_TAG = ::uc_log::Detail::EnvTag_t<uc_log_env_t>;            \
+                if constexpr(::uc_log::Detail::lineEnabled<static_cast<::uc_log::LogLevel>(level), \
                                                            uc_log_env_t>(                          \
                                UC_LOG_DETAIL_FILTER_SIGNATURE))                                    \
                 {                                                                                  \
                     if(!std::is_constant_evaluated()) {                                            \
-                        using namespace ::remote_fmt::detail;                                      \
+                        using namespace ::remote_fmt::Detail;                                      \
                         using namespace ::sc::literals;                                            \
                         using UC_LOG_DO_NOT_USE_LOG                                                \
-                          = ::uc_log::detail::Log<decltype(::uc_log::detail::logArgumentTypes(     \
-                            ::uc_log::detail::LogArgumentsPreferred{},                             \
-                            ::uc_log::detail::ticks(                                               \
+                          = ::uc_log::Detail::Log<decltype(::uc_log::Detail::logArgumentTypes(     \
+                            ::uc_log::Detail::LogArgumentsPreferred{},                             \
+                            ::uc_log::Detail::ticks(                                               \
                               ::uc_log::LogClock<UC_LOG_DO_NOT_USE_TAG>::now()) __VA_OPT__(, )     \
                               __VA_ARGS__))>;                                                      \
                         constexpr typename UC_LOG_DO_NOT_USE_LOG::template Final<                  \
@@ -393,14 +393,14 @@ namespace detail {
 template<typename ComBackend,
          typename ClockTag>
 template<typename Mark>
-void uc_log::detail::RecordFrame<ComBackend,
+void uc_log::Detail::RecordFrame<ComBackend,
                                  ClockTag>::reportLost(Mark const mark) {
     if constexpr(globalFloor() <= static_cast<std::uint8_t>(LogLevel::warn)) {
-        using namespace ::remote_fmt::detail;
+        using namespace ::remote_fmt::Detail;
         using namespace ::sc::literals;
         using LostEnv
           = ExtendEnv_t<Env<>, setting::Backend<ClockTag>, setting::Module<decltype("uc_log"_sc)>>;
-        namespace lost = ::uc_log::detail::
+        namespace lost = ::uc_log::Detail::
           lost_record;   // the text, shared with the printer: detail/LostRecord.hpp
         using Text = decltype(::sc::create([] { return lost::sign(remote_fmt::useCatalog); })
                               + " {} "_sc + ::sc::create([] { return lost::phrase; }) + " "_sc
@@ -432,7 +432,7 @@ void uc_log::detail::RecordFrame<ComBackend,
             do {                                                                          \
                 using namespace ::sc::literals;                                           \
                 static_cast<void>(                                                        \
-                  false ? ::uc_log::detail::touch(static_cast<::uc_log::LogLevel>(level), \
+                  false ? ::uc_log::Detail::touch(static_cast<::uc_log::LogLevel>(level), \
                                                   fmt __VA_OPT__(, ) __VA_ARGS__)         \
                         : 0);                                                             \
             } while(false)

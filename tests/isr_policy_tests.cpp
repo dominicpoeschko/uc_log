@@ -15,7 +15,7 @@ namespace {
 namespace IP = uc_log::IsrPolicy;
 using uc_log::Levels;
 using uc_log::SilentLevels;
-using uc_log::detail::noLogRing;
+using uc_log::Detail::noLogRing;
 
 struct FakeActive {
     [[maybe_unused]] static int operator()() { return 3; }
@@ -109,8 +109,8 @@ struct Without {
     [[maybe_unused]] static void write(std::span<std::byte const>) {}
 };
 
-using BoundWith    = uc_log::detail::LevelBoundBackend<WithGuard, uc_log::LogLevel::info>;
-using BoundWithout = uc_log::detail::LevelBoundBackend<Without, uc_log::LogLevel::info>;
+using BoundWith    = uc_log::Detail::LevelBoundBackend<WithGuard, uc_log::LogLevel::info>;
+using BoundWithout = uc_log::Detail::LevelBoundBackend<Without, uc_log::LogLevel::info>;
 static_assert(std::is_same_v<BoundWith::RecordGuard,
                              uc_log::IsrRecordGuard>);
 static_assert(std::is_empty_v<BoundWithout::RecordGuard>);

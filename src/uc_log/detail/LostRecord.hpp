@@ -7,11 +7,11 @@
 
 #include <string_view>
 
-namespace uc_log::detail::lost_record {
+namespace uc_log::Detail::lost_record {
 inline constexpr std::string_view catalogSign{"⚠"};
 inline constexpr std::string_view inlineSign{"!"};
 inline constexpr std::string_view phrase{"log records lost on this channel"};
 inline constexpr std::string_view cause{"(ring full, or no debugger)"};
 
 constexpr std::string_view sign(bool const catalog) { return catalog ? catalogSign : inlineSign; }
-}   // namespace uc_log::detail::lost_record
+}   // namespace uc_log::Detail::lost_record

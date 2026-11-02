@@ -19,7 +19,7 @@
 #include <type_traits>
 #include <utility>
 
-namespace uc_log::detail {
+namespace uc_log::Detail {
 
 // The static state of a counting backend; the backend is the first parameter, so two backends
 // never share a ledger. `lossLedger` is what the printer finds by name in the map.
@@ -119,4 +119,4 @@ struct Counting {
     }
 };
 
-}   // namespace uc_log::detail
+}   // namespace uc_log::Detail

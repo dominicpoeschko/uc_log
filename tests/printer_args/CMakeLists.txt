@@ -75,3 +75,15 @@ target_add_uc_log_rtt_jlink(
     ""
     LOG_FILTER
     "")
+
+# NO_LOG (an image that logs nothing): the printer arguments as for any image, but no log_<target>. Checked with the
+# printer on: an image that logs gets its log_ target, one with NO_LOG none.
+set(UC_LOG_BUILD_PRINTER ON)
+add_custom_target(uc_log_printer)
+add_custom_target(logs)
+target_add_uc_log_rtt_jlink(logs TARGET_MPU ATSAMD21G18A)
+add_custom_target(no_log)
+target_add_uc_log_rtt_jlink(no_log NO_LOG TARGET_MPU ATSAMD21G18A)
+if(NOT TARGET log_logs OR TARGET log_no_log)
+    message(FATAL_ERROR "NO_LOG: log_logs must exist and log_no_log must not")
+endif()

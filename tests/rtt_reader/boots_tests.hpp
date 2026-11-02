@@ -339,10 +339,77 @@ inline void tornTailAcrossReboot() {
     }
 }
 
+inline void landedReadOffsetSaid() {
+    Scenario s;
+    auto&    shared = s.shared;
+    // A boot between the pass's epoch read and its read-offset write (DirectRtt::landed): the old boot's offset lands
+    // in the new block. The printer says so with the numbers, puts it back to 0, and the next session reads the new
+    // boot from its first byte.
+    constexpr std::uint32_t           block    = FakeTransport::Shared::ramBase;
+    constexpr std::uint32_t           ringSize = 256;
+    constexpr std::uint32_t           desc0    = block + 24;
+    constexpr std::uint32_t           ring0    = block + 0x100;
+    static constexpr std::uint32_t    epochAt  = block + 0xF0;
+    auto const                        frame    = makeFrame(0);
+    auto const                        fs       = static_cast<std::uint32_t>(frame.size());
+    constexpr std::array<RingSpec, 1> ring{
+      RingSpec{.buffer = ring0, .size = ringSize}
+    };
+    RamTarget target{shared, 0x100 + ringSize, ring};
+    {
+        std::scoped_lock<std::mutex> const lock{shared.mutex};
+        shared.ramReadDelay = 0ms;
+        shared.putRam(epochAt, 20);
+        std::ranges::copy(frame, shared.ram.begin() + 0x100);
+        shared.putRam(desc0 + 12, fs);   // the old boot's one record, unread
+        shared.putRam(desc0 + 16, 0);
+        // the boot, once, right before the printer writes that record's end back: the new block holds two records
+        shared.beforeRamWrite
+          = [&, booted = false](std::uint32_t address, std::uint32_t value) mutable {
+                if(booted || address != desc0 + 16 || value != fs) { return; }
+                booted = true;
+                std::ranges::copy(frame, shared.ram.begin() + 0x100);
+                std::ranges::copy(frame, shared.ram.begin() + 0x100 + fs);
+                shared.putRam(desc0 + 12, 2 * fs);
+                shared.putRam(desc0 + 16, 0);
+                shared.putRam(epochAt, 22);
+            };
+        shared.connected = false;
+    }
+    Collected landed;
+    auto      r
+      = makeReader(landed,
+                   {.block       = []() { return uc_log::printer::RttBlockInfo{block, 1}; },
+                    .catalogText = "hello direct",
+                    .image = {.rttEpoch = []() { return std::optional<std::uint32_t>{epochAt}; }}});
+    {
+        std::scoped_lock<std::mutex> const lock{shared.mutex};
+        shared.connected = true;
+    }
+    CHECK(waitFor([&]() { return landed.anyToolContains("landed in its new block"); }, 4000ms),
+          "landed: said as a tool line");
+    CHECK(waitFor(
+            [&]() {
+                std::scoped_lock<std::mutex> const lock{landed.mutex};
+                return std::ranges::count_if(
+                         landed.entries,
+                         [](auto const& e) { return e.find("hello direct") != std::string::npos; })
+                    >= 2;
+            },
+            4000ms),
+          "landed: both records of the new boot");
+    bool const clean = !landed.anyErrorContains("overwritten unread")
+                    && !landed.anyErrorContains("corrupted data");
+    CHECK(clean, "landed: its write offset above the stale one - no loss said, none happened");
+    if(!clean) { landed.dump(); }
+    r.reset();
+}
+
 // the cases in their order (rtt_reader_tests.cpp runs every file's table; CMakeLists.txt CASES lists them)
 inline constexpr std::array cases{
   uc_log::test::Case{         "unreadBoots",          unreadBoots},
   uc_log::test::Case{"tornTailAcrossReboot", tornTailAcrossReboot},
+  uc_log::test::Case{"landedReadOffsetSaid", landedReadOffsetSaid},
 };
 
 }   // namespace uc_log_test_rtt_reader::boots

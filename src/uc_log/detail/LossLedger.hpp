@@ -23,7 +23,7 @@
 extern "C" [[gnu::weak]] std::uint32_t kvasir_announced_reset_time_us();
 #endif
 
-namespace uc_log::detail {
+namespace uc_log::Detail {
 
 // Per log ring, written only by that ring's producer (IsrPolicy.hpp): plain loads and stores, no
 // atomics - fine on the Cortex-M0+. NMI and HardFault may cut into a record on the first ISR ring:
@@ -167,4 +167,4 @@ struct StallWaiter {
 
 struct NoLossState {};
 
-}   // namespace uc_log::detail
+}   // namespace uc_log::Detail

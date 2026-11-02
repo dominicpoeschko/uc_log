@@ -58,7 +58,7 @@ void bootRows() {
 void lossLedgerWatch() {
     auto const map = scratch("ledger.map");
     std::ofstream{map}
-      << "20079780 20079780       20     1                 uc_log::detail::LossMembers<B, L, "
+      << "20079780 20079780       20     1                 uc_log::Detail::LossMembers<B, L, "
          "2u>::lossLedger\n";
     uc_log::printer::MapFacts    facts{map};
     uc_log::printer::MessageLog  messages;

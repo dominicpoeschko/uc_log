@@ -394,9 +394,9 @@ struct LevelSink {
 
 using LevelFan = uc_log::FanOutBackendWith<FakeContexts, LevelSink, Other>;
 
-static_assert(!Fan::levelAware && !uc_log::detail::LevelAware<Fan>,
+static_assert(!Fan::levelAware && !uc_log::Detail::LevelAware<Fan>,
               "level-blind sinks: one record path for every level");
-static_assert(LevelFan::levelAware && uc_log::detail::LevelAware<LevelFan>,
+static_assert(LevelFan::levelAware && uc_log::Detail::LevelAware<LevelFan>,
               "a sink that takes the level makes the fan-out take it");
 static_assert(uc_log::FanOutBackendWith<FakeContexts,
                                         Other,
@@ -574,7 +574,7 @@ concept HasFloor = requires { B::kLevelFloor; };
 using FloorFan   = uc_log::
   FanOutBackendWith<FakeContexts, FloorSink<LogLevel::warn>, Other, FloorSink<LogLevel::warn>>;
 static_assert(FloorFan::kLevelFloor == LogLevel::warn
-                && uc_log::detail::canonicalLevel<FloorFan,
+                && uc_log::Detail::canonicalLevel<FloorFan,
                                                   LogLevel::error>()
                      == LogLevel::warn,
               "two equal floors: one, and error resolves to it");

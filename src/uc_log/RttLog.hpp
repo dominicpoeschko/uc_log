@@ -40,7 +40,7 @@ struct Mode {
     static constexpr rtt::BufferMode value = M;
 };
 
-namespace detail {
+namespace Detail {
     // the kind of an option
     template<typename T>
     struct IsRings : std::false_type {};
@@ -137,9 +137,9 @@ namespace detail {
                                    Policy,
                                    LastOfT<IsLossPolicy, LossPolicy::Silent, Options...>>;
     };
-}   // namespace detail
+}   // namespace Detail
 
 template<typename DebuggerPresentFunction, typename... Options>
-using RttLog = typename detail::ResolveRttLog<DebuggerPresentFunction, Options...>::type;
+using RttLog = typename Detail::ResolveRttLog<DebuggerPresentFunction, Options...>::type;
 
 }   // namespace uc_log

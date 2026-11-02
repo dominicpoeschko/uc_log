@@ -24,7 +24,7 @@
 // `--embed-dir=`; without one nothing is filtered. Only module rules make a call site read
 // __PRETTY_FUNCTION__ (Signature.hpp scanSignature).
 
-namespace uc_log { namespace detail {
+namespace uc_log { namespace Detail {
     // One above crit: no line passes.
     inline constexpr std::uint8_t levelOff = 6;
 
@@ -144,13 +144,13 @@ namespace uc_log { namespace detail {
         if(!parsed.error.empty()) { logFilterFileIsInvalid(parsed.error); }
         return parsed.table;
     }
-}}   // namespace uc_log::detail
+}}   // namespace uc_log::Detail
 
 #if __has_embed(<uc_log_filter.txt>)
     #define UC_LOG_HAS_FILTER_FILE 1
 #endif
 
-namespace uc_log { namespace detail {
+namespace uc_log { namespace Detail {
 #ifdef UC_LOG_HAS_FILTER_FILE
     #ifdef __clang__
         #pragma clang diagnostic push
@@ -180,4 +180,4 @@ namespace uc_log { namespace detail {
 #else
     inline constexpr FilterTable filterTable{};
 #endif
-}}   // namespace uc_log::detail
+}}   // namespace uc_log::Detail
