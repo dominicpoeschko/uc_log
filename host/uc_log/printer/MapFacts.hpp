@@ -29,7 +29,7 @@ namespace uc_log::printer {
 
 /// The RTT control block from the map: the first `...::rttControlBlock` symbol (lld; GNU ld with the size from the
 /// input-section line before it) or, GNU ld with LTO, the first input section `.bss._ZN...rttControlBlockE`, whose
-/// size is 24 header bytes plus 24 per buffer.
+/// size is 24 header bytes plus 24 per buffer. A map with symbols but no candidate at all: `none` (no RTT in the image).
 inline std::expected<RttBlockInfo,
                      std::string>
 rttBlockOf(MapSymbols const&            map,
@@ -52,6 +52,7 @@ rttBlockOf(MapSymbols const&            map,
                                 (e.size - controlBlockHeaderSize) / bufferControlBlockSize};
         }
     }
+    if(candidates.empty() && !map.entries().empty()) { return RttBlockInfo{.none = true}; }
     return std::unexpected(fmt::format("failed to parse address from file: {:?} lines: {::?}",
                                        mapFile.string(),
                                        candidates));

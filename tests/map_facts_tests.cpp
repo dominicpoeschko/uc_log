@@ -55,9 +55,18 @@ void shapes() {
                   0x2000'0310U,
                   1),
           "GNU ld with LTO, numbers on the next line");
-    std::istringstream other{"20000100 20000100 10 1 something_else\n"};
-    CHECK(!uc_log::printer::rttBlockOf(uc_log::printer::MapSymbols::parse(other), "x.map"),
-          "no block: said");
+    std::istringstream other{"20000100 20000100       10     1                 something_else\n"};
+    auto const         none
+      = uc_log::printer::rttBlockOf(uc_log::printer::MapSymbols::parse(other), "x.map");
+    CHECK(none && none->none && none->address == 0,
+          "a map naming no control block: an image without RTT, not an error");
+    std::istringstream empty{""};
+    CHECK(!uc_log::printer::rttBlockOf(uc_log::printer::MapSymbols::parse(empty), "x.map"),
+          "a map without symbols: said");
+    std::istringstream odd{
+      "20000100 20000100       61     1                 uc_log::Detail::rttControlBlock\n"};
+    CHECK(!uc_log::printer::rttBlockOf(uc_log::printer::MapSymbols::parse(odd), "x.map"),
+          "a candidate of no plausible size: said, not taken for no RTT");
     CHECK(
       !blockIs("20000100 20000100       61     1                 uc_log::Detail::rttControlBlock\n",
                0x2000'0100U,

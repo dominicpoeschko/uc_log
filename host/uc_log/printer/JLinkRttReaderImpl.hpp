@@ -459,6 +459,11 @@ template<typename TransportT>
 auto BasicJLinkRttReader<TransportT>::openRttSource(TransportT&                          jlink,
                                                     uc_log::printer::RttBlockInfo const& blockInfo)
   -> std::unique_ptr<uc_log::printer::RttSource<TransportT>> {
+    if(blockInfo.none) {
+        sayTool(
+          "the image has no RTT control block (its map names none): no log, target requests only");
+        return std::make_unique<uc_log::printer::NoRtt<TransportT>>();
+    }
     if(readerOptions.directRtt) {
         if(auto direct = uc_log::printer::DirectRtt<TransportT>::open(jlink,
                                                                       blockInfo.address,

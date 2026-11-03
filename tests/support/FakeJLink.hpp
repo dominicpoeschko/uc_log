@@ -76,6 +76,7 @@ struct FakeTransport {
         std::atomic<bool> deadAcrossConnects{false};
         std::atomic<int>  slowWriteMs{0};            // a writeWord takes this long (a busy probe)
         std::atomic<bool> holdSessionStart{false};   // startRtt waits while set
+        std::atomic<int>  rttStarts{0};              // startRtt calls (the DLL's RTT started)
         // the DLL holds data the printer has not fetched yet: rttRead hands it out only after stopRtt
         std::atomic<bool> holdUntilRttStop{false};
         std::atomic<bool> blockGone{false};   // no RTT id at the block address (a boot ROM runs)
@@ -511,6 +512,7 @@ struct FakeTransport {
 
     FakeStatus startRtt(std::uint32_t,
                         std::uint32_t) {
+        ++shared->rttStarts;
         while(shared->holdSessionStart) { Clock::sleep_for(1ms); }
         return readStatus();
     }

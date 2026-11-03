@@ -497,6 +497,33 @@ inline void tuiHaltWhileWaitingForBlock() {
     r.reset();
 }
 
+// An image without RTT (a `release` build: its map names no control block). The session starts no RTT - the DLL's
+// RAM search found the block of the image before and the session died on it as a "lost connection" over and over,
+// with every read refused as "target is not connected" - and target requests are served.
+inline void imageWithoutRtt() {
+    Scenario  s;
+    auto&     shared = s.shared;
+    RamTarget target{shared, 0x800, oneKiBRing};   // an earlier image's block, still in RAM
+    Collected said;
+    auto      r = makeReader(said,
+                             {.block = []() { return uc_log::printer::RttBlockInfo{.none = true}; },
+                              .catalogText = "hello none"});
+    CHECK(waitFor([&]() { return r->sessionCount() >= 1; }, 3000ms), "a session runs");
+    CHECK(waitFor([&]() { return said.anyToolContains("has no RTT control block"); }, 3000ms),
+          "said once: no RTT in the image");
+    std::array<uc_log::printer::TargetOp, 1> const read{
+      uc_log::printer::target_op::Read{0x20000010, 4}
+    };
+    auto const got = r->accessTarget(read, 2000ms);
+    CHECK(got && got->size() == 1 && (*got)[0].size() == 4, "a read is served");
+    auto const sessions = r->sessionCount();
+    Clock::sleep_for(500ms);
+    CHECK(r->sessionCount() == sessions && !said.anyErrorContains("lost connection"),
+          "the session stays: no lost connection");
+    CHECK(shared.rttStarts.load() == 0, "no RTT started (no RAM search)");
+    r.reset();
+}
+
 // the cases in their order (rtt_reader_tests.cpp runs every file's table; CMakeLists.txt CASES lists them)
 inline constexpr std::array cases{
   uc_log::test::Case{ "accessTargetReadsAndWrites",  accessTargetReadsAndWrites},
@@ -506,6 +533,7 @@ inline constexpr std::array cases{
   uc_log::test::Case{"tuiHaltWhileWaitingForBlock", tuiHaltWhileWaitingForBlock},
   uc_log::test::Case{     "haltPollRateUnderFlood",      haltPollRateUnderFlood},
   uc_log::test::Case{      "faultHaltWhileWaiting",       faultHaltWhileWaiting},
+  uc_log::test::Case{            "imageWithoutRtt",             imageWithoutRtt},
 };
 
 }   // namespace uc_log_test_rtt_reader::target_ops

@@ -6,6 +6,8 @@
 // - DllRtt: the J-Link DLL's RTT - for a block found only by the DLL's RAM search, or by choice (UC_LOG_RTT_VIA_DLL=1,
 //   the probe's full throughput). Its known weaknesses: a stop drops what the DLL had read and not handed over, and
 //   after an unannounced reset it can deliver old lines again; its only loss signals are its own counters.
+// - NoRtt: the image has no control block (its map names none): no ring, no RTT start - the session only serves the
+//   target requests. Without it the DLL's RAM search found the block an earlier image left in RAM.
 
 #include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/printer/Clock.hpp"
@@ -343,6 +345,43 @@ private:
     Clock::time_point                   lastReport_{};
     Clock::time_point                   lastBlockDump_{};
     std::vector<std::vector<std::byte>> drained_;
+};
+
+template<typename Transport>
+class NoRtt final : public RttSource<Transport> {
+public:
+    using Base = RttSource<Transport>;
+
+    NoRtt() {
+        started_.isRunning      = 1;
+        started_.numUpBuffers   = 0;
+        started_.numDownBuffers = 0;
+    }
+
+    [[nodiscard]] typename Base::Status started() const override { return started_; }
+
+    std::optional<typename Base::BufferDesc> rttBufferDesc(bool,
+                                                           std::uint32_t) override {
+        return std::nullopt;
+    }
+
+    std::vector<std::span<std::byte>> readPass(typename Base::Outs outs) override {
+        return std::vector<std::span<std::byte>>(outs.size());
+    }
+
+    std::vector<std::span<std::byte>> drain(typename Base::Outs outs) override {
+        return std::vector<std::span<std::byte>>(outs.size());
+    }
+
+    std::size_t rttWrite(std::uint32_t,
+                         std::span<std::byte const>) override {
+        return 0;
+    }
+
+    typename Base::Status status() override { return started_; }
+
+private:
+    typename Base::Status started_{};
 };
 
 }   // namespace uc_log::printer

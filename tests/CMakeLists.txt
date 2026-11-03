@@ -168,6 +168,7 @@ uc_log_add_test(
     tuiHaltWhileWaitingForBlock
     haltPollRateUnderFlood
     faultHaltWhileWaiting
+    imageWithoutRtt
     # resets
     resetsAndFlashes
     outsideResetStartsOver
