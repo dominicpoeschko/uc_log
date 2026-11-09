@@ -132,6 +132,12 @@ namespace uc_log { namespace printer {
 
         void stop() {
             enabled = false;
+            park();
+        }
+
+        // Not listening while the firmware has no such channel, without turning it off: `enabled` is the user's
+        // (setEnabled), and a channel that comes back with a later session listens again (DuplexChannelHub::configure).
+        void park() {
             listener.stop([this]() { closeSession(); });
         }
 
@@ -149,10 +155,8 @@ namespace uc_log { namespace printer {
             listener.setBindAddress(std::move(address));
             // an enabled server that is not currently listening (e.g. its port was
             // occupied) retries on the new address; the setBindAddress post above runs
-            // first, so restart binds the updated address
-            if(enabled && listener.status.load() != SocketPortStatus::active) {
-                restart(listener.currentPort.load());
-            }
+            // first, so the bind takes the updated address
+            if(enabled) { listener.ensureListening(); }
         }
 
         bool hasClient() const {
@@ -302,16 +306,17 @@ namespace uc_log { namespace printer {
             {
                 std::scoped_lock<std::mutex> const lock{mutex};
 
-                // First the servers of channels that vanished (reflash with a different config):
-                // stopped, kept alive (sessions may still reference them).
+                // First the servers of channels that vanished (reflash with a different config, or a session that
+                // read no names): parked - not listening, kept alive (sessions may still reference them), still
+                // enabled, so they listen again when a later session has them. Every decision here is posted, not
+                // taken from `status`: that changes on the io_context thread, after the posts of the last configure
+                // (twice within a second after a flash) - deciding on it left a returning channel unbound.
                 for(auto const& [name, server] : serversByName) {
                     bool const stays
                       = std::ranges::any_of(descs, [&name](DuplexChannelDesc const& d) {
                             return d.name == name;
                         });
-                    if(!stays && server->listener.status.load() != SocketPortStatus::notStarted) {
-                        server->stop();
-                    }
+                    if(!stays) { server->park(); }
                 }
 
                 // then the kept ones, whose socket is named after the ordinal a reflash may move,
@@ -323,15 +328,12 @@ namespace uc_log { namespace printer {
                     server->clearBuffers();
                     bool const moves = server->socketOrdinal != desc.ordinal && !socketDir.empty();
                     server->socketOrdinal = desc.ordinal;
-                    if(moves) {   // rebinds, and retries a portOccupied
+                    if(moves) {   // rebinds a listening one at the new place
                         server->listener.setSocketPath(
                           unixSocketPath(socketDir, duplexSocketName(desc.ordinal)));
-                    } else if(server->enabled
-                              && server->listener.status.load() != SocketPortStatus::active)
-                    {
-                        // also retries portOccupied: the port may have been freed since the last try
-                        server->restart(server->listener.currentPort.load());
                     }
+                    // also a parked or a portOccupied one: the place may have been freed since the last try
+                    if(server->enabled) { server->listener.ensureListening(); }
                 }
 
                 std::vector<std::shared_ptr<DuplexChannelServer>> newActive;

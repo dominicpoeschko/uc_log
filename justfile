@@ -34,19 +34,23 @@ configs := "gcc gcc-asan gcc-tsan clang clang-asan clang-tsan"
 
 default: test
 
-# Print the compilers and cmake flags for a configuration (see the CI matrix)
+# Print the compilers and cmake flags for a configuration (the CI matrix): gcc and clang are CI's ship entries
+# (cmake_helpers' Release: NDEBUG, LTO), the sanitizer configurations Release with their asserts and without LTO.
+# Every option a configuration differs in is spelled out, so `configure` can switch an older tree to it in place.
 [private]
 flags config:
     #!/usr/bin/env bash
     set -euo pipefail
+    ship="-DUSE_NDEBUG=ON -DUSE_LTO=ON -DUSE_NATIVE_FLAG=OFF -DUSE_SANITIZER=none -DUSE_STDLIB_DEBUG=false"
+    asserts="-DUSE_NDEBUG=OFF -DUSE_LTO=OFF -DCMAKE_CXX_FLAGS_RELEASE=-O3 -DUSE_NATIVE_FLAG=OFF"
     libcxx="-DUSE_STD_LIB=libc++ -DUSE_STDLIB_DEBUG=true"
     case "{{ config }}" in
-        gcc)        echo "gcc g++ " ;;
-        gcc-asan)   echo "gcc g++ -DUSE_SANITIZER=address -DUSE_STDLIB_DEBUG=true" ;;
-        gcc-tsan)   echo "gcc g++ -DUSE_SANITIZER=thread -DUSE_STDLIB_DEBUG=true" ;;
-        clang)      echo "clang clang++ " ;;
-        clang-asan) echo "clang clang++ $libcxx -DUSE_SANITIZER=address" ;;
-        clang-tsan) echo "clang clang++ $libcxx -DUSE_SANITIZER=thread" ;;
+        gcc)        echo "gcc g++ $ship" ;;
+        gcc-asan)   echo "gcc g++ $asserts -DUSE_SANITIZER=address -DUSE_STDLIB_DEBUG=false" ;;
+        gcc-tsan)   echo "gcc g++ $asserts -DUSE_SANITIZER=thread -DUSE_STDLIB_DEBUG=false" ;;
+        clang)      echo "clang clang++ $ship" ;;
+        clang-asan) echo "clang clang++ $asserts $libcxx -DUSE_SANITIZER=address" ;;
+        clang-tsan) echo "clang clang++ $asserts $libcxx -DUSE_SANITIZER=thread" ;;
         *)
             echo "unknown config '{{ config }}'; known: {{ configs }}" >&2
             exit 1 ;;
@@ -74,22 +78,29 @@ guard dir src:
         rm -rf "{{ dir }}"
     fi
 
-# Configure build/<config> if it does not exist yet (no-op afterwards). Warnings are errors, as in CI
-# (.github/workflows/ci.yml): a tree configured before that gets the switch in place, once.
+# Configure build/<config> if it does not exist yet. Warnings are errors and the build is optimised (Release), with the
+# options of its CI entry (`flags`): a tree configured with other values gets them in place, once. Debug left the
+# fetched libraries without default build options (fmt, boost, the fake DLL) at -O0 - cmake_helpers clears
+# CMAKE_CXX_FLAGS_<CONFIG>.
 configure config=default_config: (guard (build_root / config) root)
     #!/usr/bin/env bash
     set -euo pipefail
     dir="{{ build_root }}/{{ config }}"
+    read -r cc cxx rest < <(just --justfile "{{ self }}" flags "{{ config }}")
     if [ -f "$dir/build.ninja" ]; then
-        grep -q '^USE_WARNINGS_AS_ERRORS:[A-Z]*=ON$' "$dir/CMakeCache.txt" \
-            || cmake -B "$dir" -DUSE_WARNINGS_AS_ERRORS=ON > /dev/null
+        stale=()
+        for opt in -DUSE_WARNINGS_AS_ERRORS=ON -DCMAKE_BUILD_TYPE=Release $rest; do
+            kv=${opt#-D}
+            grep -q -x -F -e "${kv%%=*}:BOOL=${kv#*=}" -e "${kv%%=*}:STRING=${kv#*=}" "$dir/CMakeCache.txt" \
+                || stale+=("$opt")
+        done
+        [ ${#stale[@]} -eq 0 ] || cmake -B "$dir" "${stale[@]}" > /dev/null
         exit 0
     fi
-    read -r cc cxx rest < <(just --justfile "{{ self }}" flags "{{ config }}")
     launcher=""
     command -v ccache >/dev/null && launcher="-DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
     env CC="$cc" CXX="$cxx" cmake -S "{{ root }}" -B "$dir" -G Ninja \
-        -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DUC_LOG_BUILD_TESTS=ON -DUC_LOG_BUILD_TEST_GUI=ON \
         -DJLINK_USE_FAKE_DLL={{ if real_dll == "ON" { "OFF" } else { "ON" } }} \
         -DUSE_FORCE_FETCH=ON -DUSE_WARNINGS_AS_ERRORS=ON $launcher $rest

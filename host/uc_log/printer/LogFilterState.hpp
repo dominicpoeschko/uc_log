@@ -1,7 +1,7 @@
 #pragma once
 
 // What the log view shows, as the user set it (the Filter tab, a filter file): levels, channels, source locations
-// and modules. No FTXUI: printer/EntryStore.hpp compiles it for its scans, printer/FilterFile.hpp saves and loads it.
+// and modules. No RTXUI: printer/EntryStore.hpp compiles it for its scans, printer/FilterFile.hpp saves and loads it.
 
 #include "uc_log/LogLevel.hpp"
 #include "uc_log/printer/ModulePath.hpp"

@@ -218,7 +218,7 @@ function(target_add_uc_log_rtt_jlink targetname)
         VERBATIM)
 
     # The printer is a host tool the firmware never uses, so the dependency belongs on the log_ target, not on the elf -
-    # hanging it on the elf made every firmware build walk the whole nested host build (boost, ftxui, fmt, jlink).
+    # hanging it on the elf made every firmware build walk the whole nested host build (boost, rtxui, fmt, jlink).
     # Target-level, not a DEPENDS on ${uc_log_printer_bin}: the host-build shim is a custom target that always runs, so
     # a file dependency buys nothing and breaks parsing whenever the binary is not on disk yet.
     add_dependencies(${PARSED_ARGS_PREFIX}${targetname} ${targetname} uc_log_printer)

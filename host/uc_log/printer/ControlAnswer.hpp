@@ -5,6 +5,7 @@
 // No asio here: a test of the answers needs no server.
 
 #include "uc_log/printer/Clock.hpp"
+#include "uc_log/printer/ControlEvents.hpp"
 #include "uc_log/printer/ControlProtocol.hpp"
 #include "uc_log/printer/ControlRecords.hpp"
 #include "uc_log/printer/CortexM.hpp"
@@ -389,6 +390,11 @@ namespace Detail {
     inline control::Answer answer(control::Subscribe const&,
                                   ControlTarget const&) {
         return error("subscribe: only on a connection to the server");
+    }
+
+    inline control::Answer answer(control::Unit const& u,
+                                  ControlTarget const&) {
+        return toUnitAnswer(readMetricUnit(u.unit));
     }
 }   // namespace Detail
 

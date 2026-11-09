@@ -22,12 +22,17 @@ jobs:
             fail-fast: false
             matrix:
                 # stdlib_debug and libc++ work because the top-level CMakeLists propagates
-                # the stdlib and debug-ABI flags to the force-fetched dependencies as well
+                # the stdlib and debug-ABI flags to the force-fetched dependencies as well.
+                # ship: the configuration the printer ships in (cmake_helpers' Release: NDEBUG, LTO, a gcc LTO link
+                # failing on the optimizer's late warnings). Every other entry is Release with its asserts and without
+                # LTO: faster, and gcc's warnings come at compile time. No stdlib_debug with gcc's sanitizers: libstdc++'s
+                # checked iterators take a global mutex, and the window's monkey test ran 25 times slower under TSan and
+                # timed out under ASan + UBSan. The clang entries keep libc++'s checked mode.
                 compiler:
-                    - {cc: gcc, cxx: g++}
-                    - {cc: gcc, cxx: g++, stdlib_debug: true, sanitizer: address}
-                    - {cc: gcc, cxx: g++, stdlib_debug: true, sanitizer: thread}
-                    - {cc: clang, cxx: clang++}
+                    - {cc: gcc, cxx: g++, ship: true}
+                    - {cc: gcc, cxx: g++, sanitizer: address}
+                    - {cc: gcc, cxx: g++, sanitizer: thread}
+                    - {cc: clang, cxx: clang++, ship: true}
                     - {cc: clang, cxx: clang++, stdlib: libc++, stdlib_debug: true, sanitizer: address}
                     - {cc: clang, cxx: clang++, stdlib: libc++, stdlib_debug: true, sanitizer: thread}
 
@@ -41,12 +46,12 @@ jobs:
                 pacman -S --noconfirm git cmake base-devel python lib32-glibc lib32-gcc-libs ${{ matrix.compiler.cc == 'clang' && 'clang llvm' || '' }} ${{ matrix.compiler.stdlib == 'libc++' && 'libc++ lld' || '' }}
 
             - name: Checkout repository
-              uses: actions/checkout@v5
+              uses: actions/checkout@v7
               with:
                 submodules: recursive
 
             # no SEGGER JLink DLL in CI: the in-process fake stands in, dependencies are
-            # fetched (the container has no boost/fmt/ftxui)
+            # fetched (the container has no boost/fmt/rtxui)
             - name: Configure CMake
               run: >
                 cmake -S . -B build
@@ -55,6 +60,9 @@ jobs:
                 -DJLINK_USE_FAKE_DLL=ON
                 -DUSE_FORCE_FETCH=ON
                 -DUSE_WARNINGS_AS_ERRORS=ON
+                -DCMAKE_BUILD_TYPE=Release
+                -DUSE_NATIVE_FLAG=OFF
+                ${{ !matrix.compiler.ship && '-DUSE_NDEBUG=OFF -DUSE_LTO=OFF -DCMAKE_CXX_FLAGS_RELEASE=-O3' || '' }}
                 ${{ matrix.compiler.sanitizer && format('-DUSE_SANITIZER={0}', matrix.compiler.sanitizer) || '' }}
                 ${{ matrix.compiler.stdlib && format('-DUSE_STD_LIB={0}', matrix.compiler.stdlib) || '' }}
                 ${{ matrix.compiler.stdlib_debug && '-DUSE_STDLIB_DEBUG=true' || '' }}
@@ -65,8 +73,10 @@ jobs:
             - name: Build project
               run: cmake --build build -j"$(nproc)"
 
+            # in parallel, as `just test` runs them: the TCP tests pick their ports by pid, the must-fail builds share a
+            # RESOURCE_LOCK (tests/CMakeLists.txt)
             - name: Run tests
-              run: cd build && ctest --output-on-failure
+              run: cd build && ctest --output-on-failure -j"$(nproc)"
 
             # clang-tidy (Kvasir_SDK master's tools/tidy.py and .clang-tidy, .github/actions/tidy) over this tree:
             # this repository's findings (rtt, remote_fmt and string_constant included) fail, the SDK's are foreign

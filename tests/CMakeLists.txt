@@ -6,10 +6,10 @@ set(UC_LOG_TEST_TIMEOUT
 
 # The link groups of a host test or a must-fail case, each the one before plus its own: firmware (uc_log::uc_log, what a
 # firmware TU sees), parser (+ remote_fmt's parser, fmt, enchantum: the log macros and frame decoding on the host),
-# printer (+ the printer's headers uc_log::host, jlink, Boost), tui (+ FTXUI). A test takes the smallest group its
-# includes need: a parser test is compiled and linked without the printer, J-Link and FTXUI.
+# printer (+ the printer's headers uc_log::host, jlink, Boost). A test takes the smallest group its includes need: a
+# parser test is compiled and linked without the printer and J-Link. The window's tests link uc_log_rtxui on top.
 function(uc_log_link_group target group)
-    set(groups firmware parser printer tui)
+    set(groups firmware parser printer)
     if(NOT group IN_LIST groups)
         message(FATAL_ERROR "${target}: LINKS '${group}' is none of ${groups}")
     endif()
@@ -17,11 +17,8 @@ function(uc_log_link_group target group)
     if(NOT group STREQUAL "firmware")
         list(APPEND libs remote_fmt::parser fmt::fmt enchantum::enchantum Threads::Threads)
     endif()
-    if(group STREQUAL "printer" OR group STREQUAL "tui")
+    if(group STREQUAL "printer")
         list(APPEND libs uc_log::host jlink::jlink atomic ${Boost_Components})
-    endif()
-    if(group STREQUAL "tui")
-        list(APPEND libs ftxui::screen ftxui::dom ftxui::component)
     endif()
     target_link_libraries(${target} PRIVATE ${libs})
 endfunction()
@@ -297,17 +294,13 @@ uc_log_add_test(
     uc_log_test_printer_view
     printer_view_tests.cpp
     LINKS
-    tui
+    printer
     CASES
     outliers
     rowText
     filterFile
-    counts64
     toggleSet
-    numbers
-    metricValues
-    numberField
-    scrollKeys)
+    metricValues)
 uc_log_add_test(uc_log_test_map_facts map_facts_tests.cpp LINKS printer)
 uc_log_add_test(uc_log_test_boot_ledger boot_ledger_tests.cpp LINKS printer)
 uc_log_add_test(uc_log_test_row_file row_file_tests.cpp LINKS printer)
@@ -332,7 +325,199 @@ uc_log_add_test(
 target_compile_definitions(uc_log_test_target_records
                            PRIVATE UC_LOG_RECORDS_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/data/records")
 uc_log_add_test(uc_log_test_target_loss target_loss_tests.cpp LINKS printer)
-uc_log_add_test(uc_log_test_scroll_view scroll_view_tests.cpp LINKS tui)
+# the window's App, drawn headless (support/RtxWindow.hpp; RTTI as the window library has it): the window itself, its
+# dialog, its panels and pages, a monkey on all of them
+uc_log_add_test(
+    uc_log_test_rtx_window
+    rtx_window_tests.cpp
+    LINKS
+    printer
+    CASES
+    drawsStatusLogAndModeLine
+    keysMoveTheView
+    clickMarksARow
+    markupIsText
+    quietFramesFormatNothing
+    badgeClickOpensMessages
+    jumpExportScrollbar
+    tabsAndButtons
+    dragHintsAndPalette
+    contextMenuAndScrollbarDrag)
+uc_log_add_test(
+    uc_log_test_rtx_dialog
+    rtx_dialog_tests.cpp
+    LINKS
+    printer
+    CASES
+    searchDialog
+    palette
+    filterComboBox
+    comboBoxRowsStayPut
+    dialogClosesBeside
+    directoryDialog)
+uc_log_add_test(
+    uc_log_test_rtx_page
+    rtx_page_tests.cpp
+    LINKS
+    printer
+    CASES
+    messagesPanel
+    helpAndDetails
+    filterPanel
+    filterFromTheLine
+    metricsPanel
+    metricsWindowGrows
+    metricsTableScrolls
+    settingsPage
+    debuggerPage
+    healthPage
+    inspectPages)
+# the window under a monkey: seeded clicks, drags, wheel turns, keys and resizes on every tab while the target goes on -
+# nothing may read past what a page shows (ASan / the checked library catch any slip)
+uc_log_add_test(
+    uc_log_test_rtx_monkey
+    rtx_monkey_tests.cpp
+    LINKS
+    printer
+    CASES
+    monkeyA
+    monkeyB
+    monkeyC)
+foreach(test IN ITEMS uc_log_test_rtx_window uc_log_test_rtx_dialog uc_log_test_rtx_page uc_log_test_rtx_monkey)
+    target_link_libraries(${test} PRIVATE uc_log_rtxui)
+    target_compile_options(${test} PRIVATE -frtti)
+endforeach()
+# the window's theme: a colour by name, put in at compile time; a name it does not have does not compile
+uc_log_add_fail_test(
+    theme
+    theme_fail.cpp
+    LINKS
+    printer
+    CASES
+    0
+    known_colours
+    ACCEPT
+    1
+    unknown_colour
+    "noSuchThemeColour")
+foreach(target theme_fail_known_colours theme_fail_unknown_colour)
+    target_link_libraries(${target} PRIVATE uc_log_rtxui)
+    target_compile_options(${target} PRIVATE -frtti)
+endforeach()
+# the front-end-neutral pages: settings, debugger, statistics, health, trace, watch, profile (no window, no clock)
+uc_log_add_test(
+    uc_log_test_printer_pages
+    printer_pages_tests.cpp
+    LINKS
+    printer
+    CASES
+    settingsRows
+    debuggerRows
+    statisticsRows
+    appendKeepsActions
+    gaugeValueName
+    healthRows
+    traceRows
+    watchRows
+    profileRows)
+# the front-end-neutral questions: what each says, the choices under its field (a directory tree of its own, no clock)
+uc_log_add_test(
+    uc_log_test_questions
+    question_tests.cpp
+    LINKS
+    printer
+    CASES
+    everyQuestionSaysWhat
+    recentAndNumbers
+    addresses
+    probes
+    paths
+    symbolsAndTimes)
+# the front-end-neutral metric view: a series' numbers and tally, the braille plot, the ranges, the store's summaries,
+# the metrics' table (no window, no clock)
+uc_log_add_test(
+    uc_log_test_metric_view
+    metric_view_tests.cpp
+    LINKS
+    printer
+    CASES
+    summaryNumbers
+    tallyMatchesTheSeries
+    rateText
+    storeSummaries
+    tableGroupsAndFolds
+    markMoves
+    columnsLineUp
+    columnsShowUnits
+    trendCostsTheSame
+    chartDots
+    flatLine
+    rangeEndsAtTheNewest)
+# a metric's unit: mp-units' unit symbols and the ones by hand, the unit shown, its factor, decimals and base units
+uc_log_add_test(
+    uc_log_test_metric_unit
+    metric_unit_tests.cpp
+    LINKS
+    printer
+    CASES
+    integerFirmware
+    prefixes
+    compounds
+    portableSpelling
+    namedUnits
+    notRead
+    numbers
+    displayReadsBack
+    keptUnits
+    anyText)
+# the front-end-neutral filter panel: its rows, the cursor, what switching an item does (no window, no clock)
+uc_log_add_test(
+    uc_log_test_filter_panel
+    filter_panel_tests.cpp
+    LINKS
+    printer
+    CASES
+    levelsAndChannels
+    moduleTree
+    locationsCycle
+    noisyLocations
+    formBoxes
+    summaryAndCompiled
+    picksKeepTheirPlaces)
+# the front-end-neutral panels and commands: Commands, StatusBadges' hit test, PanelText (no window, no clock)
+uc_log_add_test(
+    uc_log_test_panel_text
+    panel_text_tests.cpp
+    LINKS
+    printer
+    CASES
+    commandKeys
+    paletteMatching
+    wordMatch
+    badgeCommands
+    cutPadWrap
+    messagesAndBuild
+    detailsAndHelp
+    targetTime
+    plainAndScrollbar)
+# the front-end-neutral log view: LineText, LogViewport, FramePacer, LogScreen (no window, no clock)
+uc_log_add_test(
+    uc_log_test_log_view
+    log_view_tests.cpp
+    LINKS
+    printer
+    CASES
+    shownTextMarkers
+    ansiRunsColours
+    viewportFollow
+    viewportMoveAndPage
+    viewportScrollBackToFollow
+    viewportKeepsTheLine
+    pacerOneFramePerInterval
+    screenRowLayout
+    screenMultilineAndKinds
+    screenFormatsOnlyWhatChanged
+    listCursorMovesAndFits)
 
 # RTT ring layout wants 4-byte pointers: -m32 where that links, with the directory's stdlib options (libc++ has no
 # 32-bit package on Arch, so those builds skip it).
@@ -734,17 +919,17 @@ uc_log_add_fail_test(
     reentry
     "includes uc_log/uc_log.hpp, directly or through another header")
 
-# The printer's model headers (host/uc_log/printer/ outside tui/) never reach FTXUI (printer_layering_fail.cpp): a
-# poisoned copy of every FTXUI header comes first on the include path, each an #error.
-if(ftxui_SOURCE_DIR)
+# The printer's model headers (host/uc_log/printer/ outside rtx/) never reach RTXUI (printer_layering_fail.cpp): a
+# poisoned copy of every RTXUI header comes first on the include path, each an #error.
+if(rtxui_SOURCE_DIR)
     set(layering_dir ${CMAKE_CURRENT_BINARY_DIR}/printer_layering)
     file(
-        GLOB_RECURSE ftxui_headers
-        RELATIVE ${ftxui_SOURCE_DIR}/include
-        ${ftxui_SOURCE_DIR}/include/ftxui/*.hpp)
-    foreach(header IN LISTS ftxui_headers)
+        GLOB_RECURSE rtxui_headers
+        RELATIVE ${rtxui_SOURCE_DIR}/include
+        ${rtxui_SOURCE_DIR}/include/rtxui/*.hpp)
+    foreach(header IN LISTS rtxui_headers)
         file(CONFIGURE OUTPUT ${layering_dir}/poison/${header} CONTENT
-             "#error \"FTXUI reached from a printer model header: ${header}\"\n")
+             "#error \"RTXUI reached from a printer model header: ${header}\"\n")
     endforeach()
     file(
         GLOB printer_headers CONFIGURE_DEPENDS
@@ -765,9 +950,9 @@ if(ftxui_SOURCE_DIR)
         model_headers
         ACCEPT
         1
-        tui_header
-        "FTXUI reached from a printer model header")
-    foreach(label IN ITEMS model_headers tui_header)
+        rtx_header
+        "RTXUI reached from a printer model header")
+    foreach(label IN ITEMS model_headers rtx_header)
         target_include_directories(printer_layering_fail_${label} BEFORE PRIVATE ${layering_dir}/poison)
     endforeach()
 endif()

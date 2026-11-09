@@ -4,6 +4,7 @@
 #include "uc_log/printer/ControlProtocol.hpp"
 #include "uc_log/printer/LogEntry.hpp"
 #include "uc_log/printer/LogFormat.hpp"
+#include "uc_log/printer/MetricUnit.hpp"
 #include "uc_log/printer/metric_utils.hpp"
 
 #include <algorithm>
@@ -41,19 +42,38 @@ inline control::LogLine toLogLine(std::chrono::system_clock::time_point recvTime
                             .module   = entry.module};
 }
 
-/// Non-finite values are skipped: JSON has no such number (glaze would write null).
+/// A unit as the `unit` request answers it.
+inline control::UnitAnswer toUnitAnswer(MetricUnit const& unit) {
+    return control::UnitAnswer{.unit     = unit.text,
+                               .known    = unit.known,
+                               .display  = unit.display,
+                               .scale    = unit.scale(),
+                               .decimals = unit.decimals,
+                               .base     = unit.base,
+                               .toBase   = unit.toBase};
+}
+
+/// Non-finite values are skipped: JSON has no such number (glaze would write null). `units`: the stream's, each read
+/// once.
 inline std::vector<control::MetricSample>
 toMetricSamples(std::chrono::system_clock::time_point recvTime,
-                LogEntry const&                       entry) {
+                LogEntry const&                       entry,
+                MetricUnits&                          units) {
     std::vector<control::MetricSample> out;
     for(auto const& [info, value] : uc_log::printer::extractMetrics(recvTime, entry)) {
         if(!std::isfinite(value.value)) { continue; }
-        out.push_back(
-          control::MetricSample{.name  = info.name,
-                                .scope = info.scope,
-                                .unit  = info.unit,
-                                .time  = std::chrono::duration<double>(value.ucTime.time).count(),
-                                .value = value.value});
+        auto const& unit  = units.of(info.unit);
+        auto const  shown = unit.toDisplay(value.value);
+        if(!std::isfinite(shown)) { continue; }
+        out.push_back(control::MetricSample{
+          .name         = info.name,
+          .scope        = info.scope,
+          .unit         = info.unit,
+          .time         = std::chrono::duration<double>(value.ucTime.time).count(),
+          .value        = value.value,
+          .displayValue = shown,
+          .displayUnit  = unit.display,
+          .decimals     = metricDecimals(shown, unit.decimals, integralMetricValue(value.value))});
     }
     return out;
 }

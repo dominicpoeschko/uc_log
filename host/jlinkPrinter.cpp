@@ -35,7 +35,7 @@
 #include "uc_log/printer/TargetLoss.hpp"
 #include "uc_log/printer/TimeDelayedQueue.hpp"
 #include "uc_log/printer/metric_utils.hpp"
-#include "uc_log/printer/tui/Gui.hpp"
+#include "uc_log/printer/rtx/Gui.hpp"
 
 #include <algorithm>
 #include <array>
@@ -208,8 +208,8 @@ int main(int    argc,
     auto&                         messages = model.messages();
     // headless (--disable_ui): no window, the messages on stderr
     messages.setEcho(o.disableUi);
-    std::optional<uc_log::printer::tui::Gui> gui;
-    if(!o.disableUi) { gui.emplace(model); }
+    std::unique_ptr<uc_log::printer::rtx::Gui> gui;
+    if(!o.disableUi) { gui = std::make_unique<uc_log::printer::rtx::Gui>(model); }
     if(auto const table = loadLogFilter(messages, o.logFilterFile); table && gui) {
         gui->setCompiledFilter(*table);
     }
@@ -305,17 +305,22 @@ int main(int    argc,
     // above are torn down
     uc_log::printer::AsioContextRunner asioRunner{asioContext};
 
+    // the metrics stream's units, each read once: only the queue's thread below uses them
+    uc_log::printer::MetricUnits      metricUnits;
     uc_log::printer::TimeDelayedQueue queue{
       [](uc_log::printer::LogEntry const& entry) { return entry.ucTime; },
       [](uc_log::printer::LogEntry const& entry) { return entry.channel.channel; },
-      [&logFiles, &controlServer, &gui](std::chrono::system_clock::time_point recvTime,
-                                        uc_log::printer::LogEntry const&      entry) {
+      [&logFiles, &controlServer, &gui, &metricUnits](
+        std::chrono::system_clock::time_point recvTime,
+        uc_log::printer::LogEntry const&      entry) {
           logFiles.add(recvTime, entry);
           if(controlServer) {
               using uc_log::printer::control::Stream;
               controlServer->publish(uc_log::printer::toLogLine(recvTime, entry));
               if(controlServer->wants(Stream::metrics)) {
-                  for(auto const& sample : uc_log::printer::toMetricSamples(recvTime, entry)) {
+                  for(auto const& sample :
+                      uc_log::printer::toMetricSamples(recvTime, entry, metricUnits))
+                  {
                       controlServer->publish(sample);
                   }
               }

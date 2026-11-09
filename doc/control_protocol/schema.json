@@ -438,13 +438,39 @@
           "cmd"
         ],
         "title": "raise_panic"
+      },
+      {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "const": "unit"
+          },
+          "unit": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "unit"
       }
     ],
-    "title": "std::variant<uc_log::printer::control::Ping, uc_log::printer::control::Status, uc_log::printer::control::Messages, uc_log::printer::control::Read, uc_log::printer::control::Wait, uc_log::printer::control::Reset, uc_log::printer::control::Flash, uc_log::printer::control::Subscribe, uc_log::printer::control::Write, uc_log::printer::control::Halt, uc_log::printer::control::Go, uc_log::printer::control::Registers, uc_log::printer::control::WriteRegisters, uc_log::printer::control::Records, uc_log::printer::control::RaisePanic>"
+    "title": "std::variant<uc_log::printer::control::Ping, uc_log::printer::control::Status, uc_log::printer::control::Messages, uc_log::printer::control::Read, uc_log::printer::control::Wait, uc_log::printer::control::Reset, uc_log::printer::control::Flash, uc_log::printer::control::Subscribe, uc_log::printer::control::Write, uc_log::printer::control::Halt, uc_log::printer::control::Go, uc_log::printer::control::Registers, uc_log::printer::control::WriteRegisters, uc_log::printer::control::Records, uc_log::printer::control::RaisePanic, uc_log::printer::control::Unit>"
   },
   "answer": {
     "type": "object",
     "$defs": {
+      "double": {
+        "type": "number",
+        "minimum": -1.7976931348623157E+308,
+        "maximum": 1.7976931348623157E+308
+      },
+      "int32_t": {
+        "type": "integer",
+        "minimum": -2147483648,
+        "maximum": 2147483647
+      },
       "int64_t": {
         "type": "integer",
         "minimum": -9223372036854775808,
@@ -1596,6 +1622,40 @@
       {
         "type": "object",
         "properties": {
+          "base": {
+            "type": "string"
+          },
+          "cmd": {
+            "const": "unit"
+          },
+          "decimals": {
+            "$ref": "#/$defs/int32_t"
+          },
+          "display": {
+            "type": "string"
+          },
+          "known": {
+            "type": "boolean"
+          },
+          "scale": {
+            "$ref": "#/$defs/double"
+          },
+          "to_base": {
+            "$ref": "#/$defs/double"
+          },
+          "unit": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "cmd"
+        ],
+        "title": "unit"
+      },
+      {
+        "type": "object",
+        "properties": {
           "cmd": {
             "const": "error"
           },
@@ -1610,7 +1670,7 @@
         "title": "error"
       }
     ],
-    "title": "std::variant<uc_log::printer::control::PingAnswer, uc_log::printer::control::StatusAnswer, uc_log::printer::control::MessagesAnswer, uc_log::printer::control::ReadAnswer, uc_log::printer::control::WaitAnswer, uc_log::printer::control::ResetAnswer, uc_log::printer::control::FlashAnswer, uc_log::printer::control::SubscribeAnswer, uc_log::printer::control::WriteAnswer, uc_log::printer::control::HaltAnswer, uc_log::printer::control::GoAnswer, uc_log::printer::control::RegistersAnswer, uc_log::printer::control::WriteRegistersAnswer, uc_log::printer::control::RecordsAnswer, uc_log::printer::control::RaisePanicAnswer, uc_log::printer::control::Error>"
+    "title": "std::variant<uc_log::printer::control::PingAnswer, uc_log::printer::control::StatusAnswer, uc_log::printer::control::MessagesAnswer, uc_log::printer::control::ReadAnswer, uc_log::printer::control::WaitAnswer, uc_log::printer::control::ResetAnswer, uc_log::printer::control::FlashAnswer, uc_log::printer::control::SubscribeAnswer, uc_log::printer::control::WriteAnswer, uc_log::printer::control::HaltAnswer, uc_log::printer::control::GoAnswer, uc_log::printer::control::RegistersAnswer, uc_log::printer::control::WriteRegistersAnswer, uc_log::printer::control::RecordsAnswer, uc_log::printer::control::RaisePanicAnswer, uc_log::printer::control::UnitAnswer, uc_log::printer::control::Error>"
   },
   "event": {
     "type": "object",
@@ -1619,6 +1679,11 @@
         "type": "number",
         "minimum": -1.7976931348623157E+308,
         "maximum": 1.7976931348623157E+308
+      },
+      "int32_t": {
+        "type": "integer",
+        "minimum": -2147483648,
+        "maximum": 2147483647
       },
       "int64_t": {
         "type": "integer",
@@ -1753,6 +1818,15 @@
         "properties": {
           "cmd": {
             "const": "metric"
+          },
+          "decimals": {
+            "$ref": "#/$defs/int32_t"
+          },
+          "display_unit": {
+            "type": "string"
+          },
+          "display_value": {
+            "$ref": "#/$defs/double"
           },
           "name": {
             "type": "string"

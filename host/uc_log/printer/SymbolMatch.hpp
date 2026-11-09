@@ -1,5 +1,7 @@
 #pragma once
 
+#include "uc_log/printer/TextMatch.hpp"
+
 #include <algorithm>
 #include <cstddef>
 #include <optional>
@@ -11,16 +13,6 @@
 /// Finding a symbol by a few typed characters (the Inspect tab's watch input): which names a
 /// query matches and which of them the user most likely means.
 namespace uc_log::printer {
-
-inline char asciiLower(char c) {
-    return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
-}
-
-inline std::string asciiLower(std::string_view s) {
-    std::string out{s};
-    for(auto& c : out) { c = asciiLower(c); }
-    return out;
-}
 
 /// Where a name's last component starts: `Kvasir::Fault::lastFault` -> `lastFault`,
 /// `f(int)::count` -> `count`. A `::` inside template arguments or a parameter list is none.

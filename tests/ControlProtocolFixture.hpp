@@ -209,6 +209,15 @@ inline std::vector<Exchange> exchanges() {
       {"records_no_map", R"({"cmd":"records","kinds":["crash","trace"]})"},
       {"records_unknown_kind", R"({"cmd":"records","kinds":["coredump"]})"},
       {"raise_panic_no_map", R"({"cmd":"raise_panic","cause":"user"})"},
+      // a metric's unit: what an integer firmware's mp-units quantities send, by hand, not read
+      {"unit_centi", R"({"cmd":"unit","unit":"c℃"})"},
+      {"unit_charge", R"({"cmd":"unit","unit":"mA s"})"},
+      {"unit_scaled", R"j({"cmd":"unit","unit":"(10⁻³ 1/℃)"})j"},
+      {"unit_ticks", R"({"cmd":"unit","unit":"(1/48 × 10⁻⁶ s) mA"})"},
+      {"unit_by_hand", R"({"cmd":"unit","unit":"A·s"})"},
+      {"unit_degrees", R"({"cmd":"unit","unit":"°C"})"},
+      {"unit_volt", R"({"cmd":"unit","unit":"mV"})"},
+      {"unit_not_read", R"({"cmd":"unit","unit":"half-cycles"})"},
       {"not_json", R"(read 20000010:4)"},
       {"unknown_cmd", R"({"cmd":"poke","pieces":[]})"},
       {"unknown_key", R"({"cmd":"ping","verbose":true})"},
@@ -261,11 +270,12 @@ inline std::vector<ctl::Event> streamEvents() {
     using L = uc_log::LogLevel;
     std::vector<ctl::Event> events;
     std::uint64_t           seq = 0;
+    printer::MetricUnits    units;
     auto const              log = [&](int ms, printer::LogEntry const& e) {
         auto line = printer::toLogLine(at(ms), e);
         line.seq  = seq++;
         events.emplace_back(std::move(line));
-        for(auto const& m : printer::toMetricSamples(at(ms), e)) { events.emplace_back(m); }
+        for(auto const& m : printer::toMetricSamples(at(ms), e, units)) { events.emplace_back(m); }
     };
     auto const message = [&](int                             ms,
                              std::string_view                level,
@@ -296,6 +306,18 @@ inline std::vector<ctl::Event> streamEvents() {
               2'000'000'000,
               "",
               "@METRIC(::rate[Hz]=1.5) without a scope, @METRIC(::broken[]=nan) not a number"));
+    // mp-units quantities of an integer firmware: each in its own unit, and in the unit it is shown in
+    log(8,
+        entry("Remote.hpp",
+              124,
+              "Remote::report",
+              L::info,
+              2'100'000'000,
+              "heater",
+              "tip @METRIC(heater::tip[c℃]=31250) owed @METRIC(heater::er2Owed[mA s]=160000) isr "
+              "@METRIC(adc::isr[µs]=600) kp @METRIC(heater::kp[(10⁻³ 1/℃)]=2500) charge "
+              "@METRIC(heater::charge[(1/48 × 10⁻⁶ s) mA]=7680000000000) by hand "
+              "@METRIC(heater::cycles[half-cycles]=3)"));
     return events;
 }
 

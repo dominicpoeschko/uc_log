@@ -1,13 +1,12 @@
-// What the TUI shows, computed without it: the noisy-location cutoffs (printer/Outliers.hpp), the plain text of an
-// exported or yanked line (printer/RowText.hpp), a saved filter read back (printer/FilterFile.hpp).
+// What the window shows, computed without it: the noisy-location cutoffs (printer/Outliers.hpp), the plain text of an
+// exported or yanked line (printer/RowText.hpp), a saved filter read back (printer/FilterFile.hpp), a filter's toggles
+// (printer/ToggleSet.hpp), a metric's value in its unit (printer/MetricUnit.hpp).
 #include "support/Check.hpp"
 #include "uc_log/printer/FilterFile.hpp"
+#include "uc_log/printer/MetricUnit.hpp"
 #include "uc_log/printer/Outliers.hpp"
 #include "uc_log/printer/RowText.hpp"
 #include "uc_log/printer/ToggleSet.hpp"
-#include "uc_log/printer/tui/FTXUI_Utils.hpp"
-#include "uc_log/printer/tui/MetricPlot.hpp"
-#include "uc_log/printer/tui/Widgets.hpp"
 
 #include <array>
 #include <filesystem>
@@ -83,15 +82,6 @@ void filterFile() {
           "an unwritable path: said");
 }
 
-void counts64() {
-    using uc_log::printer::tui::formatCount;
-    CHECK(formatCount(999) == "999" && formatCount(1000) == "1K" && formatCount(999'999) == "999K"
-            && formatCount(1'000'000) == "1M",
-          "the unit steps");
-    CHECK(formatCount(4'294'967'296ULL) == "4294M" && formatCount(10'000'000'000ULL) == "10000M",
-          "past 4 G: no wrap (a uint32 showed 0 and 1410M)");
-}
-
 void toggleSet() {
     using uc_log::printer::shownIn;
     using uc_log::printer::toggleIn;
@@ -107,75 +97,24 @@ void toggleSet() {
     CHECK(set.empty(), "all on again: collapses to empty");
 }
 
-void numbers() {
-    using uc_log::printer::tui::leadingNumber;
-    CHECK(leadingNumber<double>("1.5") == 1.5 && leadingNumber<double>("2.") == 2.0, "decimals");
-    CHECK(leadingNumber<double>("1.2.3") == 1.2 && leadingNumber<int>("15x") == 15,
-          "a leading number, as stod / stoi");
-    CHECK(!leadingNumber<int>("") && !leadingNumber<double>(".")
-            && !leadingNumber<std::size_t>("x1"),
-          "none");
-    CHECK(
-      uc_log::printer::tui::locationText(std::pair<std::string, std::size_t>{"main.cpp", 42})
-          == "main.cpp:42"
-        && uc_log::printer::tui::locationText(std::pair<std::string, std::size_t>{"main.cpp", 0})
-             == "main.cpp:*",
-      "a location, a whole file as :*");
-}
-
-// the plot's axis and stat labels: an SI prefix and two decimals, from the largest prefix the value reaches
+// the plot's axis and stat labels: in the unit the metric is shown in, one unit for every value of a series (its
+// rules: MetricUnit.hpp and metric_unit_tests)
 void metricValues() {
-    using uc_log::printer::tui::formatMetricValue;
-    CHECK(formatMetricValue(0.0, "") == "0" && formatMetricValue(0.0, "V") == "0V", "zero");
-    CHECK(formatMetricValue(1.5e9, "") == "1.50G" && formatMetricValue(-2.5e6, "B") == "-2.50MB"
-            && formatMetricValue(1234.0, "") == "1.23K",
-          "G, M, K");
-    CHECK(formatMetricValue(1.0, "s") == "1.00s" && formatMetricValue(999.999, "") == "1000.00",
-          "no prefix from 1 up (rounded, not moved to K)");
-    CHECK(formatMetricValue(0.5, "") == "500.00m" && formatMetricValue(5e-4, "V") == "500.00µV",
-          "m, µ");
-    CHECK(formatMetricValue(2e-7, "") == "2.00e-07"
-            && formatMetricValue(-3e-9, "A") == "-3.00e-09A",
-          "below 1e-6: exponent");
+    using uc_log::printer::formatMetricNumber;
+    using uc_log::printer::formatMetricValue;
+    using uc_log::printer::readMetricUnit;
+    auto const centi = readMetricUnit("c℃");
+    CHECK(formatMetricValue(31250.0, centi) == "312.50 °C"
+            && formatMetricNumber(31250.0, centi) == "312.50",
+          "a label with its unit, an axis number without");
+    CHECK(formatMetricValue(2960.0, readMetricUnit("mV")) == "2960 mV"
+            && formatMetricValue(0.5, readMetricUnit("mV")) == "0.5 mV",
+          "no value moves the unit: every label of a series in one");
+    CHECK(formatMetricValue(0.0, readMetricUnit("")) == "0"
+            && formatMetricValue(7.0, readMetricUnit("min")) == "7 min",
+          "no unit, a unit that only starts like a prefix");
 }
 
-// a number field (the metric plot's period, Logs' jump-to, Trace's rows) takes digits only: a letter is refused and the
-// value stays what it was
-void numberField() {
-    std::string text{"1"};
-    int         got{0};
-    int         calls{0};
-    auto        field = uc_log::printer::tui::numberInput<int>(text, "", [&](int v) {
-        got = v;
-        ++calls;
-    });
-    (void)field->OnEvent(ftxui::Event::Character('x'));
-    CHECK(text == "1" && calls == 0, "a letter does not reach the field");
-    (void)field->OnEvent(ftxui::Event::Character('5'));
-    CHECK(text.size() == 2 && text.contains('5') && calls == 1
-            && got == uc_log::printer::tui::leadingNumber<int>(text),
-          "a digit does, and the value follows the text");
-}
-
-// one key map for the log, scrollView and pickList
-void scrollKeys() {
-    using uc_log::printer::tui::ScrollKey;
-    using uc_log::printer::tui::scrollKeyOf;
-    CHECK(scrollKeyOf(ftxui::Event::ArrowUp) == ScrollKey::up
-            && scrollKeyOf(ftxui::Event::Character('k')) == ScrollKey::up
-            && scrollKeyOf(ftxui::Event::ArrowDown) == ScrollKey::down
-            && scrollKeyOf(ftxui::Event::Character('j')) == ScrollKey::down,
-          "a row: arrows and k/j");
-    CHECK(scrollKeyOf(ftxui::Event::PageUp) == ScrollKey::pageUp
-            && scrollKeyOf(ftxui::Event::PageDown) == ScrollKey::pageDown
-            && scrollKeyOf(ftxui::Event::Home) == ScrollKey::home
-            && scrollKeyOf(ftxui::Event::End) == ScrollKey::end,
-          "a page, the ends");
-    CHECK(scrollKeyOf(ftxui::Event::Character('y')) == ScrollKey::none
-            && scrollKeyOf(ftxui::Event::ArrowLeft) == ScrollKey::none
-            && scrollKeyOf(ftxui::Event::Return) == ScrollKey::none,
-          "other keys are none of them");
-}
 }   // namespace
 
 int main(int    argc,
@@ -186,11 +125,7 @@ int main(int    argc,
                                {    "outliers",     outliers},
                                {     "rowText",      rowText},
                                {  "filterFile",   filterFile},
-                               {    "counts64",     counts64},
                                {   "toggleSet",    toggleSet},
-                               {     "numbers",      numbers},
                                {"metricValues", metricValues},
-                               { "numberField",  numberField},
-                               {  "scrollKeys",   scrollKeys},
     });
 }

@@ -175,6 +175,13 @@ def req_raise_panic(cause: str) -> dict:
     return {"cmd": "raise_panic", "cause": cause}
 
 
+def req_unit(unit: str) -> dict:
+    """what the printer makes of a metric's unit text: `display` (the unit values are shown in) and `scale` to it,
+    `decimals`, `base` (its SI base units) and `to_base` - two units compare when their bases are equal; `known`
+    false: not read, its own display and base"""
+    return {"cmd": "unit", "unit": unit}
+
+
 def req_read_words(addresses: list[int]) -> dict:
     """32-bit words, one piece each: answered by `words`."""
     return req_read([(a, 4) for a in addresses])
@@ -254,7 +261,7 @@ def words(answer: dict) -> tuple[int, list[int]]:
 
 
 def message_line(m: dict) -> str:
-    """A Status tab line as <stamp>.status.log holds it."""
+    """A Messages tab line as <stamp>.status.log holds it."""
     return f"{m['time']} [{m['level']}] {m['text']}"
 
 
@@ -284,6 +291,21 @@ def log_line_text(e: dict) -> str:
 
 def metric_key(sample: dict) -> str:
     return (sample["scope"] + "::" if sample["scope"] else "") + sample["name"]
+
+
+def metric_text(value: float, unit: str, decimals: int) -> str:
+    """A value in a metric's display unit as the printer's window shows it: "312.50 °C", "42" (no unit), "45°"."""
+    number = f"{value:.{max(decimals, 0)}f}"
+    if number.startswith("-") and float(number) == 0:
+        number = number[1:]
+    if not unit:
+        return number
+    return number + ("" if unit == "°" else " ") + unit
+
+
+def metric_sample_text(sample: dict) -> str:
+    """A metrics-stream sample in its display unit."""
+    return metric_text(sample["display_value"], sample["display_unit"], sample["decimals"])
 
 
 # ---- log lines as text -----------------------------------------------------------------------

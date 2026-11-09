@@ -15,15 +15,16 @@ extern "C" int LLVMFuzzerTestOneInput(std::uint8_t const* data,
     std::string_view const input{reinterpret_cast<char const*>(data), size};
     auto const             now = std::chrono::system_clock::time_point{};
 
+    uc_log::printer::MetricUnits    units;
     uc_log::printer::LogEntry const entry{size % 3, input};
     uc_log::fuzz::checkLine<ctl::Event>(
       ctl::toLine(ctl::Event{uc_log::printer::toLogLine(now, entry)}));
-    for(auto const& sample : uc_log::printer::toMetricSamples(now, entry)) {
+    for(auto const& sample : uc_log::printer::toMetricSamples(now, entry, units)) {
         uc_log::fuzz::checkLine<ctl::Event>(ctl::toLine(ctl::Event{sample}));
     }
     uc_log::printer::LogEntry plain{0, {}};
     plain.logMsg = std::string{input};
-    for(auto const& sample : uc_log::printer::toMetricSamples(now, plain)) {
+    for(auto const& sample : uc_log::printer::toMetricSamples(now, plain, units)) {
         uc_log::fuzz::checkLine<ctl::Event>(ctl::toLine(ctl::Event{sample}));
     }
     uc_log::fuzz::checkLine<ctl::Event>(

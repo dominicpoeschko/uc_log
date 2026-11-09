@@ -1,4 +1,4 @@
-#include "uc_log/printer/tui/Gui.hpp"
+#include "uc_log/printer/rtx/Gui.hpp"
 
 #include "support/FakeTargetPort.hpp"
 #include "uc_log/printer/Environment.hpp"
@@ -6,8 +6,11 @@
 #include "uc_log/printer/PrinterModel.hpp"
 #include "uc_log/printer/TargetOp.hpp"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -20,6 +23,8 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 using std::string_view_literals::operator""sv;
@@ -46,6 +51,67 @@ constexpr std::array moduleNames{""sv,
                                  "usb.device"sv,
                                  "myapp.regulator"sv};
 
+namespace {
+// GUI_TEST_MODULES=<n>: n modules in a tree (areas of ten parts) instead of the few above - a filter with many
+std::size_t manyModules() {
+    static std::size_t const n = [] {
+        char const* const env = uc_log::printer::environment("GUI_TEST_MODULES");
+        return env == nullptr ? std::size_t{0}
+                              : static_cast<std::size_t>(std::strtoul(env, nullptr, 10));
+    }();
+    return n;
+}
+
+using MetricFunction = std::pair<std::tuple<std::string, std::string, std::string>,
+                                 std::function<double(std::chrono::duration<double>)>>;
+
+// GUI_TEST_METRICS=<n>: n metrics in groups of ten (group0::m0 ...), each its own frequency and unit, instead of the
+// three below - a metrics page with many series
+std::vector<MetricFunction> demoMetrics() {
+    char const* const env = uc_log::printer::environment("GUI_TEST_METRICS");
+    if(env == nullptr) {
+        return {
+          {           {"foo", "sin", "V"},
+           [](std::chrono::duration<double> t) { return std::sin(t.count()); }                            },
+          {           {"bar", "tan", "A"},
+           [](std::chrono::duration<double> t) { return std::tan(t.count()); }                            },
+          {          {"foo", "line", "W"}, [](std::chrono::duration<double> t) { return 0.5 * t.count(); }},
+          // an integer firmware's mp-units quantities, each sent in its own unit: shown as °C, A·s, µs, 1/°C
+          {       {"heater", "tip", "c℃"},
+           [](std::chrono::duration<double> t) {
+           return std::round(31250.0 + (2000.0 * std::sin(t.count())));
+           }                                                                                              },
+          { {"heater", "er2Owed", "mA s"},
+           [](std::chrono::duration<double> t) {
+           return std::round(80000.0 * (1.0 + std::sin(0.3 * t.count())));
+           }                                                                                              },
+          {{"heater", "kp", "(10⁻³ 1/℃)"},            [](std::chrono::duration<double>) { return 2500.0; }},
+          {          {"adc", "isr", "µs"},
+           [](std::chrono::duration<double> t) {
+           return std::round(600.0 + (50.0 * std::sin(3.0 * t.count())));
+           }                                                                                              },
+        };
+    }
+    constexpr std::array        units{"V"sv, "A"sv, "W"sv, "Hz"sv, "B"sv};
+    auto const                  n = static_cast<std::size_t>(std::strtoul(env, nullptr, 10));
+    std::vector<MetricFunction> out;
+    out.reserve(n);
+    for(std::size_t i = 0; i != n; ++i) {
+        auto const speed = 1.0 + (0.1 * static_cast<double>(i));
+        auto const scale = std::pow(10.0, static_cast<double>(i % 7) - 3.0);
+        out.push_back({
+          {"group" + std::to_string(i / 10),
+           "m" + std::to_string(i % 10),
+           std::string{units[i % units.size()]}},
+          [speed, scale](std::chrono::duration<double> t) {
+              return scale * std::sin(speed * t.count());
+           }
+        });
+    }
+    return out;
+}
+}   // namespace
+
 template<typename Gen>
 void updateMessage(uc_log::printer::LogEntry& e,
                    Gen&                       gen) {
@@ -57,8 +123,13 @@ void updateMessage(uc_log::printer::LogEntry& e,
     std::ranges::sample(logMessages, &e.logMsg, 1, gen);
     std::ranges::sample(functionNames, &e.functionName, 1, gen);
     std::ranges::sample(functionLines, &e.line, 1, gen);
-    e.module
-      = moduleNames[std::uniform_int_distribution<std::size_t>{0, moduleNames.size() - 1}(gen)];
+    if(auto const many = manyModules(); many != 0) {
+        auto const i = std::uniform_int_distribution<std::size_t>{0, many - 1}(gen);
+        e.module     = "area" + std::to_string(i / 10) + ".part" + std::to_string(i % 10);
+    } else {
+        e.module
+          = moduleNames[std::uniform_int_distribution<std::size_t>{0, moduleNames.size() - 1}(gen)];
+    }
     e.parsedOk = true;   // fabricated entries are complete, not parser bailouts
 }
 
@@ -73,23 +144,13 @@ void updateStatus(uc_log::printer::TargetPort::LinkStatus& status) {
 
 }   // namespace
 
+// uc_log_gui_test: the printer's window on a fake target (no probe, no memory) and made-up lines.
 int main() {
-    std::array<std::pair<std::tuple<std::string, std::string, std::string>,
-                         std::function<double(std::chrono::duration<double>)>>,
-               3>
-      metricFunctions{
-        {
-         {{"foo", "sin", "V"},
-           [](std::chrono::duration<double> t) { return std::sin(t.count()); }},
-         {{"bar", "tan", "A"},
-           [](std::chrono::duration<double> t) { return std::tan(t.count()); }},
-         {{"foo", "line", "W"}, [](std::chrono::duration<double> t) { return 0.5 * t.count(); }},
-         }
-    };
+    auto const metricFunctions = demoMetrics();
 
     uc_log::printer::PrinterModel model{"127.0.0.1", 34565, 34600};
     auto&                         messageLog = model.messages();
-    uc_log::printer::tui::Gui     gui{model};
+    uc_log::printer::rtx::Gui     gui{model};
 
     std::vector<std::string> messages;
     std::mutex               msgMutex;
@@ -131,15 +192,47 @@ int main() {
                               : std::size_t{}};
 
         // GUI_TEST_PRELOAD=1000000 bulk-loads entries as fast as possible to test
-        // filter/scroll performance on large logs.
+        // filter/scroll performance on large logs; with GUI_TEST_METRICS each line carries a value of the metrics in
+        // turn - a window that has run for hours
         if(char const* env = uc_log::printer::environment("GUI_TEST_PRELOAD")) {
             auto const preload = static_cast<std::size_t>(std::strtoull(env, nullptr, 10));
+            bool const metered = uc_log::printer::environment("GUI_TEST_METRICS") != nullptr
+                              && !metricFunctions.empty();
             for(std::size_t i = 0; i != preload && !stoken.stop_requested(); ++i) {
                 updateMessage(e, gen);
-                if(i % 100 == 0) { e.logMsg = "multi\nline\nmessage"; }
+                if(metered) {
+                    auto const& [meta, metricFunction]
+                      = metricFunctions[i % metricFunctions.size()];
+                    e.logMsg = std::format("@METRIC({}::{}[{}]={})",
+                                           std::get<0>(meta),
+                                           std::get<1>(meta),
+                                           std::get<2>(meta),
+                                           metricFunction(e.ucTime.time));
+                } else if(i % 100 == 0) {
+                    e.logMsg = "multi\nline\nmessage";
+                }
                 e.ucTime.time += std::chrono::milliseconds{1};
                 gui.add(std::chrono::system_clock::now(), e);
             }
+        }
+
+        // GUI_TEST_RATE=<lines/s>: a flood instead of the slow stream below, in batches every 10 ms - how the
+        // window keeps up
+        if(char const* env = uc_log::printer::environment("GUI_TEST_RATE")) {
+            auto const rate  = static_cast<std::size_t>(std::strtoull(env, nullptr, 10));
+            auto const batch = std::max<std::size_t>(1, rate / 100);
+            auto       next  = std::chrono::steady_clock::now();
+            while(!stoken.stop_requested()) {
+                for(std::size_t i = 0; i != batch; ++i) {
+                    updateMessage(e, gen);
+                    e.ucTime.time += std::chrono::microseconds{10};
+                    gui.add(std::chrono::system_clock::now(), e);
+                }
+                reader.updateLink(updateStatus);
+                next += std::chrono::milliseconds{10};
+                std::this_thread::sleep_until(next);
+            }
+            return;
         }
 
         while(!stoken.stop_requested()) {

@@ -3,8 +3,8 @@
 // The printer's state and commands without a window: its messages, what the firmware check found, the records the
 // target lost, the log files, the network settings (control socket / port, bind address, duplex channels) with
 // their validation, the session statistics and the build runner (printer/BuildRunner.hpp: boost.process only in its
-// .cpp). A front end (printer/tui) reads it through snapshot() and sends commands; headless runs use it
-// alone. No FTXUI here: a second front end needs only rendering.
+// .cpp). The window (printer/rtx) reads it through snapshot() and sends commands; headless runs use it alone. No RTXUI
+// here: the window needs only rendering.
 //
 // Lock order: the model's mutex is taken and dropped inside each call, never held while it calls out (the network
 // hooks, the log files). A front end takes its own lock only after snapshot() returned, so the order is
@@ -34,7 +34,7 @@
 
 namespace uc_log::printer {
 
-/// What the Statistics tab counts since the printer started.
+/// What the Debugger tab's statistics count since the printer started.
 struct Statistics {
     std::chrono::system_clock::time_point sessionStartTime{std::chrono::system_clock::now()};
 
@@ -192,7 +192,7 @@ public:
         state_.targetLost = state_.targetLost.value_or(0) + n;
     }
 
-    /// The Status tab's Clear: the messages and the counts it shows.
+    /// The Messages tab's Clear: the messages and the counts it shows.
     void clearCounts() {
         messages_.clear();
         std::scoped_lock<std::mutex> const lock{mutex_};
@@ -207,7 +207,7 @@ public:
         return statistics_;
     }
 
-    /// The Statistics tab's Reset: from now on.
+    /// The statistics' Reset (the Debugger tab): from now on.
     void resetStatistics() {
         std::scoped_lock<std::mutex> const lock{mutex_};
         statistics_ = Statistics{};

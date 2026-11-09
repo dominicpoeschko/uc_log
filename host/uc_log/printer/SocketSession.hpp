@@ -395,6 +395,20 @@ namespace uc_log { namespace printer {
             });
         }
 
+        // Listening once the posts before this one have run, without a rebind when it already listens: decided on the
+        // io_context thread, because a caller's view of `status` may be stale - a stop() or a bind it posted a moment
+        // ago has not run yet. Retries a portOccupied (the place may be free now).
+        void ensureListening() {
+            boost::asio::post(ioc, [this]() {
+                if(acceptor.has_value()) {
+                    // closed by a stop() or a path change whose aborted accept is still to come: bind again then
+                    if(!acceptor->is_open()) { pendingRestartPort = currentPort.load(); }
+                    return;
+                }
+                tryBind(currentPort.load());
+            });
+        }
+
         // preStopf runs on the io_context thread before the acceptor is torn down
         void stop(std::function<void()> preStopf = {}) {
             boost::asio::post(ioc, [this, preStop = std::move(preStopf)]() {

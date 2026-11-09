@@ -507,8 +507,10 @@ private:
             return Quick::answered;
         }
         auto const& request = std::get<control::Request>(parsed);
-        if(std::holds_alternative<control::Ping>(request)) {
-            send(*client, control::toLine(control::Answer{control::PingAnswer{}}));
+        if(std::holds_alternative<control::Ping>(request)
+           || std::holds_alternative<control::Unit>(request))
+        {
+            send(*client, control::toLine(controlAnswer(request, {})));
             return Quick::answered;
         }
         if(auto const* s = std::get_if<control::Subscribe>(&request)) {

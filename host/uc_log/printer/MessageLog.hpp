@@ -2,7 +2,7 @@
 
 // The printer's status messages: one `say(level, text)` for the reader, the services and the front ends. Each message
 // is echoed to stderr (headless runs), written to the `.status.log`, kept for the control socket's `messages` and
-// streamed to its subscribers, counted, kept for the Status tab and handed to the observers (the TUI's redraw, the
+// streamed to its subscribers, counted, kept for the Messages tab and handed to the observers (the TUI's redraw, the
 // inspector's halt capture, which takes the struct the message comes with: MessageLog::halt).
 //
 // Lock order: `say` takes the log's own mutex for the file, the history and the stream (stream order = file order)
@@ -86,7 +86,7 @@ public:
         HaltCapture const* halt;   // set for MessageKind::halt
     };
 
-    /// What the Status tab shows (cleared by its Clear button; the format errors also by every flash).
+    /// What the Messages tab shows (cleared by its Clear button; the format errors also by every flash).
     struct Counts {
         std::size_t errors{};
         std::size_t formatErrors{};
@@ -155,13 +155,13 @@ public:
         return counts_;
     }
 
-    /// Every error since the start (the control socket's `status`); the Status tab's Clear does not reset it.
+    /// Every error since the start (the control socket's `status`); the Messages tab's Clear does not reset it.
     std::size_t totalErrors() const {
         std::scoped_lock<std::mutex> const lock{mutex_};
         return totalErrors_;
     }
 
-    /// The Status tab's Clear: its entries and counts.
+    /// The Messages tab's Clear: its entries and counts.
     void clear() {
         std::scoped_lock<std::mutex> const lock{mutex_};
         entries_.clear();
@@ -175,7 +175,7 @@ public:
         counts_.formatErrors = 0;
     }
 
-    /// The Status tab's mirror: appends what came since the last call to `out` (and starts over after a clear).
+    /// The Messages tab's mirror: appends what came since the last call to `out` (and starts over after a clear).
     void copyNew(std::vector<Entry>& out,
                  std::size_t&        seenClears) const {
         std::scoped_lock<std::mutex> const lock{mutex_};

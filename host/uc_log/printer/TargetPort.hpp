@@ -1,6 +1,6 @@
 #pragma once
 
-// The printer's one door to the target, as the front ends, the control socket and the inspector see it. The reader
+// The printer's one door to the target, as the window, the control socket and the inspector see it. The reader
 // (BasicJLinkRttReader) implements it; every request that touches the core or memory goes through `accessTarget`,
 // the reader thread's TargetOp queue (printer/TargetOp.hpp: queued -> taken | abandoned). The phase-level requests
 // (flash, reset, J-Link reset, probe list) are flags the reader serves outside its sessions: a flash with no

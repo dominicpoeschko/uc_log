@@ -47,7 +47,7 @@ struct Ping {};
 
 struct Status {};
 
-/// The newest `count` lines of the printer's Status tab, oldest first.
+/// The newest `count` lines of the printer's Messages tab, oldest first.
 struct Messages {
     std::uint32_t count{50};
 };
@@ -118,6 +118,12 @@ struct RaisePanic {
     std::string cause;
 };
 
+/// What the printer makes of a metric's unit text (MetricUnit.hpp; the `unit` of a metric event, or one a person
+/// typed): how kvasir_bench compares a threshold given in another unit. Needs no target.
+struct Unit {
+    std::string unit;
+};
+
 /// Filters apply to the log stream only. `since_seq` / `last` send the history first, then a
 /// BacklogEnd; `follow` false closes the connection after it.
 struct Subscribe {
@@ -144,7 +150,8 @@ using Request = std::variant<Ping,
                              Registers,
                              WriteRegisters,
                              Records,
-                             RaisePanic>;
+                             RaisePanic,
+                             Unit>;
 
 struct PingAnswer {};
 
@@ -160,7 +167,7 @@ struct StatusAnswer {
     bool          flashing{};
     std::uint32_t sessions{};   // J-Link sessions since the printer started
     FirmwareCheck firmware;
-    std::uint64_t errors{};      // error lines in the Status tab
+    std::uint64_t errors{};      // error lines in the Messages tab
     std::uint64_t logSeq{};      // the seq the next log line gets
     std::int64_t  startedUs{};   // seqs are only valid for this start
     // started with --ram_image: flash and reset load the image into RAM and start it there
@@ -180,7 +187,7 @@ struct StatusAnswer {
 /// A client matches the kind, never the text.
 enum class MessageKind : std::uint8_t { halt, formatError };
 
-/// A line of the Status tab.
+/// A line of the Messages tab.
 struct StatusMessage {
     std::string                time;
     std::string                level;
@@ -370,6 +377,20 @@ struct RaisePanicAnswer {
     std::string   name;
 };
 
+/// `display`: the unit values are shown in, a value in `unit` times `scale` is one there, `decimals` the digits after
+/// the point an integer keeps; `base`: its SI base units ("kg·m²·s⁻³·A⁻¹" for V, "" for a plain number), a value
+/// times `to_base` is one in them - two units compare when their bases are equal. `known` false: the text was not
+/// read, it is its own display and base, every factor 1.
+struct UnitAnswer {
+    std::string  unit;
+    bool         known{};
+    std::string  display;
+    double       scale{1.0};
+    std::int32_t decimals{};
+    std::string  base;
+    double       toBase{1.0};
+};
+
 struct Error {
     std::string error;
 };
@@ -389,6 +410,7 @@ using Answer = std::variant<PingAnswer,
                             WriteRegistersAnswer,
                             RecordsAnswer,
                             RaisePanicAnswer,
+                            UnitAnswer,
                             Error>;
 
 /// The columns of a .rttlog row, and `seq`: numbered from 0 at the printer's start.
@@ -405,13 +427,17 @@ struct LogLine {
     std::string   module;
 };
 
-/// `time`: seconds on the target's clock.
+/// `time`: seconds on the target's clock; `value` in `unit` as the firmware sent them, then the same value in the unit
+/// it is shown in (MetricUnit.hpp: 31250 c℃ is 312.5 °C) with the digits after the point it needs there.
 struct MetricSample {
-    std::string name;
-    std::string scope;
-    std::string unit;
-    double      time{};
-    double      value{};
+    std::string  name;
+    std::string  scope;
+    std::string  unit;
+    double       time{};
+    double       value{};
+    double       displayValue{};
+    std::string  displayUnit{};
+    std::int32_t decimals{};
 };
 
 /// Ends a subscription's history; `lost`: requested lines the printer no longer holds.
@@ -494,7 +520,8 @@ struct glz::meta<uc_log::printer::control::Request> {
                                                        "registers",
                                                        "write_registers",
                                                        "records",
-                                                       "raise_panic"};
+                                                       "raise_panic",
+                                                       "unit"};
 };
 
 template<>
@@ -515,6 +542,7 @@ struct glz::meta<uc_log::printer::control::Answer> {
                                                        "write_registers",
                                                        "records",
                                                        "raise_panic",
+                                                       "unit",
                                                        "error"};
 };
 
@@ -667,6 +695,27 @@ struct glz::meta<uc_log::printer::control::LogLine> {
                                                  {
                                                    {"recvTime",  "recv_time"},
                                                    {"ucTimeNs", "uc_time_ns"}
+        });
+    }
+};
+
+template<>
+struct glz::meta<uc_log::printer::control::MetricSample> {
+    static constexpr std::string_view rename_key(std::string_view member UC_LOG_LIFETIMEBOUND) {
+        return uc_log::printer::control::wireKey(member,
+                                                 {
+                                                   {"displayValue", "display_value"},
+                                                   { "displayUnit",  "display_unit"}
+        });
+    }
+};
+
+template<>
+struct glz::meta<uc_log::printer::control::UnitAnswer> {
+    static constexpr std::string_view rename_key(std::string_view member UC_LOG_LIFETIMEBOUND) {
+        return uc_log::printer::control::wireKey(member,
+                                                 {
+                                                   {"toBase", "to_base"}
         });
     }
 };

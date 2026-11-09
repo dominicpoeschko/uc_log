@@ -1,15 +1,16 @@
 #pragma once
 
-// The printer's store of decoded log lines, independent of any front end (no FTXUI): every line split into display
-// lines, the filtered view the log tab shows, the metric series, the source locations and modules seen. The filter
-// (printer/LogFilterState.hpp) is compiled to integers and a changed one is applied by a worker thread, so a front
-// end never scans millions of lines itself; a front end reads the store through a per-frame Mirror.
+// The printer's store of decoded log lines, independent of the window (no RTXUI): every line split into display lines,
+// the filtered view the log tab shows, the metric series, the source locations and modules seen. The filter
+// (printer/LogFilterState.hpp) is compiled to integers and a changed one is applied by a worker thread, so the window
+// never scans millions of lines itself; it reads the store through a per-frame Mirror.
 
 #include "uc_log/LogLevel.hpp"
 #include "uc_log/detail/Lifetimebound.hpp"
 #include "uc_log/printer/Clock.hpp"
 #include "uc_log/printer/LogEntry.hpp"
 #include "uc_log/printer/LogFilterState.hpp"
+#include "uc_log/printer/MetricView.hpp"
 #include "uc_log/printer/metric_utils.hpp"
 
 #include <algorithm>
@@ -458,8 +459,15 @@ private:
     std::size_t filteredOriginalLogCount{0};   // original logs passing the filter
     std::size_t trimmedLogCount{0};
 
-    std::map<MetricInfo, std::vector<MetricEntry>> metricEntries;
-    LogStats                                       logStats;
+    // a metric's values, oldest first, its running numbers (a summary walks no value) and its unit, read once
+    struct MetricSeries {
+        std::vector<MetricEntry>          values;
+        MetricTally                       tally;
+        std::shared_ptr<MetricUnit const> unit;
+    };
+
+    std::map<MetricInfo, MetricSeries> metricEntries;
+    LogStats                           logStats;
 
     // uc-time data range (data-derived, written by addEntry) and the window (the front end's, and addEntry's in
     // live mode)
@@ -679,13 +687,20 @@ public:
             }
 
             for(auto const& metric : uc_log::printer::extractMetrics(recvTime, entry)) {
-                auto& values = metricEntries[metric.first];
-                values.push_back(metric.second);
-                // bounded per key: drop the oldest quarter in one amortized batch
-                if(values.size() > maxMetricEntriesPerKey) {
-                    values.erase(values.begin(),
-                                 values.begin()
-                                   + static_cast<std::ptrdiff_t>(maxMetricEntriesPerKey / 4));
+                auto& series = metricEntries[metric.first];
+                if(!series.unit) {
+                    series.unit
+                      = std::make_shared<MetricUnit const>(readMetricUnit(metric.first.unit));
+                }
+                series.tally.add(metric.second, series.values.empty());
+                series.values.push_back(metric.second);
+                // bounded per key: drop the oldest quarter in one amortized batch, the tally counted anew
+                if(series.values.size() > maxMetricEntriesPerKey) {
+                    series.values.erase(
+                      series.values.begin(),
+                      series.values.begin()
+                        + static_cast<std::ptrdiff_t>(maxMetricEntriesPerKey / 4));
+                    series.tally.recount(series.values);
                 }
             }
 
@@ -918,8 +933,21 @@ public:
         std::scoped_lock<std::mutex> const lock{mutex};
         std::vector<MetricInfo>            infos;
         infos.reserve(metricEntries.size());
-        for(auto const& [info, values] : metricEntries) { infos.push_back(info); }
+        for(auto const& [info, series] : metricEntries) { infos.push_back(info); }
         return infos;
+    }
+
+    /// every metric with its summary, in metricInfos' order: one lock, no value walked
+    std::vector<std::pair<MetricInfo,
+                          MetricSummary>>
+    metricSummaries() const {
+        std::scoped_lock<std::mutex> const                lock{mutex};
+        std::vector<std::pair<MetricInfo, MetricSummary>> out;
+        out.reserve(metricEntries.size());
+        for(auto const& [info, series] : metricEntries) {
+            out.emplace_back(info, series.tally.summary(series.values)).second.unit = series.unit;
+        }
+        return out;
     }
 
     /// f(values) under the lock for a known metric; false: not known (f not called)
@@ -929,7 +957,7 @@ public:
         std::scoped_lock<std::mutex> const lock{mutex};
         auto const                         it = metricEntries.find(metric);
         if(it == metricEntries.end()) { return false; }
-        std::forward<F>(f)(std::as_const(it->second));
+        std::forward<F>(f)(std::as_const(it->second.values));
         return true;
     }
 
@@ -942,7 +970,8 @@ public:
     void clearMetric(MetricInfo const& metric) {
         std::scoped_lock<std::mutex> const lock{mutex};
         if(auto const it = metricEntries.find(metric); it != metricEntries.end()) {
-            it->second.clear();
+            it->second.values.clear();   // its unit stays
+            it->second.tally = {};
         }
     }
 

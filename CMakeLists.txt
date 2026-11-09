@@ -33,7 +33,7 @@ set(UC_LOG_BUILD_PRINTER
     CACHE BOOL "build the uc_log_printer host tool")
 
 # cmake_helpers applies USE_STD_LIB / USE_STDLIB_DEBUG per target, but the fetched dependencies (fmt via remote_fmt
-# below, ftxui, boost, ...) are compiled as static libraries and must share the same stdlib and debug-container ABI or
+# below, boost, rtxui, ...) are compiled as static libraries and must share the same stdlib and debug-container ABI or
 # the final link mixes incompatible symbols. This has to happen before ANY add_subdirectory that can fetch a dependency
 # (remote_fmt fetches fmt), and requires the dependencies to actually be built in this tree (USE_FORCE_FETCH), not found
 # prebuilt.
@@ -80,7 +80,7 @@ find_or_fetch_package(
     GIT_REPOSITORY
     https://github.com/dominicpoeschko/aglio.git
     GIT_TAG
-    v0.3.3
+    v0.3.4
     GIT_BRANCH
     master)
 
@@ -110,6 +110,18 @@ if(UC_LOG_BUILD_PRINTER)
 
         include(${cmake_helpers_SOURCE_DIR}/BuildOptions.cmake)
 
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+           AND USE_EXTRA_SANITIZERS
+           AND NOT "${USE_SANITIZER}" STREQUAL "none")
+            # of the extra integer checks, not these two: libstdc++ wraps unsigned values and changes their sign on
+            # purpose (std::mt19937, string_view::compare, std::align), and the reports, written to the terminal, garble
+            # the printer's window in a sanitizer build. Signed overflow (undefined), truncation and nullability stay
+            # checked; after cmake_helpers' -fsanitize=, so that it wins
+            foreach(flags IN ITEMS sanitizer_cxx_flags sanitizer_c_flags sanitizer_linker_flags)
+                list(APPEND ${flags} -fno-sanitize=unsigned-integer-overflow,implicit-integer-sign-change)
+            endforeach()
+        endif()
+
         if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
             # -Weverything enables -Wthread-safety-negative, which requires negative capability annotations on every
             # function that takes a lock; plain std::mutex code cannot satisfy it without annotating the whole codebase
@@ -135,13 +147,13 @@ if(UC_LOG_BUILD_PRINTER)
             COMPONENTS
             ${Boost_Components}
             DOWNLOAD_URL
-            https://github.com/boostorg/boost/releases/download/boost-1.91.0-1/boost-1.91.0-1-cmake.tar.xz
+            https://github.com/boostorg/boost/releases/download/boost-1.92.0/boost-1.92.0-cmake.tar.xz
             DOWNLOAD_HASH
-            SHA256=cc5dc5006ecbdf0051f90979be31b4eee5987d9ae14ae9fb9c03cfa43fa3cdad
+            SHA256=9bed76128d4e46755dbe818487788c6fceb6f72b378f4daa49b7e1e600d9088d
             GIT_REPOSITORY
             https://github.com/boostorg/boost.git
             GIT_TAG
-            boost-1.91.0-1
+            boost-1.92.0
             GIT_BRANCH
             master)
 
@@ -158,7 +170,7 @@ if(UC_LOG_BUILD_PRINTER)
             GIT_REPOSITORY
             https://github.com/fmtlib/fmt.git
             GIT_TAG
-            12.2.0
+            12.2.1
             GIT_BRANCH
             master)
         # FMT_USE_LOCALE / FMT_UNICODE as the compiled fmt library has them, in every host translation unit:
@@ -183,32 +195,65 @@ if(UC_LOG_BUILD_PRINTER)
             GIT_BRANCH
             master)
 
-        set(FTXUI_ENABLE_INSTALL OFF)
-        set(FTXUI_QUIET ON)
+        # the printer's window (host/uc_log/printer/rtx/)
         find_or_fetch_package(
-            ftxui
+            rtxui
             GIT_REPOSITORY
-            https://github.com/ArthurSonzogni/ftxui
+            https://github.com/ArthurSonzogni/RTXUI
             GIT_TAG
-            v7.0.3
+            v0.1.4
             GIT_BRANCH
             main)
+        # RTXUI's own sources, not ours: always optimised, whatever the tree's build type - cmake_helpers clears
+        # CMAKE_CXX_FLAGS_<CONFIG> and gives -O only to targets with default build options, so a fetched RTXUI was built
+        # at -O0, ten times slower per frame. Its sanitizer: below, with the other fetched libraries.
+        target_compile_options(rtxui PRIVATE -O2 -w)
+        set_target_properties(rtxui PROPERTIES COMPILE_WARNING_AS_ERROR OFF)
 
         find_or_fetch_package(
             enchantum
             GIT_REPOSITORY
             https://github.com/ZXShady/enchantum
             GIT_TAG
-            0.4.0
+            0.5.0
             GIT_BRANCH
             main)
 
         add_subdirectory(jlink)
 
+        # ASan in the fetched libraries (rtxui, fmt, boost) and the fake J-Link DLL too: cmake_helpers' sanitizer flags
+        # are per target and reached only ours, and a test links all of them into one program. With libc++ that split
+        # the container annotations - libc++ marks a vector's spare capacity only in instrumented code, the linker keeps
+        # one copy of each inline vector function - and the clang+ASan CI entry reported "container-overflow" in RTXUI's
+        # Split() at every window start. Theirs get the sanitizer alone, not the undefined / integer /
+        # implicit-conversion checks, which would report in code that is not ours. Not TSan: boost::asio's fences, which
+        # TSan does not model (the -Wno-tsan above), would then report in its own code.
+        if("${USE_SANITIZER}" STREQUAL "address")
+            foreach(
+                dep IN
+                ITEMS rtxui
+                      fmt
+                      fmt-c
+                      boost_atomic
+                      boost_container
+                      boost_context
+                      boost_date_time
+                      boost_filesystem
+                      boost_process
+                      jlink_fake_dll)
+                if(TARGET ${dep})
+                    get_target_property(dep_imported ${dep} IMPORTED)
+                    if(NOT dep_imported)
+                        target_compile_options(${dep} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+                    endif()
+                endif()
+            endforeach()
+        endif()
+
         list(TRANSFORM Boost_Components PREPEND "Boost::")
 
         # the printer in pieces (host/uc_log/printer/): its core services and the J-Link reader, instantiated once, and
-        # the FTXUI window; uc_log_printer is main, uc_log_gui_test the window on a fake target
+        # the window (rtx/); uc_log_printer is main, uc_log_gui_test the window on a fake target
         add_library(uc_log_printer_core STATIC host/uc_log/printer/BuildRunner.cpp host/uc_log/printer/Options.cpp
                                                host/uc_log/printer/PrinterModel.cpp host/uc_log/printer/ReaderJLink.cpp)
         target_link_libraries(
@@ -226,35 +271,38 @@ if(UC_LOG_BUILD_PRINTER)
         target_add_default_build_options(uc_log_printer_core PRIVATE)
 
         add_library(
-            uc_log_tui STATIC
-            host/uc_log/printer/tui/Gui.cpp
-            host/uc_log/printer/tui/BuildTab.cpp
-            host/uc_log/printer/tui/DebuggerTab.cpp
-            host/uc_log/printer/tui/FilterTab.cpp
-            host/uc_log/printer/tui/HelpTab.cpp
-            host/uc_log/printer/tui/InspectTab.cpp
-            host/uc_log/printer/tui/LogsTab.cpp
-            host/uc_log/printer/tui/MetricsTab.cpp
-            host/uc_log/printer/tui/SettingsTab.cpp
-            host/uc_log/printer/tui/StatisticsTab.cpp
-            host/uc_log/printer/tui/StatusLine.cpp)
-        target_link_libraries(
-            uc_log_tui
-            PUBLIC remote_fmt::parser
-                   fmt::fmt
-                   Threads::Threads
-                   uc_log::host
-                   jlink::jlink
-                   ${Boost_Components}
-                   ftxui::screen
-                   ftxui::dom
-                   ftxui::component
-                   enchantum::enchantum
-                   uc_log_printer_core)
-        target_add_default_build_options(uc_log_tui PRIVATE)
+            uc_log_rtxui STATIC
+            host/uc_log/printer/rtx/App.cpp
+            host/uc_log/printer/rtx/AppCommands.cpp
+            host/uc_log/printer/rtx/AppDialog.cpp
+            host/uc_log/printer/rtx/AppFilter.cpp
+            host/uc_log/printer/rtx/AppHeads.cpp
+            host/uc_log/printer/rtx/AppKeys.cpp
+            host/uc_log/printer/rtx/AppMetrics.cpp
+            host/uc_log/printer/rtx/AppMouse.cpp
+            host/uc_log/printer/rtx/AppPages.cpp
+            host/uc_log/printer/rtx/AppPanels.cpp
+            host/uc_log/printer/rtx/AppQuestions.cpp
+            host/uc_log/printer/rtx/ContextMenu.cpp
+            host/uc_log/printer/rtx/Dialog.cpp
+            host/uc_log/printer/rtx/Form.cpp
+            host/uc_log/printer/rtx/Gui.cpp
+            host/uc_log/printer/rtx/HeadFit.cpp
+            host/uc_log/printer/rtx/LogView.cpp
+            host/uc_log/printer/rtx/ModeLine.cpp
+            host/uc_log/printer/rtx/Panel.cpp
+            host/uc_log/printer/rtx/PrinterActs.cpp
+            host/uc_log/printer/rtx/Runs.cpp
+            host/uc_log/printer/rtx/StatusLine.cpp
+            host/uc_log/printer/rtx/TabBar.cpp)
+        target_link_libraries(uc_log_rtxui PUBLIC uc_log_printer_core rtxui)
+        target_add_default_build_options(uc_log_rtxui PRIVATE)
+        # RTXUI dynamic_casts components (a <radio> walks the component tree) and its terminal device: a component
+        # compiled without RTTI has no type info for it, and the cast crashes
+        target_compile_options(uc_log_rtxui PRIVATE -frtti)
 
         add_executable(uc_log_printer host/jlinkPrinter.cpp)
-        target_link_libraries(uc_log_printer PRIVATE uc_log_printer_core uc_log_tui)
+        target_link_libraries(uc_log_printer PRIVATE uc_log_printer_core uc_log_rtxui)
         target_add_default_build_options(uc_log_printer PRIVATE)
 
         # the stress run's checker (host/uc_log/stress/LogStressCheck.hpp): reads what a printer wrote for a firmware
@@ -266,7 +314,13 @@ if(UC_LOG_BUILD_PRINTER)
 
         if(${UC_LOG_BUILD_TEST_GUI})
             add_executable(uc_log_gui_test host/gui_test.cpp)
-            target_link_libraries(uc_log_gui_test PRIVATE uc_log_tui)
+            target_link_libraries(uc_log_gui_test PRIVATE uc_log_rtxui)
+            # what a frame of the window costs, headless (RTXUI's mock terminal is in its src/, not installed)
+            add_executable(uc_log_rtxui_bench host/rtxui_bench.cpp)
+            target_link_libraries(uc_log_rtxui_bench PRIVATE uc_log_rtxui)
+            target_include_directories(uc_log_rtxui_bench SYSTEM PRIVATE ${rtxui_SOURCE_DIR}/src)
+            target_add_default_build_options(uc_log_rtxui_bench PRIVATE)
+            target_compile_options(uc_log_rtxui_bench PRIVATE -frtti)
             # the host tests' FakeTargetPort (tests/support/) is the demo's target too
             target_include_directories(uc_log_gui_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/tests)
             target_add_default_build_options(uc_log_gui_test PUBLIC)

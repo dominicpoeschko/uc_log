@@ -782,7 +782,7 @@ private:
             for(auto const& line : gone) { hooks_.note(line); }
         }
         clearDone(
-          std::format("{} record(s) cleared; what they held is in the Status tab", gone.size()));
+          std::format("{} record(s) cleared; what they held is in the Messages tab", gone.size()));
         recordsDue_ = true;
     }
 

@@ -49,7 +49,7 @@ cmake --build .
     - Reset Debugger
     - Flash Target
 - Build function
-- Status tab
+- Messages tab
 
 ## Compile-time log level floor
 
@@ -327,12 +327,13 @@ tagged by `"cmd"`:
 |---|---|---|
 | request/answer | `ping` | `{"cmd":"ping"}`: the printer is there |
 | | `status` | running, halted, flashing, sessions, firmware check (match / different / unchecked, build CRC), status errors, `log_seq` (the next log line's number), `started_us` |
-| | `messages` | the newest n lines of the Status tab (`time`, `level`, `text`; `kind` only where a message is not plain: `"halt"` for the core's halt, `"format_error"` for a log line the printer could not render - match the kind, the text is for people) |
+| | `messages` | the newest n lines of the Messages tab (`time`, `level`, `text`; `kind` only where a message is not plain: `"halt"` for the core's halt, `"format_error"` for a log line the printer could not render - match the kind, the text is for people) |
 | | `read` | target memory while the core runs, hex per piece, with the host time it came back |
 | | `wait` | read a value until a condition holds or a timeout runs out |
 | | `reset`, `flash` | done through the printer's own probe connection; the log session survives |
 | | `halt`, `go` | the core halted / resumed through the probe's own calls, answered with `halted`; `write` refuses DHCSR (a halt written there behind the J-Link DLL's back hangs the DLL for good) |
-| stream | `subscribe` (`log`, `messages`, `metrics`; module and level filters) | after the answer only `log` / `message` / `metric` events, and `dropped` (`lines`) where events were dropped for this client |
+| | `unit` | what the printer makes of a metric's unit text (`host/uc_log/printer/MetricUnit.hpp`): the unit its values are shown in (`display`, `scale`, `decimals`: `c℃` as `°C`, 0.01, 2) and its SI base units (`base`, `to_base`), equal for two units of one quantity (`mA s`, `A·s`); `known` false for a text it does not read |
+| stream | `subscribe` (`log`, `messages`, `metrics`; module and level filters) | after the answer only `log` / `message` / `metric` events, and `dropped` (`lines`) where events were dropped for this client; a `metric` has `value` and `unit` as sent and the same value in the unit it is shown in (`display_value`, `display_unit`, `decimals`) |
 | history | `subscribe` with `since_seq` or `last` (log stream) | the kept log lines from that seq on / the newest n through the filters, a `backlog_end` (`next_seq`, `lost`), then live lines - or, with `"follow":false`, the connection closes |
 
 Every log line carries `seq`, counted from 0 at the printer's start. The printer keeps its log lines for the history,

@@ -72,7 +72,7 @@ void historyAndStream() {
     log.copyNew(mirror, clears);
     CHECK(mirror.size() == MessageLog::historyKept + 6
             && mirror.back().level == MessageLevel::error,
-          "the Status tab's mirror");
+          "the Messages tab's mirror");
     log.status("more");
     log.copyNew(mirror, clears);
     CHECK(mirror.size() == MessageLog::historyKept + 7 && mirror.back().text == "more",

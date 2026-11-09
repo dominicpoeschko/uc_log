@@ -864,6 +864,79 @@ void testLogHistory(boost::asio::ip::address const&               loopback,
 
 }   // namespace
 
+namespace {
+// A duplex channel's unix socket across the reader's sessions: every RTT (re)start calls configure() again - twice
+// within a second after a flash - and the socket must still be there and take a client afterwards, whatever the
+// sessions saw in between (the same channel, no names, no channel, a disable). Checks the FILE and a connect, not only
+// the hub's status: the status said "active" while the file was gone.
+void testDuplexAcrossSessions(boost::asio::ip::address const& loopback,
+                              std::filesystem::path const&    dir) {
+    namespace fs = std::filesystem;
+    fs::create_directories(dir);
+    uc_log::printer::AsioContext      ctx;
+    uc_log::printer::DuplexChannelHub hub{
+      ctx.ioc,
+      loopback,
+      0,
+      [](std::string_view msg) {
+          std::printf("   [hub err] %.*s\n", static_cast<int>(msg.size()), msg.data());
+      },
+      [](std::string_view) {},
+      []() {},
+      dir};
+    boost::asio::io_context clientIo;
+    auto const              path        = dir / "duplex.0.sock";
+    auto const              control     = uc_log::printer::DuplexChannelDesc{.ordinal   = 0,
+                                                                             .name      = "control",
+                                                                             .upIndex   = 1,
+                                                                             .downIndex = 1};
+    auto const              unnamed     = uc_log::printer::DuplexChannelDesc{.ordinal   = 0,
+                                                                             .name      = "duplex0",
+                                                                             .upIndex   = 1,
+                                                                             .downIndex = 1};
+    auto const              takesClient = [&] {
+        if(!fs::is_socket(path)) { return false; }
+        local::socket             client{clientIo};
+        boost::system::error_code ec;
+        client.connect(local::endpoint{path.native()}, ec);
+        return !ec;
+    };
+    // the hub's own view must agree once it has settled
+    auto const settled = [&] {
+        auto const info = hub.info();
+        return info.size() == 1 && info[0].status == uc_log::printer::SocketPortStatus::active
+            && takesClient();
+    };
+    {
+        uc_log::printer::AsioContextRunner runner{ctx};
+        hub.configure({control});
+        CHECK(waitUntil(settled), "first session: duplex.0.sock takes a client");
+
+        hub.configure({control});
+        hub.configure({control});
+        CHECK(waitUntil(settled), "the same channel twice in a row (a flash): still there");
+
+        hub.configure({unnamed});
+        hub.configure({control});
+        CHECK(waitUntil(settled), "a session without names in between: back");
+
+        hub.configure({});
+        hub.configure({control});
+        CHECK(waitUntil(settled), "a session without the channel in between: back");
+
+        hub.setEnabled(0, false);
+        hub.setEnabled(0, true);
+        CHECK(waitUntil(settled), "disabled and enabled at once: back");
+
+        hub.configure({unnamed});
+        CHECK(waitUntil(settled), "a session without names: its socket at the same place");
+        hub.configure({control});
+        CHECK(waitUntil(settled), "then the named one again: there");
+    }
+    fs::remove_all(dir);
+}
+}   // namespace
+
 int main() {
     std::setvbuf(stdout,
                  nullptr,
@@ -884,6 +957,7 @@ int main() {
     testStalledSubscriber(loopback, dir / "stalled.sock", errf);
     testStuckReads(loopback, dir / "stuck_reads.sock");
     testStuckSocketThread(loopback, dir / "stuck_socket.sock");
+    testDuplexAcrossSessions(loopback, dir / "duplex_sessions");
     std::filesystem::remove_all(dir);
 
     return uc_log::test::report();

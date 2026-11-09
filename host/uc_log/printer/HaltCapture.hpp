@@ -1,7 +1,7 @@
 #pragma once
 
 // What the reader captures when the core halts on its own (a fault handler's or a panic's bkpt, a lockup) or on the
-// TUI's captured halt: the registers, the mainline fault registers and the words on the stack. The front ends take the
+// TUI's captured halt: the registers, the mainline fault registers and the words on the stack. The window takes the
 // struct (the Health tab's crash view, TargetInspector::noteHalt); `text()` is the status message every script reads
 // (kvasir_bench's `crash`, `wait-for` ending on "core halted"), byte for byte as before the struct.
 

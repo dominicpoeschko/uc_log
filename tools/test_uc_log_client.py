@@ -70,6 +70,14 @@ BUILT = {
     "write_disconnected": kb.req_write([(0xE0000000, 1)]),
     "records_no_map": kb.req_records(["crash", "trace"]),
     "raise_panic_no_map": kb.req_raise_panic("user"),
+    "unit_centi": kb.req_unit("c℃"),
+    "unit_charge": kb.req_unit("mA s"),
+    "unit_scaled": kb.req_unit("(10⁻³ 1/℃)"),
+    "unit_ticks": kb.req_unit("(1/48 × 10⁻⁶ s) mA"),
+    "unit_by_hand": kb.req_unit("A·s"),
+    "unit_degrees": kb.req_unit("°C"),
+    "unit_volt": kb.req_unit("mV"),
+    "unit_not_read": kb.req_unit("half-cycles"),
 }
 
 RECORDS_BUILT = {
@@ -258,6 +266,35 @@ class Fixtures(unittest.TestCase):
         self.assertEqual((wait["hit"], wait["first"],
                          wait["last"]), (False, 0x03020100, 0x03020100))
 
+    def test_unit_answers(self):
+        """What the printer reads from a unit text: the unit shown, its factor and decimals, the base units two
+        spellings of one quantity share (kvasir_bench compares a threshold through them)."""
+        centi = TRANSCRIPT["unit_centi"]["answer"]
+        self.assertEqual((centi["known"], centi["display"], centi["scale"], centi["decimals"], centi["base"]),
+                         (True, "°C", 0.01, 2, "°C"))
+        charge, by_hand = TRANSCRIPT["unit_charge"]["answer"], TRANSCRIPT["unit_by_hand"]["answer"]
+        self.assertEqual((charge["display"], charge["decimals"]), ("A·s", 3))
+        self.assertEqual(charge["base"], by_hand["base"],
+                         "mA s and A·s: one quantity")
+        self.assertAlmostEqual(
+            by_hand["to_base"] / charge["to_base"], 1000, "1 A·s is 1000 mA s")
+        self.assertEqual(TRANSCRIPT["unit_ticks"]
+                         ["answer"]["base"], charge["base"])
+        self.assertEqual(TRANSCRIPT["unit_scaled"]
+                         ["answer"]["display"], "1/°C")
+        self.assertNotEqual(
+            TRANSCRIPT["unit_volt"]["answer"]["base"], charge["base"])
+        unread = TRANSCRIPT["unit_not_read"]["answer"]
+        self.assertEqual((unread["known"], unread["display"], unread["base"], unread["scale"]),
+                         (False, "half-cycles", "half-cycles", 1))
+
+    def test_metric_text(self):
+        self.assertEqual(kb.metric_text(312.5, "°C", 2), "312.50 °C")
+        self.assertEqual(kb.metric_text(-0.0001, "V", 2),
+                         "0.00 V", "no minus zero")
+        self.assertEqual(kb.metric_text(45, "°", 0), "45°")
+        self.assertEqual(kb.metric_text(42, "", 0), "42")
+
     def test_errors_raise(self):
         for name, x in TRANSCRIPT.items():
             with self.subTest(name):
@@ -273,10 +310,19 @@ class Fixtures(unittest.TestCase):
         self.assertEqual(
             logs[1], "    1600.000 ms warn  [i2c.bus] Bus.hpp:42 nack from 0x40")
         self.assertEqual(logs[0], "    1500.000 ms info  main.cpp:10 boot")
-        metrics = [(kb.metric_key(e), e["unit"], e["value"])
+        metrics = [(kb.metric_key(e), e["unit"], e["value"], kb.metric_sample_text(e))
                    for e in events if e["cmd"] == "metric"]
-        self.assertEqual(metrics, [("valve::temperature", "m℃", 58300), ("regulator::flow", "", 0),
-                                   ("main.cpp:20::rate", "Hz", 1.5)])
+        self.assertEqual(metrics, [("valve::temperature", "m℃", 58300, "58.300 °C"),
+                                   ("regulator::flow", "", 0, "0"),
+                                   ("main.cpp:20::rate", "Hz", 1.5, "1.5 Hz"),
+                                   ("heater::tip", "c℃", 31250, "312.50 °C"),
+                                   ("heater::er2Owed", "mA s",
+                                    160000, "160.000 A·s"),
+                                   ("adc::isr", "µs", 600, "600 µs"),
+                                   ("heater::kp", "(10⁻³ 1/℃)", 2500, "2.500 1/°C"),
+                                   ("heater::charge", "(1/48 × 10⁻⁶ s) mA",
+                                    7680000000000, "160.000000 A·s"),
+                                   ("heater::cycles", "half-cycles", 3, "3 half-cycles")])
         warn_i2c = [e["module"] for e in STREAMS["log_warn_i2c"]["events"]]
         self.assertEqual(warn_i2c, ["i2c.bus", "i2c"])
         kinds = [kb.message_kind(
