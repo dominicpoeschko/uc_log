@@ -88,12 +88,18 @@ void errorReachesThePusher() {
         if(i.slot == 3) { throw std::runtime_error{"bad"}; }
         return false;
     }};
-    for(std::size_t k = 0; k != 5; ++k) { w.push(item(k, 1, 0)); }
-    bool thrown = false;
+    // the next push() or barrier() after the decode threw rethrows it: which one depends on how far the worker got
+    // (a push of slot 4 after slot 3's decode is the one), so every call counts
+    int thrown = 0;
+    for(std::size_t k = 0; k != 5; ++k) {
+        try {
+            w.push(item(k, 1, 0));
+        } catch(std::runtime_error const&) { ++thrown; }
+    }
     try {
         w.barrier();
-    } catch(std::runtime_error const&) { thrown = true; }
-    CHECK(thrown, "barrier() rethrows the decode's exception");
+    } catch(std::runtime_error const&) { ++thrown; }
+    CHECK(thrown == 1, "push() or barrier() rethrows the decode's exception, once");
     bool again = false;
     try {
         w.barrier();
