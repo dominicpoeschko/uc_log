@@ -79,13 +79,25 @@ struct Header {
     std::uint32_t        numDown;
 };
 
-rtt::Detail::BufferControlBlock* blocksOf(Header* h) {
-    return reinterpret_cast<rtt::Detail::BufferControlBlock*>(reinterpret_cast<std::byte*>(h)
-                                                              + sizeof(Header));
+// A control block found in this executable. Header is the test's own picture of its first bytes, not the object that
+// lives there: it is copied out, never read through a Header pointer ([basic.lval]). The buffer blocks behind it are
+// the real objects.
+struct Block {
+    std::byte* at{};
+
+    [[nodiscard]] Header header() const {
+        Header h{};
+        std::memcpy(&h, at, sizeof h);
+        return h;
+    }
+};
+
+rtt::Detail::BufferControlBlock* blocksOf(Block b) {
+    return reinterpret_cast<rtt::Detail::BufferControlBlock*>(b.at + sizeof(Header));
 }
 
 struct Found {
-    std::vector<Header*> blocks;
+    std::vector<Block> blocks;
 };
 
 // every 16-byte SEGGER id in a writable segment of this executable
@@ -107,7 +119,7 @@ int scanSegments(dl_phdr_info* info,
                            rtt::defaultControlBlockId.size())
                == 0)
             {
-                found.blocks.push_back(reinterpret_cast<Header*>(begin + off));
+                found.blocks.push_back(Block{begin + off});
             }
         }
     }
@@ -115,20 +127,24 @@ int scanSegments(dl_phdr_info* info,
 }
 
 // The duplex channels' up buffers come after the log rings: one up and one down buffer per channel
-std::size_t firstDuplexUp(Header const* h) { return h->numUp - h->numDown; }
+std::size_t firstDuplexUp(Block b) {
+    auto const h = b.header();
+    return h.numUp - h.numDown;
+}
 
 // The control block whose first duplex up buffer is named `name`
-Header* block(std::string_view name) {
+Block block(std::string_view name) {
     Found found{};
     dl_iterate_phdr(scanSegments, &found);
-    Header* hit = nullptr;
-    int     n   = 0;
-    for(auto* h : found.blocks) {
-        auto const& first = blocksOf(h)[firstDuplexUp(h)];
-        if(h->numUp > h->numDown && h->numDown > 0 && first.name != nullptr
+    Block hit{};
+    int   n = 0;
+    for(auto const b : found.blocks) {
+        auto const  h     = b.header();
+        auto const& first = blocksOf(b)[firstDuplexUp(b)];
+        if(h.numUp > h.numDown && h.numDown > 0 && first.name != nullptr
            && std::string_view{first.name} == name)
         {
-            hit = h;
+            hit = b;
             ++n;
         }
     }
@@ -141,19 +157,19 @@ Header* block(std::string_view name) {
 }
 
 // up buffer i of the duplex channels (0: the first channel), and log ring i
-rtt::Detail::BufferControlBlock& up(Header*     h,
+rtt::Detail::BufferControlBlock& up(Block       h,
                                     std::size_t i) {
     return blocksOf(h)[firstDuplexUp(h) + i];
 }
 
-rtt::Detail::BufferControlBlock& logRing(Header*     h,
+rtt::Detail::BufferControlBlock& logRing(Block       h,
                                          std::size_t i) {
     return blocksOf(h)[i];
 }
 
-rtt::Detail::BufferControlBlock& down(Header*     h,
+rtt::Detail::BufferControlBlock& down(Block       h,
                                       std::size_t i) {
-    return blocksOf(h)[h->numUp + i];
+    return blocksOf(h)[h.header().numUp + i];
 }
 
 // the probe writes into a down buffer: what fits (one slot stays free), the write offset published after the bytes
@@ -204,9 +220,9 @@ std::string targetWrite(std::string_view text) {
 }
 
 void layout() {
-    Header* const h = block("shell");
-    if(h == nullptr) { return; }
-    CHECK(h->numUp == 4 && h->numDown == 2,
+    Block const h = block("shell");
+    if(h.at == nullptr) { return; }
+    CHECK(h.header().numUp == 4 && h.header().numDown == 2,
           "the two log rings of Rings<64> + two duplex up buffers, two down buffers");
     CHECK(up(h, 0).bufferSize == 32 && up(h, 1).bufferSize == 16, "up sizes 32 and 16");
     CHECK(std::string_view{up(h, 1).name} == "raw",
@@ -218,8 +234,8 @@ void layout() {
 }
 
 void hostToTarget() {
-    Header* const h = block("shell");
-    if(h == nullptr) { return; }
+    Block const h = block("shell");
+    if(h.at == nullptr) { return; }
     CHECK(targetRead<Shell>(32).empty(), "nothing sent: read() returns nothing");
     CHECK(hostWrite(down(h, 0), "hello") == 5, "the probe writes 5 bytes");
     CHECK(targetRead<Raw>(32).empty(), "the other channel's read sees none of them");
@@ -228,8 +244,8 @@ void hostToTarget() {
 }
 
 void hostToTargetWrapAndShortBuffer() {
-    Header* const h = block("shell");
-    if(h == nullptr) { return; }
+    Block const h = block("shell");
+    if(h.at == nullptr) { return; }
     // move the offsets near the end, so the next text wraps
     CHECK(hostWrite(down(h, 0), "0123456789") == 10, "10 bytes");
     CHECK(targetRead<Shell>(32) == "0123456789", "10 back");
@@ -247,8 +263,8 @@ void hostToTargetWrapAndShortBuffer() {
 }
 
 void targetToHost() {
-    Header* const h = block("shell");
-    if(h == nullptr) { return; }
+    Block const h = block("shell");
+    if(h.at == nullptr) { return; }
     CHECK(targetWrite<Shell>("abc").empty(), "write() takes 3 bytes, no remainder");
     CHECK(targetWrite<Raw>("xy").empty(), "the other channel");
     CHECK(hostRead(up(h, 0)) == "abc", "the shell's up buffer has them");
@@ -264,8 +280,8 @@ void targetToHost() {
 }
 
 void detachedWritesNothing() {
-    Header* const h = block("dshell");
-    if(h == nullptr) { return; }
+    Block const h = block("dshell");
+    if(h.at == nullptr) { return; }
     CHECK(targetWrite<Detached::DuplexChannel<0>>("abc") == "abc",
           "no debugger: write() gives everything back");
     CHECK(hostRead(up(h, 0)).empty(), "and nothing is in the up buffer");
@@ -275,8 +291,8 @@ void detachedWritesNothing() {
 }
 
 void throughTheFanOut() {
-    Header* const h = block("shell");
-    if(h == nullptr) { return; }
+    Block const h = block("shell");
+    if(h.at == nullptr) { return; }
     CHECK(targetWrite<Fan::DuplexChannel<0>>("fan").empty(), "write through the fan-out");
     CHECK(hostRead(up(h, 0)) == "fan", "lands in the primary's up buffer");
     CHECK(hostWrite(down(h, 1), "rx") == 2, "the probe writes the raw channel");

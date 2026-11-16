@@ -8,9 +8,9 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <fmt/format.h>
 #include <string>
 #include <string_view>
@@ -61,9 +61,7 @@ inline std::string watchValue(std::vector<std::byte> const& v) {
     case 2: return fmt::format("{} / {} / {:#06x}", u, static_cast<std::int16_t>(u), u);
     case 4:
         {
-            float f{};
-            auto  w = static_cast<std::uint32_t>(u);
-            std::memcpy(&f, &w, 4);
+            auto const f = std::bit_cast<float>(static_cast<std::uint32_t>(u));
             return fmt::format("{} / {} / {:#010x} / {:g}f", u, static_cast<std::int32_t>(u), u, f);
         }
     case 8:  return fmt::format("{} / {} / {:#018x}", u, static_cast<std::int64_t>(u), u);
