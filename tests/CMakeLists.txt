@@ -59,7 +59,8 @@ endfunction()
 # control, test <family>_accepts_<label>, that must build - it proves the stubs and includes are sound. Anything else is
 # a regex of the rejection's own text in gcc's and clang's wording, test <family>_rejects_<label>: the build must print
 # it (PASS_REGULAR_EXPRESSION), so a case that fails for an unrelated reason fails its test. Keep the cases in step with
-# the source. The tests drive the build system and never run concurrently under "ctest -j" (RESOURCE_LOCK).
+# the source. The tests drive the build system and never run concurrently under "ctest -j" (RESOURCE_LOCK); label
+# compile_check (the sanitizer CI jobs leave them out: `ctest -LE compile_check` - no sanitizer changes a compile).
 function(uc_log_add_fail_test family source)
     cmake_parse_arguments(PARSE_ARGV 2 arg "" "LINKS" "DEFINITIONS;CASES")
     list(LENGTH arg_CASES count)
@@ -91,7 +92,7 @@ function(uc_log_add_fail_test family source)
         endif()
         add_test(NAME ${test_name} COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target ${target} --config
                                            $<CONFIG>)
-        set_tests_properties(${test_name} PROPERTIES RESOURCE_LOCK uc_log_fail_build TIMEOUT 300)
+        set_tests_properties(${test_name} PROPERTIES RESOURCE_LOCK uc_log_fail_build TIMEOUT 300 LABELS compile_check)
         if(NOT expect STREQUAL "ACCEPT")
             set_tests_properties(${test_name} PROPERTIES PASS_REGULAR_EXPRESSION "${expect}")
         endif()
@@ -197,7 +198,7 @@ uc_log_add_test(
     unreadBoots
     tornTailAcrossReboot
     landedReadOffsetSaid)
-# wrapSweep is CPU-bound and slow under TSan: 133 s on a loaded machine, hence its own TIMEOUT
+# the wrap sweep is CPU-bound and slow under the sanitizers (its four quarters 12-20 s each in CI), hence the TIMEOUT
 uc_log_add_test(
     uc_log_test_direct_rtt
     direct_rtt_tests.cpp
@@ -206,7 +207,10 @@ uc_log_add_test(
     TIMEOUT
     600
     CASES
-    wrapSweep
+    wrapSweep0
+    wrapSweep1
+    wrapSweep2
+    wrapSweep3
     controlBlockLayout
     reinitInsideAnAccess
     reinitBetweenPasses
@@ -399,6 +403,11 @@ uc_log_add_test(
     monkeyA
     monkeyB
     monkeyC)
+# the longest cases first under "ctest -j" (a fresh tree has no cost data): seconds under the sanitizers
+set_tests_properties(uc_log_test_rtx_monkey.monkeyA uc_log_test_rtx_monkey.monkeyB uc_log_test_rtx_monkey.monkeyC
+                     PROPERTIES COST 30)
+set_tests_properties(uc_log_test_direct_rtt.wrapSweep0 uc_log_test_direct_rtt.wrapSweep1
+                     uc_log_test_direct_rtt.wrapSweep2 uc_log_test_direct_rtt.wrapSweep3 PROPERTIES COST 20)
 foreach(test IN ITEMS uc_log_test_rtx_window uc_log_test_rtx_dialog uc_log_test_rtx_page uc_log_test_rtx_monkey)
     target_link_libraries(${test} PRIVATE uc_log_rtxui)
     target_compile_options(${test} PRIVATE -frtti)

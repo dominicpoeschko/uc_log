@@ -252,31 +252,13 @@ struct TraceChoice {
     std::size_t rows{64};   // a ring's last rows shown
 };
 
-inline Page traceForm(Inspection const&  s,
-                      TraceChoice const& choice) {
-    using namespace Detail;
-    Page  p;
-    auto& how = p.box("🧵 Trace rings", true);
-    how.push_back({p.check("Δ the first field", choice.delta, WindowAction{action::TraceDelta{}}),
-                   p.check("hex", choice.hex, WindowAction{action::TraceHex{}}),
-                   p.button("✎ Rows …", WindowAction{action::Edit{Field::traceRows}}),
-                   label(fmt::format(" the last {} rows of a ring", choice.rows))});
-    how.push_back(mapRow(s));
-    if(s.rings.empty()) {
-        how.push_back(note("no Kvasir::Trace::Ring in this firmware (kvasir/Util/Trace.hpp)"));
-        return p;
-    }
-    for(auto const& r : s.rings) {
-        if(!r.error.empty()) {
-            auto& ring = p.box(fmt::format("ring at {:#010x}", r.address), true);
-            ring.push_back({toned(Tone::bad, r.error)});
-            continue;
-        }
-        if(r.capacity == 0) {
-            auto& ring = p.box(shortName(r.name, 60), true);
-            ring.push_back(note("not read yet"));
-            continue;
-        }
+namespace Detail {
+    // one read ring's box: its head and its last rows. A function of its own: `previous`, an optional made anew for
+    // each ring inside traceForm's loop, left bugprone-unchecked-optional-access without a verdict (its analysis spent
+    // its whole budget on traceForm, in every unit including this header, and checked nothing)
+    inline void traceRingBox(Page&                   p,
+                             Inspection::Ring const& r,
+                             TraceChoice const&      choice) {
         auto const shown = std::min(r.rows.size(), choice.rows);
         auto&      ring
           = p.box(fmt::format("{}: {} written, capacity {}, the last {}{}",
@@ -330,6 +312,35 @@ inline Page traceForm(Inspection const&  s,
                       : PanelPart{RunKind::message, 0, {}, std::move(text)}
             });
         }
+    }
+}   // namespace Detail
+
+inline Page traceForm(Inspection const&  s,
+                      TraceChoice const& choice) {
+    using namespace Detail;
+    Page  p;
+    auto& how = p.box("🧵 Trace rings", true);
+    how.push_back({p.check("Δ the first field", choice.delta, WindowAction{action::TraceDelta{}}),
+                   p.check("hex", choice.hex, WindowAction{action::TraceHex{}}),
+                   p.button("✎ Rows …", WindowAction{action::Edit{Field::traceRows}}),
+                   label(fmt::format(" the last {} rows of a ring", choice.rows))});
+    how.push_back(mapRow(s));
+    if(s.rings.empty()) {
+        how.push_back(note("no Kvasir::Trace::Ring in this firmware (kvasir/Util/Trace.hpp)"));
+        return p;
+    }
+    for(auto const& r : s.rings) {
+        if(!r.error.empty()) {
+            auto& ring = p.box(fmt::format("ring at {:#010x}", r.address), true);
+            ring.push_back({toned(Tone::bad, r.error)});
+            continue;
+        }
+        if(r.capacity == 0) {
+            auto& ring = p.box(shortName(r.name, 60), true);
+            ring.push_back(note("not read yet"));
+            continue;
+        }
+        Detail::traceRingBox(p, r, choice);
     }
     return p;
 }

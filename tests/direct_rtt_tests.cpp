@@ -166,6 +166,16 @@ struct SimTransport {
 
 using Rtt = uc_log::printer::DirectRtt<SimTransport>;
 
+// The session on the test's block, by value; a block that does not open ends the case (run() counts the throw). The
+// cases that open sessions in a loop hold them so: an optional opened in a loop and used in the loop's inner loops
+// leaves bugprone-unchecked-optional-access without a verdict - its analysis spends its whole budget on the function
+// (~15 s each) and checks nothing.
+Rtt openedRtt(SimTransport&                bus,
+              std::optional<std::uint32_t> epoch = std::nullopt) {
+    auto rtt = Rtt::open(bus, Target::base, 2, epoch);
+    return std::move(uc_log::test::need(rtt, "the session opens"));
+}
+
 void stream() {
     Target       target;
     SimTransport bus{target};
@@ -190,24 +200,27 @@ void stream() {
     std::uint32_t             wrong    = 0;
     int                       sessions = 0;
     std::array<std::byte, 40> chunk{};
-    while(got < total) {
-        // a session: open, read some passes, end (no stop call, no drain: what is not read stays)
-        auto rtt = Rtt::open(bus, Target::base, 2);
-        CHECK(rtt.has_value(), "the block opens");
-        if(!rtt) { break; }
-        ++sessions;
+    auto const                readSession = [&](Rtt& rtt) {
         for(int pass = 0; pass != 1 + sessions % 50 && got < total; ++pass) {
             // every other session reads as a drain does (no cap), the others as a live pass
             std::array<std::span<std::byte>, 1> const outs{std::span{chunk}};
             auto const                                data
-              = rtt->readAll(bus,
-                             outs,
-                             sessions % 2 == 0 ? Rtt::Cap::halfWhenShared : Rtt::Cap::none)[0];
+              = rtt.readAll(bus,
+                            outs,
+                            sessions % 2 == 0 ? Rtt::Cap::halfWhenShared : Rtt::Cap::none)[0];
             for(auto const b : data) {
                 if(std::to_integer<std::uint8_t>(b) != static_cast<std::uint8_t>(got)) { ++wrong; }
                 ++got;
             }
         }
+    };
+    while(got < total) {
+        // a session: open, read some passes, end (no stop call, no drain: what is not read stays)
+        auto rtt = Rtt::open(bus, Target::base, 2);
+        CHECK(rtt.has_value(), "the block opens");
+        if(!rtt) { break; }   // not a throw: the writer is joined below
+        ++sessions;
+        readSession(*rtt);
     }
     writer.join();
     CHECK(wrong == 0, "every byte in order, none twice, none missing");
@@ -290,11 +303,11 @@ void reinitInsideAnAccess() {
             for(std::size_t i = 0; i != old.size(); ++i) { old[i] = static_cast<std::uint8_t>(i); }
             target.produce(old);
             auto epochAt = withEpoch ? std::optional<std::uint32_t>{Target::epoch} : std::nullopt;
-            auto rtt     = Rtt::open(bus, Target::base, 2, epochAt);
+            Rtt  rtt     = openedRtt(bus, epochAt);
             std::vector<std::uint8_t>                 seen;
             std::array<std::byte, 20>                 chunk{};
             std::array<std::span<std::byte>, 1> const first{std::span{chunk}};
-            for(auto const b : rtt->readAll(bus, first)[0]) {
+            for(auto const b : rtt.readAll(bus, first)[0]) {
                 seen.push_back(std::to_integer<std::uint8_t>(b));
             }
             // the next access: the boot happens at `step` of it, and logs 30 bytes 0x80..
@@ -310,11 +323,11 @@ void reinitInsideAnAccess() {
             std::array<std::byte, 40>                 big{};
             std::array<std::span<std::byte>, 1> const outs{std::span{big}};
             auto const readOnce = [&](Rtt& r) { return r.readAll(bus, outs)[0]; };
-            for(auto const b : readOnce(*rtt)) { seen.push_back(std::to_integer<std::uint8_t>(b)); }
+            for(auto const b : readOnce(rtt)) { seen.push_back(std::to_integer<std::uint8_t>(b)); }
             // a new session, as the reader starts one
-            auto next = Rtt::open(bus, Target::base, 2, epochAt);
+            Rtt next = openedRtt(bus, epochAt);
             for(int pass = 0; pass != 4; ++pass) {
-                for(auto const b : readOnce(*next)) {
+                for(auto const b : readOnce(next)) {
                     seen.push_back(std::to_integer<std::uint8_t>(b));
                 }
             }
@@ -325,7 +338,7 @@ void reinitInsideAnAccess() {
             for(std::size_t v = 0; v != 60; ++v) { oldTwice += count[v] > 1 ? 1U : 0U; }
             for(std::size_t v = 0x80; v != 0x80 + 30; ++v) { newOnce += count[v] == 1 ? 1U : 0U; }
             if(withEpoch) {
-                CHECK(rtt->reinitSeen(), "the re-init is seen");
+                CHECK(rtt.reinitSeen(), "the re-init is seen");
                 CHECK(oldTwice == 0, "with the epoch: no old byte twice");
                 CHECK(newOnce == 30, "with the epoch: every new byte exactly once");
                 if(oldTwice != 0 || newOnce != 30) {
@@ -368,12 +381,12 @@ void logsInTheWindow() {
         }
         // the old boot's bytes, read up to oldRead (fed in pieces the ring can hold)
         auto const                epochAt = std::optional<std::uint32_t>{Target::epoch};
-        auto                      rtt     = Rtt::open(bus, Target::base, 2, epochAt);
+        Rtt                       rtt     = openedRtt(bus, epochAt);
         std::array<std::byte, 96> chunk{};
         std::array<std::span<std::byte>, 1> const outs{std::span{chunk}};
         if(c.oldRead != 0) {
             target.produce(std::span{old}.first(c.oldRead));
-            static_cast<void>(uc_log::test::need(rtt, "the session opens").readAll(bus, outs));
+            static_cast<void>(rtt.readAll(bus, outs));
         }
         target.produce(std::span{old}.subspan(c.oldRead));
         std::uint32_t taken   = 0;
@@ -399,17 +412,13 @@ void logsInTheWindow() {
             log(c.freshBefore);
         };
         bus.afterReadOffset = [&] { log(c.inWindow); };
-        static_cast<void>(uc_log::test::need(rtt, "the session opens").readAll(bus, outs));
-        CHECK(uc_log::test::need(rtt, "the session opens").reinitSeen(),
-              "window: the re-init is seen");
-        CHECK(uc_log::test::need(rtt, "the session opens").landed().has_value(),
-              "window: the landed read offset is seen");
-        auto                      next = Rtt::open(bus, Target::base, 2, epochAt);
+        static_cast<void>(rtt.readAll(bus, outs));
+        CHECK(rtt.reinitSeen(), "window: the re-init is seen");
+        CHECK(rtt.landed().has_value(), "window: the landed read offset is seen");
+        Rtt                       next = openedRtt(bus, epochAt);
         std::vector<std::uint8_t> seen;
         for(int pass = 0; pass != 6; ++pass) {
-            for(auto const b :
-                uc_log::test::need(next, "the next session opens").readAll(bus, outs)[0])
-            {
+            for(auto const b : next.readAll(bus, outs)[0]) {
                 seen.push_back(std::to_integer<std::uint8_t>(b));
             }
         }
@@ -536,16 +545,16 @@ void reinitBetweenPasses() {
         for(std::size_t i = 0; i != old.size(); ++i) { old[i] = static_cast<std::uint8_t>(i); }
         target.produce(old);
         auto const                epochAt = std::optional<std::uint32_t>{Target::epoch};
-        auto                      rtt     = Rtt::open(bus, Target::base, 2, epochAt);
+        Rtt                       rtt     = openedRtt(bus, epochAt);
         std::array<std::byte, 20> small{};
         std::array<std::byte, 40> big{};
         std::array<std::span<std::byte>, 1> const first{std::span{small}};
         std::array<std::span<std::byte>, 1> const outs{std::span{big}};
         std::vector<std::uint8_t>                 seen;
-        for(auto const b : rtt->readAll(bus, first)[0]) {
+        for(auto const b : rtt.readAll(bus, first)[0]) {
             seen.push_back(std::to_integer<std::uint8_t>(b));
         }
-        CHECK(seen.size() == 20 && !rtt->reinitSeen(), "the old boot's first 20 bytes");
+        CHECK(seen.size() == 20 && !rtt.reinitSeen(), "the old boot's first 20 bytes");
         // the boot, between the passes: the epoch odd (preMemoryInit), the block (.data), the epoch even, its lines
         target.reinit();
         std::vector<std::uint8_t> lines(fresh);
@@ -553,17 +562,15 @@ void reinitBetweenPasses() {
             lines[i] = static_cast<std::uint8_t>(0x80 + i);
         }
         target.produce(lines);
-        CHECK(rtt->readAll(bus, outs)[0].empty(),
+        CHECK(rtt.readAll(bus, outs)[0].empty(),
               "no byte of the new boot comes out of the old session");
-        CHECK(rtt->reinitSeen() == (fresh != 0),
+        CHECK(rtt.reinitSeen() == (fresh != 0),
               "the boot is seen by the pass that read its bytes, by none before");
         CHECK(target.get(Target::upRead) == 0,
               "the read offset is back at the new block's first byte");
-        auto next = Rtt::open(bus, Target::base, 2, epochAt);
+        Rtt next = openedRtt(bus, epochAt);
         for(int pass = 0; pass != 4; ++pass) {
-            for(auto const b :
-                uc_log::test::need(next, "the next session opens").readAll(bus, outs)[0])
-            {
+            for(auto const b : next.readAll(bus, outs)[0]) {
                 seen.push_back(std::to_integer<std::uint8_t>(b));
             }
         }
@@ -575,7 +582,7 @@ void reinitBetweenPasses() {
         for(std::size_t v = 0x80; v != 0x80 + fresh; ++v) { newOnce += count[v] == 1 ? 1U : 0U; }
         CHECK(oldTwice == 0, "between passes: no old byte twice");
         CHECK(newOnce == fresh, "between passes: every new byte exactly once");
-        CHECK(!next->reinitSeen(), "the next session reads the new boot as its own");
+        CHECK(!next.reinitSeen(), "the next session reads the new boot as its own");
     }
 }
 
@@ -697,12 +704,14 @@ void controlBlockLayout() {
 // Every place the ring's end can fall: each start offset of the 97-byte ring x each record length 1..96 x read chunks
 // of 1, 7, 40, 96 and 97 bytes x both caps x two writer habits (fill the ring, then read it in passes; one record a
 // pass). Deterministic, one thread: the bytes of every record the target took arrive once, in order, the read offset
-// ends where the reads did, and a ring the printer emptied always takes the next record.
-void wrapSweep() {
+// ends where the reads did, and a ring the printer emptied always takes the next record. Start offsets
+// [firstStart, endStart): the sweep runs as four cases (wrapSweep0..3) side by side under "ctest -j".
+void wrapSweepStarts(std::uint32_t const firstStart,
+                     std::uint32_t const endStart) {
     constexpr std::array<std::size_t, 5> chunks{1, 7, 40, 96, 97};
     std::size_t                          cases = 0;
     std::size_t                          bad   = 0;
-    for(std::uint32_t start = 0; start != Target::upSize; ++start) {
+    for(std::uint32_t start = firstStart; start != endStart; ++start) {
         for(std::uint32_t len = 1; len != Target::upSize; ++len) {
             for(auto const chunkSize : chunks) {
                 for(auto const cap : {Rtt::Cap::halfWhenShared, Rtt::Cap::none}) {
@@ -711,11 +720,7 @@ void wrapSweep() {
                         SimTransport bus{target};
                         target.put(Target::upWrite, start);
                         target.put(Target::upRead, start);
-                        auto rtt = Rtt::open(bus, Target::base, 2);
-                        if(!rtt) {
-                            ++bad;
-                            continue;
-                        }
+                        Rtt rtt = openedRtt(bus);
                         // records whose bytes count on from 0; 3 ring laps of them
                         std::uint32_t const    total = 3 * Target::upSize;
                         std::uint32_t          next  = 0;
@@ -740,7 +745,7 @@ void wrapSweep() {
                         };
                         auto const readPass = [&]() {
                             std::array<std::span<std::byte>, 1> const outs{std::span{chunk}};
-                            auto const data = rtt->readAll(bus, outs, cap)[0];
+                            auto const data = rtt.readAll(bus, outs, cap)[0];
                             for(auto const b : data) {
                                 if(std::to_integer<std::uint8_t>(b)
                                    != static_cast<std::uint8_t>(got))
@@ -789,8 +794,16 @@ void wrapSweep() {
         }
     }
     CHECK(bad == 0, "wrap sweep: every byte once, in order, the read offset where the reads ended");
-    std::printf("wrap sweep: %zu cases\n", cases);
+    std::printf("wrap sweep, start offsets %u..%u: %zu cases\n", firstStart, endStart - 1, cases);
 }
+
+void wrapSweep0() { wrapSweepStarts(0, 25); }
+
+void wrapSweep1() { wrapSweepStarts(25, 49); }
+
+void wrapSweep2() { wrapSweepStarts(49, 73); }
+
+void wrapSweep3() { wrapSweepStarts(73, Target::upSize); }
 }   // namespace
 
 int main(int    argc,
@@ -800,7 +813,10 @@ int main(int    argc,
     return uc_log::test::run(argc,
                              argv,
                              {
-                               {           "wrapSweep",            wrapSweep},
+                               {          "wrapSweep0",           wrapSweep0},
+                               {          "wrapSweep1",           wrapSweep1},
+                               {          "wrapSweep2",           wrapSweep2},
+                               {          "wrapSweep3",           wrapSweep3},
                                {  "controlBlockLayout",   controlBlockLayout},
                                {"reinitInsideAnAccess", reinitInsideAnAccess},
                                { "reinitBetweenPasses",  reinitBetweenPasses},

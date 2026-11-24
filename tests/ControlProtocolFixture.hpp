@@ -347,59 +347,64 @@ inline std::string transcript() {
     return out;
 }
 
+// one subscription's line of streams(). A function of its own: `refused`, an optional made anew for each subscription
+// inside a loop, left bugprone-unchecked-optional-access without a verdict (its analysis spent its whole budget on the
+// function, in every unit including this header, and checked nothing)
+inline std::string streamLine(Subscription const&            s,
+                              std::vector<ctl::Event> const& events) {
+    auto const  parsed    = ctl::parseRequest(s.request);
+    auto const* request   = std::get_if<ctl::Request>(&parsed);
+    auto const* subscribe = request != nullptr ? std::get_if<ctl::Subscribe>(request) : nullptr;
+    auto const  refused   = subscribe != nullptr ? ctl::subscribeError(*subscribe) : std::nullopt;
+    std::string lines;
+    if(subscribe != nullptr && !refused && (subscribe->sinceSeq || subscribe->last)) {
+        // what a server holding these events sends: ControlHistory's read and a BacklogEnd
+        printer::ControlHistory history;
+        for(auto const& e : events) {
+            if(auto const* line = std::get_if<ctl::LogLine>(&e)) {
+                auto copy = *line;
+                history.append(copy);
+            }
+        }
+        auto chunk = history.read(*subscribe, history.start(*subscribe), SIZE_MAX);
+        chunk.text += ctl::toLine(ctl::Event{
+          ctl::BacklogEnd{.nextSeq = chunk.next, .lost = chunk.lost}
+        });
+        for(std::string_view rest = chunk.text; !rest.empty();) {
+            auto const end = rest.find('\n');
+            if(!lines.empty()) { lines += ','; }
+            lines += rest.substr(0, end);
+            rest.remove_prefix(end + 1);
+        }
+    } else if(subscribe != nullptr && !refused) {
+        for(auto const& e : events) {
+            bool const delivered
+              = std::visit([&](auto const& value) { return ctl::delivers(*subscribe, value); }, e);
+            if(!delivered) { continue; }
+            if(!lines.empty()) { lines += ','; }
+            lines += chomp(ctl::toLine(e));
+        }
+    }
+    std::string answer;
+    if(subscribe == nullptr) {
+        answer = chomp(ctl::toLine(ctl::Answer{std::get<ctl::Error>(parsed)}));
+    } else if(refused) {
+        answer = chomp(ctl::toLine(ctl::Answer{ctl::Error{.error = *refused}}));
+    } else {
+        answer = chomp(ctl::toLine(ctl::Answer{ctl::SubscribeAnswer{}}));
+    }
+    return fmt::format(R"({{"name":{},"request":{},"answer":{},"events":[{}]}})",
+                       jsonString(s.name),
+                       jsonString(s.request),
+                       answer,
+                       lines)
+         + "\n";
+}
+
 inline std::string streams() {
     std::string out;
     auto const  events = streamEvents();
-    for(auto const& s : subscriptions()) {
-        auto const  parsed    = ctl::parseRequest(s.request);
-        auto const* request   = std::get_if<ctl::Request>(&parsed);
-        auto const* subscribe = request != nullptr ? std::get_if<ctl::Subscribe>(request) : nullptr;
-        auto const  refused = subscribe != nullptr ? ctl::subscribeError(*subscribe) : std::nullopt;
-        std::string lines;
-        if(subscribe != nullptr && !refused && (subscribe->sinceSeq || subscribe->last)) {
-            // what a server holding these events sends: ControlHistory's read and a BacklogEnd
-            printer::ControlHistory history;
-            for(auto const& e : events) {
-                if(auto const* line = std::get_if<ctl::LogLine>(&e)) {
-                    auto copy = *line;
-                    history.append(copy);
-                }
-            }
-            auto chunk = history.read(*subscribe, history.start(*subscribe), SIZE_MAX);
-            chunk.text += ctl::toLine(ctl::Event{
-              ctl::BacklogEnd{.nextSeq = chunk.next, .lost = chunk.lost}
-            });
-            for(std::string_view rest = chunk.text; !rest.empty();) {
-                auto const end = rest.find('\n');
-                if(!lines.empty()) { lines += ','; }
-                lines += rest.substr(0, end);
-                rest.remove_prefix(end + 1);
-            }
-        } else if(subscribe != nullptr && !refused) {
-            for(auto const& e : events) {
-                bool const delivered
-                  = std::visit([&](auto const& value) { return ctl::delivers(*subscribe, value); },
-                               e);
-                if(!delivered) { continue; }
-                if(!lines.empty()) { lines += ','; }
-                lines += chomp(ctl::toLine(e));
-            }
-        }
-        std::string answer;
-        if(subscribe == nullptr) {
-            answer = chomp(ctl::toLine(ctl::Answer{std::get<ctl::Error>(parsed)}));
-        } else if(refused) {
-            answer = chomp(ctl::toLine(ctl::Answer{ctl::Error{.error = *refused}}));
-        } else {
-            answer = chomp(ctl::toLine(ctl::Answer{ctl::SubscribeAnswer{}}));
-        }
-        out += fmt::format(R"({{"name":{},"request":{},"answer":{},"events":[{}]}})",
-                           jsonString(s.name),
-                           jsonString(s.request),
-                           answer,
-                           lines)
-             + "\n";
-    }
+    for(auto const& s : subscriptions()) { out += streamLine(s, events); }
     return out;
 }
 

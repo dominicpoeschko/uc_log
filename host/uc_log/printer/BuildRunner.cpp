@@ -288,26 +288,30 @@ void BuildRunner::execute() {
 
                 int  processExitCode = 1;
                 bool completed       = false;
+                // the wait's end ends the loop through this flag, never through the member `thread`: a quick build
+                // ends while execute() is still move-assigning this jthread into it (a data race), and a stop
+                // requested on the old jthread there is lost - the loop would run until a cancel
+                bool waitEnded = false;
 
-                buildProcess.async_wait(
-                  [this, &processExitCode, &completed](boost::system::error_code errorCode,
-                                                       int                       exitCode) {
-                      processExitCode = exitCode;
-                      if(errorCode) {
-                          addOutput(fmt::format("❌ Process error: {}", errorCode.message()),
-                                    false,
-                                    true);
-                      } else {
-                          completed = true;
-                          addOutput(fmt::format("🏁 Build {} (exit code: {})",
-                                                exitCode == 0 ? "succeeded" : "failed",
-                                                exitCode),
-                                    false,
-                                    exitCode != 0);
-                      }
-                      thread.request_stop();
-                  });
-                while(!stoken.stop_requested()) {
+                buildProcess.async_wait([this, &processExitCode, &completed, &waitEnded](
+                                          boost::system::error_code errorCode,
+                                          int                       exitCode) {
+                    waitEnded       = true;
+                    processExitCode = exitCode;
+                    if(errorCode) {
+                        addOutput(fmt::format("❌ Process error: {}", errorCode.message()),
+                                  false,
+                                  true);
+                    } else {
+                        completed = true;
+                        addOutput(fmt::format("🏁 Build {} (exit code: {})",
+                                              exitCode == 0 ? "succeeded" : "failed",
+                                              exitCode),
+                                  false,
+                                  exitCode != 0);
+                    }
+                });
+                while(!waitEnded && !stoken.stop_requested()) {
                     process->ioContext->run_one_for(std::chrono::milliseconds{100});
                 }
                 if(!completed && buildProcess.running()) {

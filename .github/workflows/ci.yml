@@ -28,6 +28,9 @@ jobs:
                 # LTO: faster, and gcc's warnings come at compile time. No stdlib_debug with gcc's sanitizers: libstdc++'s
                 # checked iterators take a global mutex, and the window's monkey test ran 25 times slower under TSan and
                 # timed out under ASan + UBSan. The clang entries keep libc++'s checked mode.
+                # The sanitizer entries build at -O1 with -g1 (line tables: a report keeps its file:line): a gcc ASan +
+                # UBSan test TU compiled 35% faster at -O1 than at -O3 and 19% faster with -g1 than -ggdb; -O3 stays
+                # with the ship and plain entries.
                 compiler:
                     - {cc: gcc, cxx: g++, ship: true}
                     - {cc: gcc, cxx: g++, sanitizer: address}
@@ -42,13 +45,29 @@ jobs:
               # (the libc++ jobs skip it, there is no 32-bit libc++ package)
               run: |
                 sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
-                pacman -Syu --noconfirm
-                pacman -S --noconfirm git cmake base-devel python lib32-glibc lib32-gcc-libs ${{ matrix.compiler.cc == 'clang' && 'clang llvm' || '' }} ${{ matrix.compiler.stdlib == 'libc++' && 'libc++ lld' || '' }}
+                pacman -Syu --noconfirm --disable-download-timeout
+                pacman -S --noconfirm --disable-download-timeout git cmake base-devel python ccache lib32-glibc lib32-gcc-libs ${{ matrix.compiler.cc == 'clang' && 'clang llvm' || '' }} ${{ matrix.compiler.stdlib == 'libc++' && 'libc++ lld' || '' }}
 
             - name: Checkout repository
               uses: actions/checkout@v7
               with:
                 submodules: recursive
+
+            # ccache, one cache per matrix entry: the fetched dependencies and the TUs a push did not touch compile
+            # once. Restored and saved apart, so a red job still keeps what it compiled. The tree's paths are the same
+            # in every run (the container's workspace), which is what ccache's hashes of -g builds need.
+            - name: ccache - restore
+              uses: actions/cache/restore@v6
+              with:
+                path: .ccache
+                key: ccache-${{ matrix.compiler.cc }}-${{ matrix.compiler.ship && 'ship' || matrix.compiler.sanitizer }}-${{ github.sha }}
+                restore-keys: ccache-${{ matrix.compiler.cc }}-${{ matrix.compiler.ship && 'ship' || matrix.compiler.sanitizer }}-
+
+            - name: ccache - settings
+              run: |
+                ccache --set-config=cache_dir="$GITHUB_WORKSPACE/.ccache"
+                ccache --set-config=max_size=1500M
+                ccache --zero-stats
 
             # no SEGGER JLink DLL in CI: the in-process fake stands in, dependencies are
             # fetched (the container has no boost/fmt/rtxui)
@@ -62,8 +81,10 @@ jobs:
                 -DUSE_WARNINGS_AS_ERRORS=ON
                 -DCMAKE_BUILD_TYPE=Release
                 -DUSE_NATIVE_FLAG=OFF
-                ${{ !matrix.compiler.ship && '-DUSE_NDEBUG=OFF -DUSE_LTO=OFF -DCMAKE_CXX_FLAGS_RELEASE=-O3' || '' }}
-                ${{ matrix.compiler.sanitizer && format('-DUSE_SANITIZER={0}', matrix.compiler.sanitizer) || '' }}
+                -DCMAKE_C_COMPILER_LAUNCHER=ccache
+                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+                ${{ !matrix.compiler.ship && format('-DUSE_NDEBUG=OFF -DUSE_LTO=OFF -DCMAKE_CXX_FLAGS_RELEASE={0}', matrix.compiler.sanitizer && '-O1' || '-O3') || '' }}
+                ${{ matrix.compiler.sanitizer && format('-DUSE_SANITIZER={0} -DUSE_OPTIMIZE_LEVEL=1 -DUSE_SANITIZER_DEBUG_LEVEL=1', matrix.compiler.sanitizer) || '' }}
                 ${{ matrix.compiler.stdlib && format('-DUSE_STD_LIB={0}', matrix.compiler.stdlib) || '' }}
                 ${{ matrix.compiler.stdlib_debug && '-DUSE_STDLIB_DEBUG=true' || '' }}
               env:
@@ -73,17 +94,68 @@ jobs:
             - name: Build project
               run: cmake --build build -j"$(nproc)"
 
-            # in parallel, as `just test` runs them: the TCP tests pick their ports by pid, the must-fail builds share a
-            # RESOURCE_LOCK (tests/CMakeLists.txt)
-            - name: Run tests
-              run: cd build && ctest --output-on-failure -j"$(nproc)"
+            - name: ccache - statistics
+              if: ${{ !cancelled() }}
+              run: ccache --show-stats
 
-            # clang-tidy (Kvasir_SDK master's tools/tidy.py and .clang-tidy, .github/actions/tidy) over this tree:
-            # this repository's findings (rtt, remote_fmt and string_constant included) fail, the SDK's are foreign
+            - name: ccache - save
+              if: ${{ !cancelled() }}
+              uses: actions/cache/save@v6
+              with:
+                path: .ccache
+                key: ccache-${{ matrix.compiler.cc }}-${{ matrix.compiler.ship && 'ship' || matrix.compiler.sanitizer }}-${{ github.sha }}
+
+            # in parallel, as `just test` runs them: the TCP tests pick their ports by pid, the must-fail builds share a
+            # RESOURCE_LOCK (tests/CMakeLists.txt). Those builds (label compile_check, 32 of them, 80-130 s one after
+            # the other) run in the ship entries only: a sanitizer changes no compile error.
+            - name: Run tests
+              run: cd build && ctest --output-on-failure -j"$(nproc)" ${{ matrix.compiler.sanitizer && '-LE compile_check' || '' }}
+
+    # clang-tidy (Kvasir_SDK master's tools/tidy.py and .clang-tidy, .github/actions/tidy) over the clang ship
+    # configuration, in three jobs of a third of the units each, beside the builds: a configured Ninja tree is all the
+    # runner needs (it builds the generated headers the selected units include, nothing else) - as package-conformance's
+    # tidy jobs. No cache-id: each shard has its own key and one tree. This repository's findings (rtt, remote_fmt and
+    # string_constant included) fail, the SDK's are foreign.
+    tidy:
+        runs-on: ubuntu-latest
+        container:
+            image: archlinux:latest
+        strategy:
+            fail-fast: false
+            matrix:
+                shard: [1, 2, 3]
+
+        steps:
+            - name: Set up C++ environment
+              # the build job's clang ship packages (multilib: the -m32 loss ledger test, as there), and ninja
+              run: |
+                sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
+                pacman -Syu --noconfirm --disable-download-timeout
+                pacman -S --noconfirm --disable-download-timeout git cmake ninja base-devel python lib32-glibc lib32-gcc-libs clang llvm
+
+            - name: Checkout repository
+              uses: actions/checkout@v7
+              with:
+                submodules: recursive
+
+            - name: Configure CMake
+              run: >
+                cmake -S . -B build -G Ninja
+                -DUC_LOG_BUILD_TESTS=ON
+                -DUC_LOG_BUILD_TEST_GUI=ON
+                -DJLINK_USE_FAKE_DLL=ON
+                -DUSE_FORCE_FETCH=ON
+                -DUSE_WARNINGS_AS_ERRORS=ON
+                -DCMAKE_BUILD_TYPE=Release
+                -DUSE_NATIVE_FLAG=OFF
+              env:
+                CC: clang
+                CXX: clang++
+
             - name: clang-tidy
-              if: matrix.compiler.cc == 'clang' && !matrix.compiler.sanitizer
               uses: kvasir-io/Kvasir_SDK/.github/actions/tidy@master
               timeout-minutes: 30
               with:
                 trees: build
                 nested: 'true'
+                shard: ${{ matrix.shard }}/3

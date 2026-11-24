@@ -12,6 +12,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -28,8 +29,8 @@ struct ProgramArgs {
 
     /// The number given for `name` (the last, if it was given twice); nullopt: not given.
     [[nodiscard]] std::optional<std::uint64_t> number(std::string_view name) const {
-        for(auto it = numbers.rbegin(); it != numbers.rend(); ++it) {
-            if(it->first == name) { return it->second; }
+        for(auto const& [given, value] : numbers | std::views::reverse) {
+            if(given == name) { return value; }
         }
         return std::nullopt;
     }
