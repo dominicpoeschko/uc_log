@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.28)
 
 cmake_policy(SET CMP0174 NEW)
 
+# No target here uses C++ modules: no scanning, for the targets that do not take cmake_helpers' flags as well (jlink's
+# fake DLL, the -m32 tests, the subdirectories' own). A scanned target's compile command names `@<object>.modmap`, a
+# file only a build writes (clang-tidy cannot check it in a configured, unbuilt tree), and CMake 4.5 builds an `import
+# std` module for it - libstdc++'s even in a libc++ tree.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
 set(uc_log_dir
     ${CMAKE_CURRENT_LIST_DIR}
     CACHE INTERNAL "")
