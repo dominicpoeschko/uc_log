@@ -3,8 +3,8 @@
 // hooks that count what the window asked for, the screen's text, and clicks and mouse reports on that text. Text
 // checks only; the cost is counted (rows formatted), never timed; no clock is read - RTXUI's TimelineScreen, whose
 // clock moves only when told (Screen below; HeadlessScreen waits out a button's hover transition on the real clock).
+#include "support/Check.hpp"
 #include "uc_log/printer/EntryStore.hpp"
-#include "uc_log/printer/Environment.hpp"
 #include "uc_log/printer/LogEntry.hpp"
 #include "uc_log/printer/LogFilterState.hpp"
 #include "uc_log/printer/StatusBadges.hpp"
@@ -180,12 +180,10 @@ struct Window {
         app->show(statusBadges(facts));
     }
 
-    // UC_LOG_TEST_SCREEN=1: every screen a check reads, printed (what a failing check saw)
+    // the test's --screens: every screen a check reads, printed (what a failing check saw)
     [[nodiscard]] std::string text() const {
         auto t = screen->text();
-        if(uc_log::printer::environment("UC_LOG_TEST_SCREEN") != nullptr) {
-            std::printf("----\n%s\n", t.c_str());
-        }
+        if(uc_log::test::printScreens) { std::printf("----\n%s\n", t.c_str()); }
         return t;
     }
 };

@@ -9,6 +9,7 @@
 #include "uc_log/printer/TargetHealth.hpp"
 
 #include <boost/asio/ip/address.hpp>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -24,26 +25,31 @@ namespace uc_log::printer {
 
 // What the command line says.
 struct PrinterOptions {
-    std::uint32_t                                          speed{};
-    std::string                                            device;
-    std::string                                            mapFile;
-    std::string                                            hexFile;
-    std::string                                            stringConstantsFile;
-    std::string                                            host;
-    std::string                                            probe;
-    std::string                                            logDir;
-    std::string                                            buildCommand;
-    std::string                                            bindAddressString;
-    boost::asio::ip::address                               bindAddress;
-    std::uint16_t                                          controlPort{};
-    std::uint16_t                                          duplexBasePort{};
-    std::string                                            controlSocket;
-    bool                                                   unixTransport{true};
-    bool                                                   disableUi{false};
-    bool                                                   ramImage{false};
-    std::vector<JLink::MemoryWrite>                        preResetCommands;
-    std::optional<printer::ParkSignature>                  parkSignature;
-    std::optional<printer::StallSignature>                 stallSignature;
+    std::uint32_t                          speed{};
+    std::string                            device;
+    std::string                            mapFile;
+    std::string                            hexFile;
+    std::string                            stringConstantsFile;
+    std::string                            host;
+    std::string                            probe;
+    std::string                            jlinkScriptFile;   // empty: none
+    std::string                            logDir;
+    std::string                            buildCommand;
+    std::string                            bindAddressString;
+    boost::asio::ip::address               bindAddress;
+    std::uint16_t                          controlPort{};
+    std::uint16_t                          duplexBasePort{};
+    std::string                            controlSocket;
+    bool                                   unixTransport{true};
+    bool                                   disableUi{false};
+    bool                                   ramImage{false};
+    bool                                   rttViaDll{false};
+    int                                    stallFirstStep{1};
+    std::chrono::microseconds              uiFrameInterval{};   // zero: the window's own pace
+    bool                                   uiStats{false};
+    std::vector<JLink::MemoryWrite>        preResetCommands;
+    std::optional<printer::ParkSignature>  parkSignature;
+    std::optional<printer::StallSignature> stallSignature;
     std::vector<printer::StallSignature::Condition>        flashReady;
     std::optional<std::pair<std::uint32_t, std::uint32_t>> flashWindow;
     std::uint32_t                                          flashUncachedOffset{};

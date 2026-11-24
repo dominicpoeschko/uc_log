@@ -275,7 +275,7 @@ records/s, each rate repeated) without a dropped record; near the edge single ru
 | | 16 KiB thread ring: lossless up to / saturated | 4 KiB ISR ring: lossless up to / saturated |
 |---|---|---|
 | the printer's own RTT reader (default) | ~430 KB/s / ~590 KB/s | ~275 KB/s (at ~340 KB/s 0.1-1.9 % lost) / ~400-450 KB/s |
-| the J-Link DLL's RTT (`UC_LOG_RTT_VIA_DLL=1`) | ~540 KB/s / ~665 KB/s | ~580 KB/s / ~650 KB/s |
+| the J-Link DLL's RTT (`--rtt_via_dll`) | ~540 KB/s / ~665 KB/s | ~580 KB/s / ~650 KB/s |
 
 The raw probe reads ~710 KB/s. A small ring suffers most with the default reader (4 KiB bridge ~6 ms at that rate,
 about one pass): give an interrupt that logs hard a bigger ring.
@@ -285,11 +285,11 @@ past bytes the printer holds: a stop, a reset or a flash leaves every unread byt
 and a reset nobody announced is fenced by the image's RTT epoch, so no line arrives twice. Its memory reads are
 synchronous (read over SWD, then ship over USB), which costs ~10 % of throughput against the DLL.
 
-**`UC_LOG_RTT_VIA_DLL=1`** in the printer's environment reads RTT through the J-Link DLL's own RTT, which polls from the
-probe: the probe's full throughput, for measurements of very high log rates. Its known weaknesses: when a session ends
-(the printer stops, resets or flashes the target) the DLL drops what it had read from the target and not yet handed
-over, without a message; and after a reset nobody announced it can read part of the old ring a second time. Use it
-for throughput, not where every line counts.
+**`--rtt_via_dll`** (keyword `RTT_VIA_DLL`; a Kvasir tree: `-DUC_LOG_RTT_VIA_DLL=ON`) reads RTT through the J-Link DLL's
+own RTT, which polls from the probe: the probe's full throughput, for measurements of very high log rates. Its known
+weaknesses: when a session ends (the printer stops, resets or flashes the target) the DLL drops what it had read from
+the target and not yet handed over, without a message; and after a reset nobody announced it can read part of the old
+ring a second time. Use it for throughput, not where every line counts.
 
 ## Reboots, the RTT epoch and boots nobody read
 
@@ -316,6 +316,8 @@ package can set:
 | `--flash_window` | `<base>,<size>`: the address range those reads are gated in |
 | `--park_signature`, `--stall_signature` | register words of a chip parked or stalled in its boot ROM, and the writes that undo a stall; the printer recovers such a chip by itself |
 | `--pre_reset_command`, `--flash_uncached_offset` | J-Link commands before a reset; the uncached alias of the flash for the firmware check |
+| `--jlink_script_file` | a J-Link script the DLL runs at every connect, the first and every reconnect (e.g. one whose `InitTarget()` opens a chip locked by a debug key); keyword `JLINK_SCRIPT_FILE` |
+| `--rtt_via_dll`, `--stall_first_step` | RTT through the DLL ("RTT throughput, ring sizes"); a test switch that starts the stall recovery ladder at step 2 or 3; keywords `RTT_VIA_DLL`, `STALL_FIRST_STEP` |
 
 ## The printer's control socket
 

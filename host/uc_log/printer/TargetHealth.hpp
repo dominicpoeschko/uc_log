@@ -168,7 +168,7 @@ public:
 private:
     // a series over 0.5 s, a read each 50 ms: few probe accesses while a boot ROM may run (fast SSI polling can wedge
     // the RP2040's ROM). The words read have no read side
-    // effects (RP2040 SSI CTRLR0/SSIENR RW, TXFLR/RXFLR/SR RO: datasheet 4.10.13, Tables 582-593; RP2350 QMI DIRECT_CSR)
+    // effects (RP2040 SSI CTRLR0/SSIENR RW, TXFLR/RXFLR/SR RO: datasheet 4.10.13, Tables 603-614; RP2350 QMI DIRECT_CSR)
     static constexpr int  seriesReads = 10;
     static constexpr auto seriesGap   = std::chrono::milliseconds{50};
 

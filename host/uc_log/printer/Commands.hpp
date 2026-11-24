@@ -64,6 +64,9 @@ enum class Command : std::uint8_t {
     toggleLocation,
     toggleModule,
     toggleFunction,
+    // the message's markers
+    toggleRawMetrics,
+    toggleTypenames,
     // the target and the printer
     clearMessages,
     reset,
@@ -130,6 +133,8 @@ inline constexpr std::array commandTable{
   CommandInfo{  Command::toggleLocation,                             "column: location",        "L", U'L',  true},
   CommandInfo{    Command::toggleModule,                               "column: module",        "m", U'm',  true},
   CommandInfo{  Command::toggleFunction,                             "column: function",        "p", U'p',  true},
+  CommandInfo{Command::toggleRawMetrics,              "show: metric markers as written",         "",    0,  true},
+  CommandInfo{ Command::toggleTypenames,                              "show: typenames",         "",    0,  true},
   CommandInfo{   Command::clearMessages,          "clear the messages and their counts",         "",    0,  true},
   CommandInfo{           Command::reset,                             "reset the target",        "r", U'r',  true},
   CommandInfo{           Command::flash,                             "flash the target",        "f", U'f',  true},

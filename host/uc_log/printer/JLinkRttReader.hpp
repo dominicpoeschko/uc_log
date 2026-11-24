@@ -52,10 +52,11 @@ using RamImageStartResult = std::expected<JLink::RamImageStart, std::string>;
 
 /// The probe and the target the reader connects to; host and probe change later through setConnection.
 struct ReaderConnection {
-    std::string   host{};     // a network J-Link; empty: USB
-    std::string   device{};   // the J-Link device name
-    std::uint32_t speed{};    // SWD, kHz
-    std::string   probe{};    // by serial number or nickname; empty: the only one on USB
+    std::string   host{};         // a network J-Link; empty: USB
+    std::string   device{};       // the J-Link device name
+    std::uint32_t speed{};        // SWD, kHz
+    std::string   probe{};        // by serial number or nickname; empty: the only one on USB
+    std::string   scriptFile{};   // run at every connect (--jlink_script_file); empty: none
 };
 
 /// Where the reader's findings go (jlinkPrinter: the MessageLog and the merge queue; a test: its collector).
@@ -107,7 +108,7 @@ struct ReaderOptions {
     /// a stall the chip package can tell and undo (printer/TargetHealth.hpp); nullopt: none
     std::optional<printer::StallSignature> stall{};
     int                                    stallFirstStep{
-      1};   // a stall starts the recovery ladder there (a test switch: UC_LOG_STALL_FIRST_STEP)
+      1};   // a stall starts the recovery ladder there (a test switch: --stall_first_step)
     std::optional<printer::ParkSignature>
       park{};   // printer/TargetHealth.hpp; nullopt: a chip that does not park
     /// the register words that hold while the target's flash is mapped (its boot stage has set XIP up): the firmware
@@ -340,7 +341,8 @@ private:
     std::string   host;   // connectionMutex's pendingConnection replaces it on the reader thread
     std::string   device;
     std::uint32_t speed;
-    std::string   probe;   // as host
+    std::string   probe;        // as host
+    std::string   scriptFile;   // ReaderConnection's, for every connection
 
     uc_log::printer::ReaderSink          sink_;
     uc_log::printer::ImageSource const   imageSource;

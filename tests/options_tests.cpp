@@ -4,7 +4,11 @@
 
 #include "support/Check.hpp"
 
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -74,7 +78,9 @@ void defaults() {
     CHECK(o->unixTransport && o->controlSocket == "auto" && o->controlPort == 34565
             && o->duplexBasePort == 34600 && o->controlHistoryMb == 128,
           "control socket defaults");
-    CHECK(!o->disableUi && !o->ramImage && o->host.empty() && !o->parkSignature && !o->flashWindow,
+    CHECK(!o->disableUi && !o->ramImage && o->host.empty() && !o->parkSignature && !o->flashWindow
+            && !o->rttViaDll && o->stallFirstStep == 1 && o->uiFrameInterval.count() == 0
+            && !o->uiStats,
           "the rest off");
 }
 
@@ -158,6 +164,48 @@ void offsetAndRefusals() {
     args.erase(args.begin(), args.begin() + 2);   // no --device
     CHECK(!parse(args), "a required option left out is refused");
 }
+
+// --jlink_script_file: off by default, a file there is taken as it is written, one that is not refuses the start (the
+// DLL would fail at every connect, the first and every reconnect)
+void jlinkScriptFile() {
+    auto const none = parse(printerArgs());
+    CHECK(none && none->jlinkScriptFile.empty(), "no script by default");
+    auto const path = std::filesystem::temp_directory_path()
+                    / ("uc_log_options_" + std::to_string(::getpid()) + ".JLinkScript");
+    std::ofstream{path} << "int InitTarget(void) { return 0; }\n";
+    auto args = printerArgs();
+    args.insert(args.end(), {"--jlink_script_file", path.string()});
+    auto const taken = parse(args);
+    CHECK(taken && taken->jlinkScriptFile == path.string(), "an existing script is taken");
+    std::filesystem::remove(path);
+    CHECK(!parse(args), "a script that is not there is refused");
+    args = printerArgs();
+    args.insert(args.end(), {"--jlink_script_file", ""});
+    auto const empty = parse(args);
+    CHECK(empty && empty->jlinkScriptFile.empty(), "an empty path is none");
+}
+
+// --rtt_via_dll, --stall_first_step, --ui_fps, --ui_stats: the printer's switches, options like every other (it reads
+// no environment for them)
+void switches() {
+    auto args = printerArgs();
+    args.insert(args.end(), {"--rtt_via_dll", "--stall_first_step", "3"});
+    auto const on = parse(args);
+    CHECK(on && on->rttViaDll && on->stallFirstStep == 3, "both switches taken");
+    for(auto const* step : {"0", "4"}) {
+        args = printerArgs();
+        args.insert(args.end(), {"--stall_first_step", step});
+        CHECK(!parse(args), "a step outside 1..3 is refused");
+    }
+    args = printerArgs();
+    args.insert(args.end(), {"--ui_fps", "50", "--ui_stats"});
+    auto const window = parse(args);
+    CHECK(window && window->uiFrameInterval == std::chrono::milliseconds{20} && window->uiStats,
+          "the window's pace as an interval, its report");
+    args = printerArgs();
+    args.insert(args.end(), {"--ui_fps", "1001"});
+    CHECK(!parse(args), "a pace above 1000 frames per second is refused");
+}
 }   // namespace
 
 int main(int    argc,
@@ -169,5 +217,7 @@ int main(int    argc,
                                {         "defaults",          defaults},
                                {        "malformed",         malformed},
                                {"offsetAndRefusals", offsetAndRefusals},
+                               {  "jlinkScriptFile",   jlinkScriptFile},
+                               {         "switches",          switches},
     });
 }

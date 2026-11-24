@@ -1,7 +1,6 @@
 #include "uc_log/printer/rtx/Gui.hpp"
 
 #include "uc_log/printer/EntryStore.hpp"
-#include "uc_log/printer/Environment.hpp"
 #include "uc_log/printer/FramePacer.hpp"
 #include "uc_log/printer/LogFormat.hpp"
 #include "uc_log/printer/PanelText.hpp"
@@ -14,7 +13,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -53,19 +51,14 @@ namespace {
 
 class Window {
 public:
-    explicit Window(PrinterModel& model UC_LOG_LIFETIMEBOUND)
+    Window(PrinterModel& model UC_LOG_LIFETIMEBOUND,
+           WindowOptions       options)
       : model_{model}
       , messages_{model.messages()}
-      , builds_{model.builds()} {
-        // UC_LOG_UI_FPS=<frames per second>: another pace (1..1000)
-        if(char const* const fps = environment("UC_LOG_UI_FPS")) {
-            std::string_view const text{fps};
-            unsigned               n{};
-            auto const* const      last = std::to_address(text.end());
-            auto const [end, ec]        = std::from_chars(std::to_address(text.begin()), last, n);
-            if(ec == std::errc{} && end == last && n > 0) {
-                pacer_.setInterval(std::chrono::microseconds{1'000'000 / std::min(n, 1000U)});
-            }
+      , builds_{model.builds()}
+      , stats_{options.stats} {
+        if(options.frameInterval != std::chrono::microseconds::zero()) {
+            pacer_.setInterval(options.frameInterval);
         }
         messages_.addObserver([this](MessageLog::Said const&) { requestFrame(); });
         store_.setRedrawRequest([this] { requestFrame(); });
@@ -89,6 +82,10 @@ public:
     void setCompiledFilter(uc_log::Detail::FilterTable const& table) { compiledFilter_ = table; }
 
     void setMapSource(Gui::MapSource source) { mapSource_ = std::move(source); }
+
+    void setStopRequest(std::function<bool()> stopRequested) {
+        stopRequested_ = std::move(stopRequested);
+    }
 
     /// A frame is wanted (any thread): at most one per pacer interval is drawn.
     void requestFrame() {
@@ -196,6 +193,11 @@ public:
         // RTXUI (0.1.4) lays a resized terminal out anew but sends no Resized event: the window asks the terminal. One
         // chain of it (started in the heartbeat, a new one each second piled up: t of them after t seconds)
         sizePoll_ = [this] {
+            // a stop signal quits as the quit key does: the loop ends, the terminal is restored, main ends the session
+            if(stopRequested_ && stopRequested_()) {
+                screen_->Exit();
+                return;
+            }
             checkSize();
             ::rtxui::PostDelayedTask(sizePoll_, std::chrono::milliseconds{200});
         };
@@ -204,7 +206,7 @@ public:
         auto const started    = FramePacer::Clock::now();
         auto const startedCpu = threadCpuSeconds();
         screen.Loop();
-        if(environment("UC_LOG_UI_STATS") != nullptr) {
+        if(stats_) {
             auto const secs
               = std::chrono::duration<double>(FramePacer::Clock::now() - started).count();
             auto const cpu    = threadCpuSeconds() - startedCpu;
@@ -251,13 +253,15 @@ private:
     TargetPort*           target_{nullptr};
     std::function<void()> heartbeat_;
     std::function<void()> sizePoll_;
+    std::function<bool()> stopRequested_;
     int                   columns_{0};   // the terminal's size as last told to the App
     int                   lines_{0};
     bool                  wasFlashing_{false};
     std::size_t           messageClears_{0};
     std::uint64_t         buildSeen_{std::numeric_limits<std::uint64_t>::max()};
     std::atomic<bool>     exporting_{false};
-    // UC_LOG_UI_STATS: what the window cost, said at the end
+    // --ui_stats: what the window cost, said at the end
+    bool                             stats_;
     std::size_t                      wakes_{0};
     std::size_t                      frames_{0};
     double                           frameSeconds_{0.0};
@@ -424,7 +428,10 @@ private:
     }
 };
 
-Gui::Gui(PrinterModel& model UC_LOG_LIFETIMEBOUND) : window_{std::make_unique<Window>(model)} {}
+Gui::Gui(PrinterModel& model UC_LOG_LIFETIMEBOUND,
+         WindowOptions       options)
+  : window_{std::make_unique<Window>(model,
+                                     options)} {}
 
 Gui::~Gui() = default;
 
@@ -438,6 +445,10 @@ void Gui::setCompiledFilter(uc_log::Detail::FilterTable const& table) {
 }
 
 void Gui::setMapSource(MapSource source) { window_->setMapSource(std::move(source)); }
+
+void Gui::setStopRequest(std::function<bool()> stopRequested) {
+    window_->setStopRequest(std::move(stopRequested));
+}
 
 void Gui::triggerRedraw() { window_->requestFrame(); }
 

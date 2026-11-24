@@ -157,6 +157,37 @@ inline void hostOffsetOutOfRange() {
     }
 }
 
+// --jlink_script_file (a chip locked by a debug key): the reader hands its connection's J-Link script to every connect,
+// the first and a reconnect - a debug key is gone after a reset line or a power cycle.
+inline void scriptFileReachesEveryConnect() {
+    std::string const           scriptPath = "/keys/target.JLinkScript";
+    Scenario                    s;
+    auto&                       shared = s.shared;
+    ReaderUnderTest             under{Setup{.scriptFile = scriptPath}};
+    [[maybe_unused]] Reader&    reader    = *under.reader;
+    [[maybe_unused]] Collected& collected = under.said;
+    CHECK(waitFor([&]() { return reader.sessionCount() >= 1; }, 3000ms), "a session runs first");
+    auto const script = [&]() {
+        std::scoped_lock<std::mutex> const lock{shared.mutex};
+        return shared.scriptFile;
+    };
+    CHECK(script() == scriptPath, "the first connect runs the script");
+    auto const built = shared.constructions.load();
+    {
+        std::scoped_lock<std::mutex> const lock{shared.mutex};
+        shared.connected = false;
+        shared.scriptFile.clear();
+    }
+    Clock::sleep_for(100ms);
+    {
+        std::scoped_lock<std::mutex> const lock{shared.mutex};
+        shared.connected = true;
+    }
+    CHECK(waitFor([&]() { return shared.constructions.load() >= built + 1; }, 5000ms),
+          "reconnected");
+    CHECK(script() == scriptPath, "a reconnect runs it again");
+}
+
 inline void lostConnectionReconnects() {
     Scenario                    s;
     auto&                       shared = s.shared;
@@ -529,6 +560,7 @@ inline constexpr std::array cases{
   uc_log::test::Case{               "overflowReported",                overflowReported},
   uc_log::test::Case{           "hostOffsetOutOfRange",            hostOffsetOutOfRange},
   uc_log::test::Case{       "lostConnectionReconnects",        lostConnectionReconnects},
+  uc_log::test::Case{  "scriptFileReachesEveryConnect",   scriptFileReachesEveryConnect},
   uc_log::test::Case{   "restartedCountersAreNotAWrap",    restartedCountersAreNotAWrap},
   uc_log::test::Case{           "stopDecodesHeldLines",            stopDecodesHeldLines},
   uc_log::test::Case{"directReaderStopsBetweenRecords", directReaderStopsBetweenRecords},

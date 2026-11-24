@@ -70,6 +70,7 @@ struct FakeTransport {
         std::uint32_t    failReadFrom{};
         std::uint32_t    failReadTo{};
         std::atomic<int> constructions{0};
+        std::string      scriptFile;   // the last connection's J-Link script, under mutex
         // the DLL lost the target (every access fails -1, as after the RP2040 stall recovery's watchdog reset): a new
         // connection sees it again - or, with deadAcrossConnects, only a reset through the reset line does
         std::atomic<bool> apDead{false};
@@ -202,6 +203,7 @@ struct FakeTransport {
         std::string   host{};
         std::uint16_t port{19020};
         std::string   probe{};
+        std::string   scriptFile{};
     };
 
     struct Probe {
@@ -221,9 +223,13 @@ struct FakeTransport {
              typename ErrorF>
     FakeTransport(std::string const&,
                   std::uint32_t,
-                  Connection const&,
+                  Connection const& connection,
                   MessageF&&,
                   ErrorF&&) {
+        {
+            std::scoped_lock<std::mutex> const lock{shared->mutex};
+            shared->scriptFile = connection.scriptFile;
+        }
         ++shared->constructions;
         if(!shared->deadAcrossConnects) { shared->apDead = false; }
         if(shared->recoveryAtUs != 0 && shared->connectAfterRecoveryUs == 0) {
@@ -676,6 +682,8 @@ struct Setup {
     std::function<void(std::uint32_t, std::uint32_t, std::uint32_t)> unreadBoots{};
     ImageExtras                                                      image{};
     uc_log::printer::ReaderOptions                                   options{};
+    // ReaderConnection's J-Link script
+    std::string scriptFile{};
 };
 
 // The reader on the fake transport (Scenario's), constructed in this one place; what it says goes into `into`.
@@ -699,7 +707,11 @@ inline std::unique_ptr<Reader> makeReader(Collected& into,
                                        .decodeGate     = std::move(extras.decodeGate),
                                        .onSessionStart = std::move(extras.onSessionStart)};
     return std::make_unique<Reader>(
-      uc_log::printer::ReaderConnection{.host = "", .device = "fake", .speed = 4000, .probe = ""},
+      uc_log::printer::ReaderConnection{.host       = "",
+                                        .device     = "fake",
+                                        .speed      = 4000,
+                                        .probe      = "",
+                                        .scriptFile = std::move(setup.scriptFile)},
       uc_log::printer::ReaderSink{
         .messages = into.log,
         .entry =

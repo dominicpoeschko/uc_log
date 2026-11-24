@@ -24,6 +24,8 @@ target_add_uc_log_rtt_jlink(
     192.0.2.7
     JLINK_PROBE
     "probe a"
+    JLINK_SCRIPT_FILE
+    /keys/target.JLinkScript
     MAP_FILE
     app.map
     HEX_FILE
@@ -54,7 +56,10 @@ target_add_uc_log_rtt_jlink(
     "0x10000000,0x04000000"
     RAM_IMAGE
     LOG_FILTER
-    /src/uc_log_filter.txt)
+    /src/uc_log_filter.txt
+    RTT_VIA_DLL
+    STALL_FIRST_STEP
+    2)
 
 add_custom_target(required_only)
 target_add_uc_log_rtt_jlink(required_only TARGET_MPU ATSAMD21G18A)
@@ -69,11 +74,15 @@ target_add_uc_log_rtt_jlink(
     ""
     JLINK_PROBE
     ""
+    JLINK_SCRIPT_FILE
+    ""
     FLASH_UNCACHED_OFFSET
     0
     PARK_SIGNATURE
     ""
     LOG_FILTER
+    ""
+    STALL_FIRST_STEP
     "")
 
 # NO_LOG (an image that logs nothing): the printer arguments as for any image, but no log_<target>. Checked with the

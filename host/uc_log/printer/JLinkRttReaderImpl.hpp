@@ -275,6 +275,7 @@ BasicJLinkRttReader<TransportT>::BasicJLinkRttReader(uc_log::printer::ReaderConn
   , device{std::move(connection.device)}
   , speed{connection.speed}
   , probe{std::move(connection.probe)}
+  , scriptFile{std::move(connection.scriptFile)}
   , sink_{std::move(sink)}
   , imageSource{std::move(image)}
   , readerOptions{std::move(options)}
@@ -535,7 +536,7 @@ auto BasicJLinkRttReader<TransportT>::run(std::stop_token const& stoken) -> void
             TransportT jlink{
               device,
               speed,
-              typename TransportT::Connection{host, 19020, probe},
+              typename TransportT::Connection{host, 19020, probe, scriptFile},
               [this](std::string_view m) { sayTool(m); },
               [this](std::string_view m) { sayToolError(m); }
             };

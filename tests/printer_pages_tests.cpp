@@ -85,10 +85,16 @@ PrinterFacts facts() {
 
 void settingsRows() {
     LogColumns columns;
-    columns.module = true;
-    auto const b   = settingsForm(facts(), columns);
+    columns.module               = true;
+    columns.text.typenameMarkers = true;
+    auto const b                 = settingsForm(facts(), columns);
     CHECK(has(b, "✔ host time") && has(b, "✔ module") && has(b, "✘ function"),
           "the columns as switches");
+    CHECK(has(b, "✘ metric markers") && has(b, "✔ typenames"), "the message's markers as switches");
+    auto const typenames = actionOf(b, "typenames");
+    CHECK(typenames && std::get_if<action::Run>(&*typenames) != nullptr
+            && std::get<action::Run>(*typenames).command == Command::toggleTypenames,
+          "a marker's switch runs its command");
     CHECK(has(b, "cannot write /logs/a.rttlog") && has(b, "◉ unix sockets")
             && has(b, "exposed: a duplex port"),
           "the log file's error, the transport, a bind address that is not loopback");

@@ -6,7 +6,8 @@
 //   CHECKF(cond, format, ...)   the same with a printf message
 //   uc_log::test::run(argc, argv, {{"name", fn}, ...})   runs the cases (all, or those named by --case), prints one
 //                               summary line and returns the exit code; a span of cases works the same (a main that
-//                               joins several files' tables: rtt_reader/rtt_reader_tests.cpp)
+//                               joins several files' tables: rtt_reader/rtt_reader_tests.cpp); --screens sets
+//                               printScreens
 //   uc_log::test::report()      the summary line and exit code alone, for a test whose main is one script
 //   uc_log::test::need(opt, what)  the value of an optional the test needs to go on; an empty one throws, which ends
 //                               the case as failed (run() catches it)
@@ -29,7 +30,10 @@
 
 namespace uc_log::test {
 inline std::atomic<int> failures{0};
-inline std::atomic<int> checks{0};
+/// run()'s --screens: a window test prints every screen a check reads (support/RtxWindow.hpp) - what a failing
+/// check saw
+inline std::atomic<bool> printScreens{false};
+inline std::atomic<int>  checks{0};
 
 inline void fail(char const* file,
                  int         line,
@@ -131,6 +135,10 @@ inline int run(int                   argc,
             std::printf("ALL OK (%zu cases registered)\n", cases.size());
             return 0;
         }
+        if(arg == "--screens") {
+            printScreens = true;
+            continue;
+        }
         if(arg == "--case" && i + 1 < argc) {
             std::string_view const name = argAt(++i);
             if(!known(name)) {
@@ -145,8 +153,8 @@ inline int run(int                   argc,
             continue;
         }
         std::printf(
-          "unknown argument '%.*s'; arguments: [--case <name>]... | --list | --expect-cases "
-          "<name>...\n",
+          "unknown argument '%.*s'; arguments: [--case <name>]... [--screens] | --list | "
+          "--expect-cases <name>...\n",
           static_cast<int>(arg.size()),
           arg.data());
         return 2;

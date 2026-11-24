@@ -278,6 +278,27 @@ void settingsPage() {
           "a click on a choice answers with it");
 }
 
+// the settings' marker switches reach the log: the whole way from a click to the shown line
+void markerSwitches() {
+    Window w{0};
+    w.resize(140, 40);
+    w.add("got @TYPENAME(Foo) @METRIC(adc::vin[V]=3)");
+    w.frame();
+    w.screen->input("");
+    CHECK(contains(w.text(), "got  3 V") && !contains(w.text(), "Foo")
+            && !contains(w.text(), "@METRIC"),
+          "by default: the metric as value and unit, the typename hidden");
+    w.screen->input("4");
+    CHECK(clickText(w, "✘ typenames") && w.app->log->columns().text.typenameMarkers,
+          "a click on typenames sets it");
+    CHECK(clickText(w, "✘ metric markers") && w.app->log->columns().text.metricMarkers,
+          "a click on metric markers sets it");
+    w.screen->input("\x1b");
+    w.screen->input("");
+    CHECK(contains(w.text(), "got Foo @METRIC(adc::vin[V]=3)"),
+          "both on: the typename shown, the metric as written");
+}
+
 void debuggerPage() {
     Window w{10};
     w.resize(140, 40);
@@ -382,6 +403,7 @@ int main(int    argc,
                                { "metricsWindowGrows",  metricsWindowGrows},
                                {"metricsTableScrolls", metricsTableScrolls},
                                {       "settingsPage",        settingsPage},
+                               {     "markerSwitches",      markerSwitches},
                                {       "debuggerPage",        debuggerPage},
                                {         "healthPage",          healthPage},
                                {       "inspectPages",        inspectPages}

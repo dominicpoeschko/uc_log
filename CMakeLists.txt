@@ -201,7 +201,7 @@ if(UC_LOG_BUILD_PRINTER)
             GIT_REPOSITORY
             https://github.com/ArthurSonzogni/RTXUI
             GIT_TAG
-            v0.1.4
+            v0.1.5
             GIT_BRANCH
             main)
         # RTXUI's own sources, not ours: always optimised, whatever the tree's build type - cmake_helpers clears

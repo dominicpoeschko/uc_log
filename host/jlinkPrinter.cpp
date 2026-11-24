@@ -12,7 +12,6 @@
 #include "uc_log/printer/ControlEvents.hpp"
 #include "uc_log/printer/ControlServer.hpp"
 #include "uc_log/printer/DuplexChannelServer.hpp"
-#include "uc_log/printer/Environment.hpp"
 #include "uc_log/printer/FirmwareCheck.hpp"
 #include "uc_log/printer/HexImage.hpp"
 #include "uc_log/printer/HexToken.hpp"
@@ -32,6 +31,7 @@
 #include "uc_log/printer/RttChannelMap.hpp"
 #include "uc_log/printer/SeggerTerms.hpp"
 #include "uc_log/printer/SocketSession.hpp"
+#include "uc_log/printer/StopSignals.hpp"
 #include "uc_log/printer/TargetLoss.hpp"
 #include "uc_log/printer/TimeDelayedQueue.hpp"
 #include "uc_log/printer/metric_utils.hpp"
@@ -197,7 +197,10 @@ void armExitDeadline() {
 
 int main(int    argc,
          char** argv) {
-    auto const opts = uc_log::printer::parseOptions(argc, argv);
+    // first, before any thread starts: every thread inherits the block, so SIGINT, SIGTERM and SIGHUP only ask the
+    // printer to end its session (printer/StopSignals.hpp) instead of killing it
+    uc_log::printer::StopSignals stopSignals;
+    auto const                   opts = uc_log::printer::parseOptions(argc, argv);
     if(!opts) { return 1; }
     auto const& o         = *opts;
     auto const  startedUs = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -209,7 +212,12 @@ int main(int    argc,
     // headless (--disable_ui): no window, the messages on stderr
     messages.setEcho(o.disableUi);
     std::unique_ptr<uc_log::printer::rtx::Gui> gui;
-    if(!o.disableUi) { gui = std::make_unique<uc_log::printer::rtx::Gui>(model); }
+    if(!o.disableUi) {
+        gui = std::make_unique<uc_log::printer::rtx::Gui>(
+          model,
+          uc_log::printer::rtx::WindowOptions{.frameInterval = o.uiFrameInterval,
+                                              .stats         = o.uiStats});
+    }
     if(auto const table = loadLogFilter(messages, o.logFilterFile); table && gui) {
         gui->setCompiledFilter(*table);
     }
@@ -356,28 +364,26 @@ int main(int    argc,
                                                  .flashReady       = o.flashReady,
                                                  .flashWindow      = o.flashWindow,
                                                  .beforeConnect    = termsAcceptor(messages)};
-    // UC_LOG_RTT_VIA_DLL=1: RTT through the J-Link DLL's own RTT - the max-throughput mode, with its known weaknesses
-    // (a session end drops the DLL's unread bytes unannounced; an unannounced reset can replay); see --help
-    if(auto const* via = uc_log::printer::environment("UC_LOG_RTT_VIA_DLL");
-       via != nullptr && std::string_view{via} == "1")
-    {
+    // --jlink_script_file: said once by its path, never by what it holds (it can carry a debug key)
+    if(!o.jlinkScriptFile.empty()) {
+        messages.tool(
+          fmt::format("the J-Link runs the script {} at every connect", o.jlinkScriptFile));
+    }
+    // --rtt_via_dll: the max-throughput mode, with its known weaknesses (a session end drops the DLL's unread bytes
+    // unannounced; an unannounced reset can replay); see --help
+    if(o.rttViaDll) {
         readerOptions.directRtt = false;
         messages.tool(
-          "UC_LOG_RTT_VIA_DLL=1: RTT through the J-Link DLL (max throughput; a stop or reset can "
-          "drop "
-          "or repeat lines without a message)");
+          "--rtt_via_dll: RTT through the J-Link DLL (max throughput; a stop or reset can "
+          "drop or repeat lines without a message)");
     }
-    // UC_LOG_STALL_FIRST_STEP=2|3: a test switch - a stall starts the recovery ladder at that step (2: SYSRESETREQ in the
-    // session, 3: the reset line), so the later steps can be checked on a board without a stall that outlasts step 1
-    if(auto const* step = uc_log::printer::environment("UC_LOG_STALL_FIRST_STEP");
-       step != nullptr && (std::string_view{step} == "2" || std::string_view{step} == "3"))
-    {
-        readerOptions.stallFirstStep = step[0] - '0';
-        messages.tool(
-          fmt::format("UC_LOG_STALL_FIRST_STEP={}: a stall starts the recovery ladder at step {} "
-                      "(a test switch)",
-                      step,
-                      step));
+    // --stall_first_step 2|3: a test switch, see --help
+    if(o.stallFirstStep != 1) {
+        readerOptions.stallFirstStep = o.stallFirstStep;
+        messages.tool(fmt::format(
+          "--stall_first_step {}: a stall starts the recovery ladder at step {} (a test switch)",
+          o.stallFirstStep,
+          o.stallFirstStep));
     }
     uc_log::printer::ReaderSink readerSink{
       .messages = messages,
@@ -488,10 +494,11 @@ int main(int    argc,
                      std::size_t n) { duplexHub.consumeFromClient(ordinal, n); }};
 
     JLinkRttReader rttReader{
-      uc_log::printer::ReaderConnection{.host   = o.host,
-                                        .device = o.device,
-                                        .speed  = o.speed,
-                                        .probe  = o.probe},
+      uc_log::printer::ReaderConnection{.host       = o.host,
+                                        .device     = o.device,
+                                        .speed      = o.speed,
+                                        .probe      = o.probe,
+                                        .scriptFile = o.jlinkScriptFile},
       std::move(readerSink),
       std::move(image),
       std::move(readerOptions),
@@ -533,17 +540,30 @@ int main(int    argc,
         if(controlServer) { controlServer->clearTarget(); }
     }};
 
+    auto const sayStop = [&messages](int signal) {
+        messages.tool(fmt::format("{}: ending the session",
+                                  signal == SIGINT    ? "SIGINT"
+                                  : signal == SIGTERM ? "SIGTERM"
+                                                      : "SIGHUP"));
+    };
     if(!o.disableUi) {
         gui->setMapSource([&mapFacts] { return mapFacts.get()->map; });
+        gui->setStopRequest([&stopSignals, &sayStop] {
+            auto const signal = stopSignals.poll();
+            if(signal) { sayStop(*signal); }
+            return signal.has_value();
+        });
         auto const result = gui->run(rttReader, o.buildCommand, o.host, o.probe);
         armExitDeadline();
         return result;
     }
-    static std::atomic<bool> shutdownRequested{false};
-    std::signal(SIGINT, [](int signal) {
-        if(signal == SIGINT) { shutdownRequested = true; }
-    });
-    while(!shutdownRequested) { std::this_thread::sleep_for(std::chrono::milliseconds(100)); }
+    for(;;) {
+        if(auto const signal = stopSignals.poll(); signal) {
+            sayStop(*signal);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
     armExitDeadline();
     return 0;
 }

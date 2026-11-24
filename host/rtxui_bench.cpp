@@ -1,18 +1,19 @@
-// uc_log_rtxui_bench [width height lines-per-frame frames]: what a frame of the RTXUI window costs, without a
-// terminal - the real App over a real EntryStore on RTXUI's mock terminal device, the digest (bound state compared,
-// templates rendered) and the draw (layout, paint, the diff written) timed apart. Medians of the frames; wall-clock
-// numbers for a person to read, never a test's verdict. BENCH_DEMO_LINES=1: the demo's lines (a metric in three of
-// four); BENCH_METRICS=1: with the metrics panel open (its list and plot made every frame).
+// uc_log_rtxui_bench [--demo_lines] [--metrics] [width height lines-per-frame frames]: what a frame of the RTXUI window
+// costs, without a terminal - the real App over a real EntryStore on RTXUI's mock terminal device, the digest (bound
+// state compared, templates rendered) and the draw (layout, paint, the diff written) timed apart. Medians of the
+// frames; wall-clock numbers for a person to read, never a test's verdict. --demo_lines: the demo's lines (a metric in
+// three of four); --metrics: with the metrics panel open (its list and plot made every frame).
 
 #include "rtxui/terminal/screen_internal.hpp"
 #include "rtxui/terminal/terminal_device.hpp"
 #include "uc_log/printer/EntryStore.hpp"
-#include "uc_log/printer/Environment.hpp"
 #include "uc_log/printer/LogEntry.hpp"
+#include "uc_log/printer/ProgramArgs.hpp"
 #include "uc_log/printer/StatusBadges.hpp"
 #include "uc_log/printer/rtx/App.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -55,8 +56,9 @@ uc_log::printer::LogEntry demoEntry(std::size_t i) {
     return e;
 }
 
-uc_log::printer::LogEntry entry(std::size_t i) {
-    if(uc_log::printer::environment("BENCH_DEMO_LINES") != nullptr) { return demoEntry(i); }
+uc_log::printer::LogEntry entry(std::size_t i,
+                                bool        demoLines) {
+    if(demoLines) { return demoEntry(i); }
     static constexpr std::string_view words[] = {"i2c",
                                                  "transfer",
                                                  "done",
@@ -85,33 +87,44 @@ uc_log::printer::LogEntry entry(std::size_t i) {
     return e;
 }
 
-std::size_t argOr(int         argc,
-                  char**      argv,
-                  int         i,
-                  std::size_t fallback) {
-    return i < argc ? static_cast<std::size_t>(std::strtoull(*std::next(argv, i), nullptr, 10))
-                    : fallback;
+constexpr std::array<std::string_view, 2> flagOptions{"demo_lines", "metrics"};
+
+std::size_t argOr(std::vector<std::string> const& positional,
+                  std::size_t                     i,
+                  std::size_t                     fallback) {
+    return i < positional.size()
+           ? static_cast<std::size_t>(std::strtoull(positional[i].c_str(), nullptr, 10))
+           : fallback;
 }
 
 }   // namespace
 
 int main(int    argc,
          char** argv) {
-    auto const width    = static_cast<int>(argOr(argc, argv, 1, 200));
-    auto const height   = static_cast<int>(argOr(argc, argv, 2, 60));
-    auto const perFrame = argOr(argc, argv, 3, 1000);
-    auto const frames   = argOr(argc, argv, 4, 200);
+    auto const parsed = uc_log::printer::parseProgramArgs(argc, argv, {}, flagOptions);
+    if(!parsed) {
+        std::fprintf(stderr, "uc_log_rtxui_bench: %s\n", parsed.error().c_str());
+        return 2;
+    }
+    auto const& positional = parsed->positional;
+    bool const  demoLines  = parsed->flag("demo_lines");
+    auto const  width      = static_cast<int>(argOr(positional, 0, 200));
+    auto const  height     = static_cast<int>(argOr(positional, 1, 60));
+    auto const  perFrame   = argOr(positional, 2, 1000);
+    auto const  frames     = argOr(positional, 3, 200);
 
     uc_log::printer::EntryStore         store;
     uc_log::printer::EntryStore::Mirror mirror;
     std::size_t                         n = 0;
-    for(; n < 100'000; ++n) { store.addEntry(std::chrono::system_clock::now(), entry(n)); }
+    for(; n < 100'000; ++n) {
+        store.addEntry(std::chrono::system_clock::now(), entry(n, demoLines));
+    }
     store.refreshMirror(mirror);
 
     auto app
       = ::rtxui::Ref<uc_log::printer::rtx::App>::New(mirror, uc_log::printer::rtx::App::Hooks{});
     app->setSize(width, height);
-    if(uc_log::printer::environment("BENCH_METRICS") != nullptr) {
+    if(parsed->flag("metrics")) {
         app->setMetricSource(&store);
         app->run(uc_log::printer::Command::metrics);
     }
@@ -126,7 +139,7 @@ int main(int    argc,
     std::size_t                  bytes = 0;
     for(std::size_t f = 0; f < frames + 10; ++f) {
         for(std::size_t k = 0; k < perFrame; ++k, ++n) {
-            store.addEntry(std::chrono::system_clock::now(), entry(n));
+            store.addEntry(std::chrono::system_clock::now(), entry(n, demoLines));
         }
         auto const t0 = Clock::now();
         store.refreshMirror(mirror);

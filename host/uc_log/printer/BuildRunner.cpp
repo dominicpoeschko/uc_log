@@ -1,6 +1,7 @@
 #include "uc_log/printer/BuildRunner.hpp"
 
 #include "uc_log/detail/Lifetimebound.hpp"
+#include "uc_log/printer/StopSignals.hpp"
 
 #ifdef __GNUC__
     #pragma GCC diagnostic push
@@ -58,6 +59,21 @@
 #include <stdexcept>
 
 namespace uc_log::printer {
+
+namespace {
+    // boost.process's initializer for the child between fork and exec: the build without the printer's block of its
+    // stop signals (printer/StopSignals.hpp), so Ctrl-C, a kill and its pty's hang-up end it as any program
+    struct UnblockStopSignals {
+        template<typename Launcher,
+                 typename Path>
+        boost::system::error_code on_exec_setup(Launcher& /*launcher*/,
+                                                Path const& /*executable*/,
+                                                char const* const*& /*cmdLine*/) const {
+            StopSignals::unblockInChild();
+            return {};
+        }
+    };
+}   // namespace
 
 struct BuildRunner::Process {
     std::vector<std::string> originalBuildArguments;
@@ -234,7 +250,8 @@ void BuildRunner::execute() {
                   boost::process::v2::process_stdio{.in  = nullptr,
                                                     .out = stdoutPipe,
                                                     .err = stderrPipe},
-                  boost::process::process_environment{process->buildEnvironment}
+                  boost::process::process_environment{process->buildEnvironment},
+                  UnblockStopSignals{}
                 };
 
                 auto createRead = [this](auto& pipe   UC_LOG_LIFETIMEBOUND,

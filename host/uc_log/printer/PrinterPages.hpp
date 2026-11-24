@@ -1,7 +1,7 @@
 #pragma once
 
-// The printer's own pages of a window, for any front end: the settings (the columns, the log file, the sockets and the
-// duplex channels), the debugger (the link, the core, the reset type, the connection and the probes) and the session's
+// The printer's own pages of a window, for any front end: the settings (the columns, the metric and typename markers,
+// the log file, the sockets and the duplex channels), the debugger (the link, the core, the reset type, the connection and the probes) and the session's
 // statistics - as boxes of rows whose buttons carry a WindowAction (a PageForm). What they show is a PrinterFacts the
 // window took once in its frame and the window's own choices; nothing here reads a clock or talks to the printer.
 
@@ -88,8 +88,8 @@ namespace Detail {
     inline PanelPart path(std::string text) { return {RunKind::location, 0, {}, std::move(text)}; }
 }   // namespace Detail
 
-/// The settings: the log's columns, the log file, the transport, the bind address, the control socket, the duplex
-/// channels. A value to type is an Edit (the window asks in a dialog: Questions.hpp), a switch or a choice acts at
+/// The settings: the log's columns and its message's markers, the log file, the transport, the bind address, the
+/// control socket, the duplex channels. A value to type is an Edit (the window asks in a dialog: Questions.hpp), a switch or a choice acts at
 /// once.
 inline Page settingsForm(PrinterFacts const& f,
                          LogColumns const&   columns) {
@@ -105,6 +105,11 @@ inline Page settingsForm(PrinterFacts const& f,
     shown.push_back({p.check("location", columns.location, run(Command::toggleLocation)),
                      p.check("module", columns.module, run(Command::toggleModule)),
                      p.check("function", columns.function, run(Command::toggleFunction))});
+    // what the message itself shows: @METRIC(...) as written or "value unit", @TYPENAME(x) as x or hidden - the view,
+    // a copied line and the text export alike (LogColumns::text)
+    shown.push_back(
+      {p.check("metric markers", columns.text.metricMarkers, run(Command::toggleRawMetrics)),
+       p.check("typenames", columns.text.typenameMarkers, run(Command::toggleTypenames))});
 
     auto const& m = f.model;
     {

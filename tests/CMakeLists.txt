@@ -151,6 +151,7 @@ uc_log_add_test(
     overflowReported
     hostOffsetOutOfRange
     lostConnectionReconnects
+    scriptFileReachesEveryConnect
     restartedCountersAreNotAWrap
     stopDecodesHeldLines
     directReaderStopsBetweenRecords
@@ -172,6 +173,7 @@ uc_log_add_test(
     announcedReset
     lateAnswerDoesNotWriteNewBoot
     lateArming
+    aStopSignalEndsTheSession
     # recovery
     stallSaidAndRecovered
     stallWedgedFlash
@@ -247,8 +249,21 @@ uc_log_add_test(
     firmwareTreeLine
     defaults
     malformed
-    offsetAndRefusals)
+    offsetAndRefusals
+    jlinkScriptFile
+    switches)
 target_link_libraries(uc_log_test_options PRIVATE uc_log_printer_core)
+uc_log_add_test(
+    uc_log_test_program_args
+    program_args_tests.cpp
+    LINKS
+    printer
+    CASES
+    numbersFlagsPositional
+    refusals)
+uc_log_add_test(uc_log_test_printer_build printer_build_tests.cpp LINKS printer CASES
+                aBuildRunsWithoutTheStopSignalsBlocked)
+target_link_libraries(uc_log_test_printer_build PRIVATE uc_log_printer_core)
 
 # target_add_uc_log_rtt_jlink's <target>.printer_args against goldens (printer_args/: a fixture project that includes
 # cmake/RttJlink.cmake alone, no compiler). A deliberate change: the same command with -DUPDATE=ON writes the goldens.
@@ -369,6 +384,7 @@ uc_log_add_test(
     metricsWindowGrows
     metricsTableScrolls
     settingsPage
+    markerSwitches
     debuggerPage
     healthPage
     inspectPages)

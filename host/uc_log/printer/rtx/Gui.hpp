@@ -22,11 +22,18 @@ namespace uc_log::printer::rtx {
 
 class Window;
 
+/// How the window paces and reports itself: the printer's --ui_fps / --ui_stats, uc_log_gui_test's the same.
+struct WindowOptions {
+    std::chrono::microseconds frameInterval{};   // between frames; zero: the window's own pace
+    bool                      stats{};   // at quit: UI-thread CPU, frames, digests on stderr
+};
+
 class Gui {
 public:
     using MapSource = std::function<std::shared_ptr<MapSnapshot const>()>;
 
-    explicit Gui(PrinterModel& model UC_LOG_LIFETIMEBOUND);
+    Gui(PrinterModel& model UC_LOG_LIFETIMEBOUND,
+        WindowOptions       options);
     ~Gui();
     Gui(Gui const&)            = delete;
     Gui& operator=(Gui const&) = delete;
@@ -38,6 +45,9 @@ public:
     /// Before run(): the firmware's compile-time filter, the map the inspector reads.
     void setCompiledFilter(uc_log::Detail::FilterTable const& table);
     void setMapSource(MapSource source);
+    /// Before run(): asked on the window's thread every 200 ms; true quits the window as its quit key does (a stop
+    /// signal, printer/StopSignals.hpp).
+    void setStopRequest(std::function<bool()> stopRequested);
 
     /// Something the window shows changed outside the store and the model's messages. From any thread.
     void triggerRedraw();

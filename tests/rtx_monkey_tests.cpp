@@ -67,16 +67,17 @@ public:
       : w_{w}
       , gen_{seed} {}
 
-    // `steps` things done, the target going on between them; how many times the window drew
+    // `steps` things done, the target going on between them; how many times the window drew. The new line and badges
+    // come first, so the input that follows draws them with what it did (an input settles: support/RtxWindow.hpp) -
+    // one draw a step, not two; a step that sent nothing draws on an empty input.
     std::size_t run(std::size_t steps) {
         std::size_t drawn = 0;
         for(std::size_t i = 0; i < steps; ++i) {
             feed(i);
-            act();
+            w_.frame(i % 7 == 0 ? 3 : 0);
+            if(!act()) { w_.screen->input(""); }
             // a question that would write a file (the filter saved under a typed name): closed, not answered
             if(w_.app->asking() == Field::saveFilter) { w_.screen->input("\x1b"); }
-            w_.frame(i % 7 == 0 ? 3 : 0);
-            w_.screen->input("");   // drawn
             ++drawn;
         }
         return drawn;
@@ -105,7 +106,8 @@ private:
                at);
     }
 
-    void act() {
+    // false: nothing sent (a resize that did not come)
+    bool act() {
         int const x = pick(width_);
         int const y = pick(height_);
         switch(pick(12)) {
@@ -130,7 +132,7 @@ private:
         case 10:
             {
                 // a new size now and then: the page's rows grow and shrink under what it showed
-                if(pick(4) != 0) { break; }
+                if(pick(4) != 0) { return false; }
                 auto const [wd, ht] = sizes[static_cast<std::size_t>(pick(sizes.size()))];
                 width_              = wd;
                 height_             = ht;
@@ -139,6 +141,7 @@ private:
             }
         default: w_.screen->input(sgrMouse(35, x, y)); break;   // a move: hover
         }
+        return true;
     }
 };
 

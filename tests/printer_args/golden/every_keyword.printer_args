@@ -12,6 +12,8 @@ every_keyword_string_constants.json
 192.0.2.7
 --probe
 probe a
+--jlink_script_file
+/keys/target.JLinkScript
 --pre_reset_command
 w4 0x4001A004 0x01000000
 --pre_reset_command
@@ -33,3 +35,6 @@ w4 0x400d8020 0x00000001
 --ram_image
 --log_filter
 /src/uc_log_filter.txt
+--rtt_via_dll
+--stall_first_step
+2

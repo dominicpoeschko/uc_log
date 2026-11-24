@@ -30,6 +30,8 @@ function(target_add_uc_log_rtt_jlink targetname)
         # the network J-Link's address, or a probe by serial number or nickname
         "JLINK_IP --host value"
         "JLINK_PROBE --probe value"
+        # a J-Link script the DLL runs at every connect (e.g. one whose InitTarget() opens a chip locked by a debug key)
+        "JLINK_SCRIPT_FILE --jlink_script_file value"
         # `w4 <address> <value>` lines written before every reset and download (e.g. RP core 1 parking)
         "PRE_RESET_COMMANDS --pre_reset_command list"
         # <offset>: the firmware check reads the flash through its uncached alias (address + offset)
@@ -50,7 +52,11 @@ function(target_add_uc_log_rtt_jlink targetname)
         # table instead of resetting into the boot ROM
         "RAM_IMAGE --ram_image flag"
         # the compile-time log filter the firmware was built with (LogFilter.hpp), for the printer to show
-        "LOG_FILTER --log_filter value")
+        "LOG_FILTER --log_filter value"
+        # RTT through the J-Link DLL's own RTT: the max-throughput mode, which can drop or repeat lines unannounced
+        "RTT_VIA_DLL --rtt_via_dll flag"
+        # 1|2|3, a test switch: a stall starts the recovery ladder at this step
+        "STALL_FIRST_STEP --stall_first_step value")
 
     set(options VERBOSE NO_LOG)
     set(oneValueArgs

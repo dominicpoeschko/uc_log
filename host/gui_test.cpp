@@ -1,9 +1,9 @@
 #include "uc_log/printer/rtx/Gui.hpp"
 
 #include "support/FakeTargetPort.hpp"
-#include "uc_log/printer/Environment.hpp"
 #include "uc_log/printer/LogEntry.hpp"
 #include "uc_log/printer/PrinterModel.hpp"
+#include "uc_log/printer/ProgramArgs.hpp"
 #include "uc_log/printer/TargetOp.hpp"
 
 #include <algorithm>
@@ -13,7 +13,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
+#include <cstdio>
 #include <expected>
 #include <functional>
 #include <mutex>
@@ -52,24 +52,28 @@ constexpr std::array moduleNames{""sv,
                                  "myapp.regulator"sv};
 
 namespace {
-// GUI_TEST_MODULES=<n>: n modules in a tree (areas of ten parts) instead of the few above - a filter with many
-std::size_t manyModules() {
-    static std::size_t const n = [] {
-        char const* const env = uc_log::printer::environment("GUI_TEST_MODULES");
-        return env == nullptr ? std::size_t{0}
-                              : static_cast<std::size_t>(std::strtoul(env, nullptr, 10));
-    }();
-    return n;
-}
+// uc_log_gui_test's command line, every option left out by default:
+//   --modules <n>      n modules in a tree (areas of ten parts) instead of the few above - a filter with many
+//   --metrics <n>      n metrics in groups of ten (group0::m0 ...), each its own frequency and unit, instead of the
+//                      demo's - a metrics page with many series
+//   --seed <n>         the same entries on every run
+//   --frozen <rounds>  after the preload only that many rounds of the loop, without its pause, then nothing more - with
+//                      --seed, a capture of each tab repeats
+//   --preload <n>      n entries bulk-loaded as fast as possible (filter/scroll on a large log); with --metrics each
+//                      line carries a value of the metrics in turn - a window that has run for hours
+//   --rate <lines/s>   a flood instead of the slow stream, in batches every 10 ms - how the window keeps up
+//   --format_errors    a format error every 2 s
+//   --ui_fps <n>, --ui_stats: the window's pace and its report at quit, as uc_log_printer's
+constexpr std::array<std::string_view, 7>
+  numberOptions{"modules", "metrics", "seed", "frozen", "preload", "rate", "ui_fps"};
+constexpr std::array<std::string_view, 2> flagOptions{"format_errors", "ui_stats"};
 
 using MetricFunction = std::pair<std::tuple<std::string, std::string, std::string>,
                                  std::function<double(std::chrono::duration<double>)>>;
 
-// GUI_TEST_METRICS=<n>: n metrics in groups of ten (group0::m0 ...), each its own frequency and unit, instead of the
-// three below - a metrics page with many series
-std::vector<MetricFunction> demoMetrics() {
-    char const* const env = uc_log::printer::environment("GUI_TEST_METRICS");
-    if(env == nullptr) {
+// --metrics <n>, or the few below
+std::vector<MetricFunction> demoMetrics(std::optional<std::uint64_t> count) {
+    if(!count) {
         return {
           {           {"foo", "sin", "V"},
            [](std::chrono::duration<double> t) { return std::sin(t.count()); }                            },
@@ -93,7 +97,7 @@ std::vector<MetricFunction> demoMetrics() {
         };
     }
     constexpr std::array        units{"V"sv, "A"sv, "W"sv, "Hz"sv, "B"sv};
-    auto const                  n = static_cast<std::size_t>(std::strtoul(env, nullptr, 10));
+    auto const                  n = static_cast<std::size_t>(*count);
     std::vector<MetricFunction> out;
     out.reserve(n);
     for(std::size_t i = 0; i != n; ++i) {
@@ -112,9 +116,11 @@ std::vector<MetricFunction> demoMetrics() {
 }
 }   // namespace
 
+// `many`: --modules, 0 = the few above
 template<typename Gen>
 void updateMessage(uc_log::printer::LogEntry& e,
-                   Gen&                       gen) {
+                   Gen&                       gen,
+                   std::size_t                many) {
     e.channel.channel = std::uniform_int_distribution<std::size_t>{0, 5}(gen);
     e.logLevel        = static_cast<uc_log::LogLevel>(std::uniform_int_distribution<std::uint8_t>{
       static_cast<std::uint8_t>(uc_log::LogLevel::trace),
@@ -123,7 +129,7 @@ void updateMessage(uc_log::printer::LogEntry& e,
     std::ranges::sample(logMessages, &e.logMsg, 1, gen);
     std::ranges::sample(functionNames, &e.functionName, 1, gen);
     std::ranges::sample(functionLines, &e.line, 1, gen);
-    if(auto const many = manyModules(); many != 0) {
+    if(many != 0) {
         auto const i = std::uniform_int_distribution<std::size_t>{0, many - 1}(gen);
         e.module     = "area" + std::to_string(i / 10) + ".part" + std::to_string(i % 10);
     } else {
@@ -145,12 +151,43 @@ void updateStatus(uc_log::printer::TargetPort::LinkStatus& status) {
 }   // namespace
 
 // uc_log_gui_test: the printer's window on a fake target (no probe, no memory) and made-up lines.
-int main() {
-    auto const metricFunctions = demoMetrics();
+int main(int    argc,
+         char** argv) {
+    auto const parsed = uc_log::printer::parseProgramArgs(argc, argv, numberOptions, flagOptions);
+    if(!parsed) {
+        std::fprintf(stderr,
+                     "uc_log_gui_test: %s (the options: host/gui_test.cpp)\n",
+                     parsed.error().c_str());
+        return 2;
+    }
+    auto const& args = *parsed;
+    if(!args.positional.empty()) {
+        std::fprintf(stderr, "uc_log_gui_test takes no positional argument\n");
+        return 2;
+    }
+    auto const fps = args.number("ui_fps").value_or(0);
+    if(fps > 1000) {
+        std::fprintf(stderr, "uc_log_gui_test: --ui_fps is 0..1000\n");
+        return 2;
+    }
+    auto const many            = static_cast<std::size_t>(args.number("modules").value_or(0));
+    auto const metricsCount    = args.number("metrics");
+    auto const metricFunctions = demoMetrics(metricsCount);
+    auto const seed            = args.number("seed");
+    auto const frozen          = args.number("frozen");
+    auto const preload         = args.number("preload");
+    auto const rate            = args.number("rate");
+    bool const formatErrors    = args.flag("format_errors");
 
     uc_log::printer::PrinterModel model{"127.0.0.1", 34565, 34600};
     auto&                         messageLog = model.messages();
-    uc_log::printer::rtx::Gui     gui{model};
+    uc_log::printer::rtx::Gui     gui{
+      model,
+      uc_log::printer::rtx::WindowOptions{.frameInterval
+                                          = fps == 0 ? std::chrono::microseconds{}
+                                                     : std::chrono::microseconds{1'000'000 / fps},
+                                          .stats = args.flag("ui_stats")}
+    };
 
     std::vector<std::string> messages;
     std::mutex               msgMutex;
@@ -175,31 +212,17 @@ int main() {
 
     auto addTime = std::chrono::milliseconds{100};
 
-    // GUI_TEST_SEED=<n>: the same entries on every run; GUI_TEST_FROZEN=<rounds>: after the preload only that many
-    // rounds of the loop below, without its pause, then nothing more - with both, a capture of each tab repeats
-    char const* const seed   = uc_log::printer::environment("GUI_TEST_SEED");
-    char const* const frozen = uc_log::printer::environment("GUI_TEST_FROZEN");
-
     std::jthread runner([&](std::stop_token const& stoken) {
         uc_log::printer::LogEntry e{0, ""};
         e.ucTime.time = std::chrono::nanoseconds{0};
-        std::mt19937 gen{seed != nullptr
-                           ? static_cast<std::uint32_t>(std::strtoul(seed, nullptr, 10))
-                           : std::random_device{}()};
+        std::mt19937 gen{seed ? static_cast<std::uint32_t>(*seed) : std::random_device{}()};
         std::size_t  loops{};
-        std::size_t  rounds{frozen != nullptr
-                              ? static_cast<std::size_t>(std::strtoull(frozen, nullptr, 10))
-                              : std::size_t{}};
+        std::size_t  rounds{frozen ? static_cast<std::size_t>(*frozen) : std::size_t{}};
 
-        // GUI_TEST_PRELOAD=1000000 bulk-loads entries as fast as possible to test
-        // filter/scroll performance on large logs; with GUI_TEST_METRICS each line carries a value of the metrics in
-        // turn - a window that has run for hours
-        if(char const* env = uc_log::printer::environment("GUI_TEST_PRELOAD")) {
-            auto const preload = static_cast<std::size_t>(std::strtoull(env, nullptr, 10));
-            bool const metered = uc_log::printer::environment("GUI_TEST_METRICS") != nullptr
-                              && !metricFunctions.empty();
-            for(std::size_t i = 0; i != preload && !stoken.stop_requested(); ++i) {
-                updateMessage(e, gen);
+        if(preload) {
+            bool const metered = metricsCount && !metricFunctions.empty();
+            for(std::size_t i = 0; i != *preload && !stoken.stop_requested(); ++i) {
+                updateMessage(e, gen, many);
                 if(metered) {
                     auto const& [meta, metricFunction]
                       = metricFunctions[i % metricFunctions.size()];
@@ -216,15 +239,12 @@ int main() {
             }
         }
 
-        // GUI_TEST_RATE=<lines/s>: a flood instead of the slow stream below, in batches every 10 ms - how the
-        // window keeps up
-        if(char const* env = uc_log::printer::environment("GUI_TEST_RATE")) {
-            auto const rate  = static_cast<std::size_t>(std::strtoull(env, nullptr, 10));
-            auto const batch = std::max<std::size_t>(1, rate / 100);
+        if(rate) {
+            auto const batch = std::max<std::size_t>(1, static_cast<std::size_t>(*rate / 100));
             auto       next  = std::chrono::steady_clock::now();
             while(!stoken.stop_requested()) {
                 for(std::size_t i = 0; i != batch; ++i) {
-                    updateMessage(e, gen);
+                    updateMessage(e, gen, many);
                     e.ucTime.time += std::chrono::microseconds{10};
                     gui.add(std::chrono::system_clock::now(), e);
                 }
@@ -236,14 +256,14 @@ int main() {
         }
 
         while(!stoken.stop_requested()) {
-            if(frozen != nullptr) {
+            if(frozen) {
                 if(rounds == 0) {
                     std::this_thread::sleep_for(addTime);
                     continue;
                 }
                 --rounds;
             }
-            updateMessage(e, gen);
+            updateMessage(e, gen, many);
             reader.updateLink(updateStatus);
             e.ucTime.time += addTime;
             gui.add(std::chrono::system_clock::now(), e);
@@ -274,16 +294,13 @@ int main() {
                 messageLog.fatal(msg);
             }
 
-            // GUI_TEST_FORMAT_ERRORS=1: a format error every 2 s
-            if(uc_log::printer::environment("GUI_TEST_FORMAT_ERRORS") != nullptr
-               && ++loops % 20 == 0)
-            {
+            if(formatErrors && ++loops % 20 == 0) {
                 messageLog.formatError(
                   "bad format for replacement field \"{:#06x}\": invalid format "
                   "specifier (gui_test)");
             }
 
-            if(frozen == nullptr) { std::this_thread::sleep_for(addTime); }
+            if(!frozen) { std::this_thread::sleep_for(addTime); }
         }
     });
 

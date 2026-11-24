@@ -2,7 +2,9 @@
 
 #include <array>
 #include <boost/asio/ip/address.hpp>
+#include <chrono>
 #include <exception>
+#include <filesystem>
 #include <fmt/format.h>
 #include <memory>
 #include <stdexcept>
@@ -204,6 +206,39 @@ namespace {
                 o.probe = own.as<std::string>();
                 return {};
             });
+        add("jlink_script_file",
+            "a J-Link script (JLinkExe's -JLinkScriptFile) the DLL runs at every connect, the "
+            "first and every reconnect: e.g. one whose InitTarget() opens a chip locked by a "
+            "debug key, which a reset or power cycle locks again. From the firmware tree "
+            "(target_add_uc_log_rtt_jlink JLINK_SCRIPT_FILE) or by hand",
+            Type::text,
+            "",
+            [](Value own, Result, PrinterOptions& o) -> std::string {
+                auto const& path = own.as<std::string>();
+                if(path.empty()) { return {}; }
+                // the DLL would only fail at the connect, every time again
+                std::error_code error;
+                if(!std::filesystem::is_regular_file(path, error)) {
+                    return fmt::format("--jlink_script_file {:?} is no file", path);
+                }
+                o.jlinkScriptFile = path;
+                return {};
+            });
+        add(
+          "rtt_via_dll",
+          "read RTT through the J-Link DLL's own RTT instead of the printer's reader: the probe's "
+          "full throughput (~10 % more at saturation), but a stop, reset or flash drops what the "
+          "DLL had read and not handed over, without a message, and after a reset nobody "
+          "announced old lines can arrive again - for rate measurements, not where every line "
+          "counts. Default: the printer's reader (every byte once, every loss announced). Ring "
+          "sizes and rates: uc_log README, \"RTT throughput, ring sizes\". From the firmware "
+          "tree (target_add_uc_log_rtt_jlink RTT_VIA_DLL)",
+          Type::flag,
+          nullptr,
+          [](Value own, Result, PrinterOptions& o) -> std::string {
+              o.rttViaDll = own.count() > 0;
+              return {};
+          });
         add("bind_address",
             "address the tcp servers (control + duplex) bind to; the duplex ports give raw "
             "unauthenticated access to the target, so anything but loopback exposes that to "
@@ -319,6 +354,21 @@ namespace {
                 }
                 return {};
             });
+        add("stall_first_step",
+            "1|2|3, a test switch: a stall starts the recovery ladder at this step (2: "
+            "SYSRESETREQ in the session, 3: the reset line), so the later steps can be checked on "
+            "a board without a stall that outlasts step 1. From the firmware tree "
+            "(target_add_uc_log_rtt_jlink STALL_FIRST_STEP)",
+            Type::u32,
+            "1",
+            [](Value own, Result, PrinterOptions& o) -> std::string {
+                auto const step = own.as<std::uint32_t>();
+                if(step < 1 || step > 3) {
+                    return fmt::format("--stall_first_step is 1, 2 or 3, not {}", step);
+                }
+                o.stallFirstStep = static_cast<int>(step);
+                return {};
+            });
         add("pre_reset_command",
             "J-Link Commander line written to the target before every reset and download, "
             "repeatable, in order; only 'w4 <address> <value>'. What a chip needs there (the "
@@ -358,6 +408,25 @@ namespace {
                 o.disableUi = own.count() > 0;
                 return {};
             });
+        add(
+          "ui_fps",
+          "frames per second of the window, 1..1000 (a measurement of the window); 0: its own pace",
+          Type::u32,
+          "0",
+          [](Value own, Result, PrinterOptions& o) -> std::string {
+              auto const fps = own.as<std::uint32_t>();
+              if(fps > 1000) { return fmt::format("--ui_fps is 0..1000, not {}", fps); }
+              if(fps != 0) { o.uiFrameInterval = std::chrono::microseconds{1'000'000 / fps}; }
+              return {};
+          });
+        add("ui_stats",
+            "at quit, say on stderr what the window cost: UI-thread CPU, wakes, frames, digests",
+            Type::flag,
+            nullptr,
+            [](Value own, Result, PrinterOptions& o) -> std::string {
+                o.uiStats = own.count() > 0;
+                return {};
+            });
         return rows;
     }
 }   // namespace
@@ -366,14 +435,7 @@ std::optional<PrinterOptions> parseOptions(int    argc,
                                            char** argv) {
     cxxopts::Options options(
       "uc_log_printer",
-      "Reads a target's uc_log RTT rings through a J-Link and shows the log.\nEnvironment: "
-      "UC_LOG_RTT_VIA_DLL=1 reads RTT through the J-Link DLL's own RTT instead of the printer's "
-      "reader -\n  the probe's full throughput (~10 % more at saturation), but a stop, reset or "
-      "flash drops what the DLL had read\n  and not handed over, without a message, and after a "
-      "reset nobody announced old lines can arrive again.\n  Default: the printer's reader (every "
-      "byte once, every loss announced). Ring sizes and rates: uc_log README,\n  \"RTT throughput, "
-      "ring sizes\".\nUC_LOG_STALL_FIRST_STEP=2|3 (a test switch) starts the stall recovery ladder "
-      "at that step.");
+      "Reads a target's uc_log RTT rings through a J-Link and shows the log.");
     auto const table = optionTable();
     auto       adder = options.add_options();
     for(auto const& option : table) { adder(option.name, option.help, valueOf(option)); }

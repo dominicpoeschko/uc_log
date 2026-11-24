@@ -5,8 +5,10 @@
 // support/FakeJLink.hpp.
 #include "support/Check.hpp"
 #include "support/FakeJLink.hpp"
+#include "uc_log/printer/StopSignals.hpp"
 
 #include <array>
+#include <csignal>
 
 namespace uc_log_test_rtt_reader::resets {
 
@@ -466,6 +468,43 @@ inline void lateArming() {
     }
 }
 
+// SIGINT, SIGTERM and SIGHUP end a session alike (printer/StopSignals.hpp, which main blocks them with and polls): the
+// signal waits, pending, until the main loop's poll takes it, main returns, and the reader on its way disarms the
+// announced-reset block and closes the J-Link - so the firmware's next reset does not wait for an ack nobody sends.
+// Before, SIGTERM and SIGHUP killed the printer outright: the block stayed armed, and the board's next reset waited
+// long enough for a short watchdog to reset the chip instead.
+inline void aStopSignalEndsTheSession() {
+    // the three by name, not StopSignals::signals: a signal left out there must fail here
+    for(int const signal : {SIGINT, SIGTERM, SIGHUP}) {
+        Scenario s;
+        auto&    shared = s.shared;
+        {
+            std::scoped_lock<std::mutex> const lock{shared.mutex};
+            shared.announce = {uc_log::printer::announced_reset::magicValue, 0, 0, 0};
+        }
+        ReaderUnderTest under{{.image = {.announcedReset = announceBlock}}};
+        auto const      armed = [&]() {
+            std::scoped_lock<std::mutex> const lock{shared.mutex};
+            return shared.announce[1] == uc_log::printer::announced_reset::hostArmed;
+        };
+        CHECK(waitFor(armed, 3000ms), "the session armed the block");
+        uc_log::printer::StopSignals stop;
+        CHECK(!stop.poll().has_value(), "nothing pending before the signal");
+        CHECK(std::raise(signal) == 0,
+              "raised");   // blocked: pending, not delivered - the process lives on
+        auto const taken = stop.poll();
+        CHECK(taken.has_value() && *taken == signal, "the main loop's poll takes the signal");
+        under.reader.reset();   // main returns: the reader goes, its session ends
+        {
+            std::scoped_lock<std::mutex> const lock{shared.mutex};
+            CHECK(shared.announce[1] == 0U,
+                  "the block disarmed: the firmware's next reset does not wait");
+        }
+        CHECK(under.said.anyToolContains("the session ends"), "the session's end said");
+        CHECK(under.said.anyToolContains("stopped jlink"), "the J-Link closed");
+    }
+}
+
 // the cases in their order (rtt_reader_tests.cpp runs every file's table; CMakeLists.txt CASES lists them)
 inline constexpr std::array cases{
   uc_log::test::Case{             "resetsAndFlashes",              resetsAndFlashes},
@@ -473,6 +512,7 @@ inline constexpr std::array cases{
   uc_log::test::Case{               "announcedReset",                announcedReset},
   uc_log::test::Case{"lateAnswerDoesNotWriteNewBoot", lateAnswerDoesNotWriteNewBoot},
   uc_log::test::Case{                   "lateArming",                    lateArming},
+  uc_log::test::Case{    "aStopSignalEndsTheSession",     aStopSignalEndsTheSession},
 };
 
 }   // namespace uc_log_test_rtt_reader::resets

@@ -113,6 +113,10 @@ void App::run(Command command) {
     case Command::toggleLocation:   columns.location = !columns.location; break;
     case Command::toggleModule:     columns.module = !columns.module; break;
     case Command::toggleFunction:   columns.function = !columns.function; break;
+    case Command::toggleRawMetrics: columns.text.metricMarkers = !columns.text.metricMarkers; break;
+    case Command::toggleTypenames:
+        columns.text.typenameMarkers = !columns.text.typenameMarkers;
+        break;
     case Command::clearMessages:
         if(hooks_.clearMessages) { hooks_.clearMessages(); }
         notify("messages and counts cleared");
